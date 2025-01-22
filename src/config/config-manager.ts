@@ -1,0 +1,276 @@
+import Joi from "joi";
+import {ethereumAddress, ethereumPrivateKey} from "../validations/custom.validation";
+import {PrivateKeySigner} from "../models/signer/private-key-signer";
+import {Signers} from "../models/signer/signers";
+import {Alerts} from "../models/alert/alerts";
+import {EmailAlertChannel} from "../models/alert/email-alert-channel";
+import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
+import {Network} from "../models/network";
+import {ethers} from "ethers";
+
+type Config = {
+  options: {
+    env: string;
+    port: string | number;
+    sentryDSN?: string;
+  };
+  signers: Array<{
+    id: string;
+    privateKey?: string;
+    awsKMS?: Record<string, unknown>;
+  }>;
+  alerts: Array<{
+    id: string;
+    channels: {
+      email?: {
+        smtpServer?: string;
+        smtpPort?: number;
+        webhook?: string;
+      };
+      sms?: {
+        twilioAPIKey?: string;
+        webhook?: string;
+      };
+    };
+  }>;
+  networks: {
+    [network: string]: {
+      enabled: boolean;
+      chainId: string | number;
+      jsonRpcEndpoint: string;
+      recoveryModuleAddress: string;
+      executeRecoveryRequests: {
+        enabled: boolean;
+        signer?: string;
+      };
+      finalizeRecoveryRequests: {
+        enabled: boolean;
+        signer?: string;
+      };
+      alerts?: string;
+    };
+  };
+};
+
+export class Configuration {
+  public environment!: string;
+  public port!: number;
+  public sentryDSN?: string;
+  private readonly config: Config;
+  private static _instance?: Configuration;
+
+  private constructor(config: Config) {
+    this.config = this.resolveEnvVariables(config);
+    this.initializeConfig();
+  }
+
+  public static instance(config?: Config): Configuration {
+    if (!Configuration._instance) {
+      if (!config) {
+        throw new Error("Configuration not initialized. Provide config on first use.");
+      }
+      Configuration._instance = new Configuration(config);
+    }
+    return Configuration._instance;
+  }
+
+  public getConfig(): Config {
+    return this.config;
+  }
+
+  private resolveEnvVariables(config: Config): Config {
+    const resolveValue = (value: unknown): unknown => {
+      if (typeof value === "string" && value.startsWith("ENV::")) {
+        const envVar = value.replace("ENV::", "");
+        const resolved = process.env[envVar];
+        if (!resolved) {
+          throw new Error(`Environment variable '${envVar}' is not set.`);
+        }
+        return resolved;
+      }
+      return value;
+    };
+
+    const deepResolve = (obj: any): any => {
+      if (typeof obj === "object" && obj !== null) {
+        for (const key in obj) {
+          obj[key] = deepResolve(obj[key]);
+        }
+      } else {
+        return resolveValue(obj);
+      }
+      return obj;
+    };
+
+    return deepResolve({ ...config });
+  }
+
+  private initializeConfig() {
+    this.initializeOptions(this.config.options);
+    this.initializeSigners(this.config.signers);
+    this.initializeAlerts(this.config.alerts);
+    this.initializeNetworks(this.config.networks);
+  }
+
+  private initializeOptions(options: Config["options"]) {
+    if (!options.env || !options.port) {
+      throw new Error("Options configuration is invalid. 'env' and 'port' are required.");
+    }
+    options.env = options.env.toLowerCase();
+    if (options.env !== "development" && options.env !== "production") {
+      throw new Error("Options.env must be either 'development' or 'production'");
+    }
+    const port = Number(options.port);
+    if (isNaN(port)) {
+      throw new Error("Port must be a valid number.");
+    }
+    if (options.sentryDSN){
+      this.sentryDSN = options.sentryDSN;
+    }
+    this.environment = options.env;
+    this.port = port;
+  }
+
+  private initializeSigners(signers: Config["signers"]) {
+    if (!signers || signers.length === 0) {
+      throw new Error("At least one signer must be provided.");
+    }
+
+    signers.forEach((signer, index) => {
+      if (!signer.id) {
+        throw new Error(`Signer at index ${index} must have an 'id'.`);
+      }
+      if (!signer.privateKey && !signer.awsKMS) {
+        throw new Error(`Signer '${signer.id}' must have either 'privateKey' or 'awsKMS' defined.`);
+      }
+
+      if (signer.privateKey && signer.awsKMS) {
+        throw new Error(`Signer '${signer.id}' cannot have both 'privateKey' and 'awsKMS' defined.`);
+      }
+
+      if (signer.privateKey){
+        const privateKeyValidation = Joi.required().custom(ethereumPrivateKey).validate(signer.privateKey);
+        if (privateKeyValidation.error){
+          throw new Error(`Signer '${signer.id}' has an invalid 'privateKey': ${privateKeyValidation.error.message}`);
+        }
+        const signerObject = new PrivateKeySigner(signer.id, signer.privateKey);
+        Signers.instance().addSigner(signerObject);
+      }
+
+      if (signer.awsKMS){
+        // todo validation and initialization
+      }
+
+    });
+  }
+
+  private initializeAlerts(alerts: Config["alerts"]) {
+    alerts.forEach((alert, index) => {
+      if (!alert.id) {
+        throw new Error(`Alert at index ${index} must have an 'id'.`);
+      }
+      const channels = alert.channels;
+      if (!channels.email && !channels.sms) {
+        throw new Error(`Alert '${alert.id}' must have at least one channel (email or sms).`);
+      }
+
+      if (channels.email) {
+        if (!channels.email.smtpServer && !channels.email.webhook) {
+          throw new Error(
+            `Email channel for alert '${alert.id}' must have either 'smtpServer' or 'webhook'.`
+          );
+        }
+        if (channels.email.smtpServer && channels.email.webhook) {
+          throw new Error(
+            `Email channel for alert '${alert.id}' cannot have both 'smtpServer' and 'webhook'.`
+          );
+        }
+        const emailAlertChannel = new EmailAlertChannel();
+        Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+      }
+
+      if (channels.sms) {
+        if (!channels.sms.twilioAPIKey && !channels.sms.webhook) {
+          throw new Error(
+            `SMS channel for alert '${alert.id}' must have either 'twilioAPIKey' or 'webhook'.`
+          );
+        }
+        if (channels.sms.twilioAPIKey && channels.sms.webhook) {
+          throw new Error(
+            `SMS channel for alert '${alert.id}' cannot have both 'twilioAPIKey' and 'webhook'.`
+          );
+        }
+        const emailAlertChannel = new SMSAlertChannel();
+        Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+      }
+    });
+  }
+
+  private initializeNetworks(networks: Config["networks"]) {
+    if (!networks || Object.keys(networks).length === 0) {
+      throw new Error("At least one network configuration must be provided.");
+    }
+    Object.entries(networks).forEach(([networkName, networkConfig]) => {
+      if (!networkConfig.enabled) return; // Skip disabled networks
+      const chainId = Number(networkConfig.chainId);
+      if (isNaN(chainId)) {
+        throw new Error(`Network '${networkName}' 'chainId' must be a valid number.`);
+      }
+      if (!networkConfig.jsonRpcEndpoint) {
+        throw new Error(`Network '${networkName}' must have a 'jsonRpcEndpoint'.`);
+      }
+      if (!networkConfig.recoveryModuleAddress) {
+        throw new Error(`Network '${networkName}' must have a 'recoveryModuleAddress'.`);
+      }
+      if (Joi.required().custom(ethereumAddress).validate(networkConfig.recoveryModuleAddress).error) {
+        throw new Error(`Network '${networkName}' must have a valid ethereum address for 'recoveryModuleAddress'.`);
+      }
+      //
+      if (networkConfig.executeRecoveryRequests.enabled && !networkConfig.executeRecoveryRequests.signer) {
+        throw new Error(
+          `Network '${networkName}' executeRecoveryRequests requires a 'signer' when enabled.`
+        );
+      }
+      if (networkConfig.executeRecoveryRequests.enabled) {
+        if (!Signers.instance().getSigner(networkConfig.executeRecoveryRequests.signer!)){
+          throw new Error(
+            `Network '${networkName}' executeRecoveryRequests.signer is not found in declared signers.`
+          );
+        }
+      }
+      //
+      if (networkConfig.finalizeRecoveryRequests.enabled && !networkConfig.finalizeRecoveryRequests.signer) {
+        throw new Error(
+          `Network '${networkName}' finalizeRecoveryRequests requires a 'signer' when enabled.`
+        );
+      }
+      if (networkConfig.finalizeRecoveryRequests.enabled) {
+        if (!Signers.instance().getSigner(networkConfig.finalizeRecoveryRequests.signer!)){
+          throw new Error(
+            `Network '${networkName}' finalizeRecoveryRequests.signer is not found in declared signers.`
+          );
+        }
+      }
+      //
+      if (networkConfig.alerts && networkConfig.alerts != "~") {
+        if (!Alerts.instance().getAlertChannels(networkConfig.alerts)){
+          throw new Error(
+            `Alerts for network '${networkName}' is not found in declared alerts.`
+          );
+        }
+      }
+      new Network(
+        networkName,
+        chainId,
+        networkConfig.recoveryModuleAddress,
+        new ethers.providers.JsonRpcProvider(networkConfig.jsonRpcEndpoint),
+        networkConfig.executeRecoveryRequests,
+        networkConfig.finalizeRecoveryRequests,
+        networkConfig.alerts == "~" ? undefined : networkConfig.alerts
+      );
+    });
+    if (Network.instances.instances.length === 0) {
+      throw new Error("At least one enabled network configuration must be provided.");
+    }
+  }
+}

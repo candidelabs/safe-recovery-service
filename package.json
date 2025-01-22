@@ -1,0 +1,53 @@
+{
+  "name": "@candidelabs/safe-recovery-service",
+  "version": "0.0.1",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "build:env": "./scripts/buildenv.sh",
+    "start": "bun run ./src/index.ts",
+    "dev": "bun --watch run ./src/index.ts",
+    "test": "jest",
+    "lint": "eslint . --ext .js,.ts && tsc --noEmit",
+    "lint:fix": "eslint . --ext .js,.ts --fix",
+    "prettier": "prettier --check '**'",
+    "prettier:fix": "prettier --write '**'"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.1",
+    "@sentry/node": "^8.50.0",
+    "@sentry/profiling-node": "^8.50.0",
+    "compression": "^1.7.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^5.6.9",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "http-status": "^2.1.0",
+    "joi": "^17.13.3",
+    "morgan": "^1.10.0",
+    "sugar": "^2.0.6",
+    "validator": "^13.12.0",
+    "winston": "^3.17.0",
+    "winston-transport-sentry-node": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.7.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/morgan": "^1.9.9",
+    "@types/node": "^22.10.7",
+    "@types/validator": "^13.12.2",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-unused-imports": "^4.1.4",
+    "jest": "^29.7.0",
+    "prettier": "^3.4.2",
+    "prisma": "^6.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
