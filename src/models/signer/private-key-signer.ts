@@ -1,22 +1,23 @@
 import {Signer} from "./signer";
+import {ethers} from "ethers";
 
 export class PrivateKeySigner extends Signer {
-  private privateKey: string;
+  private _signer: ethers.Wallet;
 
   constructor(id: string, privateKey: string) {
     super(id);
-    this.privateKey = privateKey;
+    this._signer = new ethers.Wallet(privateKey);
   }
 
-  signer(): string {
-    return "";
+  async signer(): Promise<string> {
+    return this._signer.address;
   }
 
-  sign(payload: string): string {
-    return "";
+  async sign(payload: string): Promise<string> {
+    return this._signer.signMessage(payload);
   }
 
-  healthCheck(): boolean {
-    return false;
+  async healthCheck(): Promise<boolean> {
+    return true;
   }
 }

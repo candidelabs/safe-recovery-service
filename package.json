@@ -14,8 +14,10 @@
     "prettier:fix": "prettier --write '**'"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.734.0",
     "@prisma/client": "^6.2.1",
     "@sentry/bun": "^8.51.0",
+    "asn1.js": "^5.4.1",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

@@ -8,16 +8,16 @@ export abstract class Signer {
   /**
    * Returns the address of the signer.
    */
-  abstract signer(): string;
+  abstract signer(): Promise<string>;
 
   /**
    * Signs the given payload and returns the signed result.
    * @param payload The payload to sign.
    */
-  abstract sign(payload: string): string;
+  abstract sign(payload: string): Promise<string>;
 
   /**
    * Performs a health check to determine if the signer is available.
    */
-  abstract healthCheck(): boolean;
+  abstract healthCheck(): Promise<boolean>;
 }
