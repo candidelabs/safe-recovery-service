@@ -1,13 +1,9 @@
 require('dotenv').config();
 import {Configuration} from "./config/config-manager";
-import { readFile } from "./utils/file";
-
-const rawConfig = readFile("config.json") as any;
-const configuration = Configuration.instance(rawConfig);
-/////////////////////////////////////////////////////////////////////////////
-import "./instrument";
 import "./utils/extensions/string.extensions"
-import express, { Express } from "express";
+import "./instrument";
+/////////////////////////////////////////////////////////////////////////////
+import express, { type Express } from "express";
 import helmet from "helmet";
 import compression from "compression";
 import cors from "cors";
@@ -16,7 +12,6 @@ import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
 import {ApiError, httpRequestErrorLogger, httpRequestSuccessLogger, logger} from "./utils";
 import { errorConverter, errorHandler } from "./middlewares";
-import * as Sentry from "@sentry/node";
 
 const app: Express = express();
 
@@ -63,8 +58,7 @@ app.use(errorConverter);
 // handle error
 app.use(errorHandler);
 
-Sentry.setupExpressErrorHandler(app);
-
+const configuration = Configuration.instance();
 app.listen(configuration.port, () => {
   logger.info(`Listening to port ${configuration.port}`);
 });

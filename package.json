@@ -5,8 +5,8 @@
   "main": "src/index.ts",
   "scripts": {
     "build:env": "./scripts/buildenv.sh",
-    "start": "bun run ./src/index.ts",
-    "dev": "bun --watch run ./src/index.ts",
+    "start": "bun ./src/index.ts",
+    "dev": "bun --watch ./src/index.ts",
     "test": "jest",
     "lint": "eslint . --ext .js,.ts && tsc --noEmit",
     "lint:fix": "eslint . --ext .js,.ts --fix",
@@ -15,8 +15,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",
-    "@sentry/node": "^8.50.0",
-    "@sentry/profiling-node": "^8.50.0",
+    "@sentry/bun": "^8.51.0",
     "compression": "^1.7.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -33,6 +32,7 @@
     "winston-transport-sentry-node": "^3.0.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.0",
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
