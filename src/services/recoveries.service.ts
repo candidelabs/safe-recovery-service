@@ -24,15 +24,14 @@ export const create = async (account: string, newOwners: string[], newThreshold:
     );
   }
   try {
-    const safeWallet = getSafeInstance(account, provider);
+    const safeWallet = getSafeInstance(account, network.jsonRPCProvider);
     await safeWallet.nonce();
   } catch (e) {
     throw new ApiError(
       httpStatus.BAD_REQUEST,
-      `Account address is not a smart contract account`
+      `Account address is not a safe smart contract account`
     );
   }
-
   const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
   const recoveryNonce: number = await socialRecoveryModule.nonce(account);
   const recoveryRequest = await prisma.recoveryRequest.create(
@@ -78,7 +77,7 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
     });
     if (!recoveryRequest) {
       throw new ApiError(
-        httpStatus.BAD_REQUEST,
+        httpStatus.NOT_FOUND,
         `Recovery request with id ${id} not found`
       );
     }
