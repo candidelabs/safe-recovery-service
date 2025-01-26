@@ -7,6 +7,7 @@ import {EmailAlertChannel} from "../models/alert/email-alert-channel";
 import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
+import {KMSSigner} from "../models/signer/kms-signer";
 
 type Config = {
   options: {
@@ -17,7 +18,12 @@ type Config = {
   signers: Array<{
     id: string;
     privateKey?: string;
-    awsKMS?: Record<string, unknown>;
+    awsKMS?: {
+      accessKeyId: string;
+      secretAccessKeyId: string;
+      region: string;
+      kmsKeyId: string;
+    };
   }>;
   alerts: Array<{
     id: string;
@@ -158,7 +164,17 @@ export class Configuration {
       }
 
       if (signer.awsKMS){
-        // todo validation and initialization
+        if (!signer.awsKMS.accessKeyId || !signer.awsKMS.secretAccessKeyId || !signer.awsKMS.region || !signer.awsKMS.kmsKeyId) {
+          throw new Error(`Signer '${signer.id}' must have all fields 'accessKeyId', 'secretAccessKeyId', 'region', and 'kmsKeyId' defined.`);
+        }
+        const signerObject = new KMSSigner(
+          signer.id,
+          signer.awsKMS.accessKeyId,
+          signer.awsKMS.secretAccessKeyId,
+          signer.awsKMS.region,
+          signer.awsKMS.kmsKeyId
+        );
+        Signers.instance().addSigner(signerObject);
       }
 
     });
