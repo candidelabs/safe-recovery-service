@@ -30,8 +30,17 @@
       "id": "alert-1",
       "channels": {
         "email": {
-          "smtpServer": "https://....com",
-          "smtpPort": 5000
+          "smtp": {
+            "from": "Test Labs <alert@testlabs.com>",
+            "host": "smtp.server.io",
+            "port": 465,
+            "secure": true,
+            "auth": {
+              "type": "login",
+              "user": "....",
+              "pass": "...."
+            }
+          }
         },
         "sms": {
           "twilioAPIKey": "x"

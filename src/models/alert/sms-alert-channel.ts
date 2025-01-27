@@ -5,10 +5,11 @@ export class SMSAlertChannel extends AlertChannel {
     super();
   }
 
-  sendMessage(target: string, header: string, body: string): void {
+  async sendMessage(target: string, header: string, body: string): Promise<boolean> {
+    return false;
   }
 
-  healthCheck(): boolean {
+  async healthCheck(): Promise<boolean> {
     return false;
   }
 }

@@ -3,7 +3,7 @@ import {ethereumAddress, ethereumPrivateKey} from "../validations/custom.validat
 import {PrivateKeySigner} from "../models/signer/private-key-signer";
 import {Signers} from "../models/signer/signers";
 import {Alerts} from "../models/alert/alerts";
-import {EmailAlertChannel} from "../models/alert/email-alert-channel";
+import {EmailAlertChannel, SmtpConfig} from "../models/alert/email-alert-channel";
 import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
@@ -29,8 +29,7 @@ type Config = {
     id: string;
     channels: {
       email?: {
-        smtpServer?: string;
-        smtpPort?: number;
+        smtp?: SmtpConfig;
         webhook?: string;
       };
       sms?: {
@@ -191,18 +190,45 @@ export class Configuration {
       }
 
       if (channels.email) {
-        if (!channels.email.smtpServer && !channels.email.webhook) {
+        if (!channels.email.smtp && !channels.email.webhook) {
           throw new Error(
             `Email channel for alert '${alert.id}' must have either 'smtpServer' or 'webhook'.`
           );
         }
-        if (channels.email.smtpServer && channels.email.webhook) {
+        if (channels.email.smtp && channels.email.webhook) {
           throw new Error(
-            `Email channel for alert '${alert.id}' cannot have both 'smtpServer' and 'webhook'.`
+            `Email channel for alert '${alert.id}' cannot have both 'smtp' and 'webhook' defined.`
           );
         }
-        const emailAlertChannel = new EmailAlertChannel();
-        Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+        if (channels.email.smtp){
+          const smtpPort = Number(channels.email.smtp.port);
+          if (isNaN(smtpPort)) {
+            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.port' as a valid number.`);
+          }
+          if (
+            !channels.email.smtp.from
+            || !channels.email.smtp.host
+            || !channels.email.smtp.auth
+            || !channels.email.smtp.auth.type
+            || !channels.email.smtp.auth.user
+          ) {
+            throw new Error(`Email channel for alert '${alert.id}' must have all fields 'smtp.from', 'smtp.host', 'smtp.auth', 'smtp.auth.type', and 'smtp.auth.user' defined.`);
+          }
+          if (channels.email.smtp.auth.type.toLowerCase() != 'oauth2' && channels.email.smtp.auth.type.toLowerCase() != 'login'){
+            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.auth.type' as either 'oauth2' or 'login'`);
+          }
+          if (channels.email.smtp.auth.type.toLowerCase() == 'oauth2' && !channels.email.smtp.auth.accessToken){
+            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.auth.accessToken' because type is defined as 'oauth2'`);
+          }
+          if (channels.email.smtp.auth.type.toLowerCase() == 'login' && !channels.email.smtp.auth.pass){
+            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.auth.pass' because type is defined as 'login'`);
+          }
+          const emailAlertChannel = new EmailAlertChannel(channels.email.smtp);
+          Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+        }
+        if (channels.email.webhook){
+          // todo
+        }
       }
 
       if (channels.sms) {

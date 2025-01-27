@@ -8,10 +8,10 @@ export abstract class AlertChannel {
    * @param header The message header or subject.
    * @param body The message body.
    */
-  abstract sendMessage(target: string, header: string, body: string): void;
+  abstract sendMessage(target: string, header: string, body: string): Promise<boolean>;
 
   /**
    * Performs a health check to determine if the alert channel is available.
    */
-  abstract healthCheck(): boolean;
+  abstract healthCheck(): Promise<boolean>;
 }
