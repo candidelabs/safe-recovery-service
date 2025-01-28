@@ -19,8 +19,8 @@ export class EmailAlertChannel extends AlertChannel {
   private smtpConfig: SmtpConfig;
   private transporter: Transporter;
 
-  constructor(smtpConfig: SmtpConfig) {
-    super();
+  constructor(alertId: string, smtpConfig: SmtpConfig) {
+    super(alertId);
     this.smtpConfig = smtpConfig;
     this.transporter = nodemailer.createTransport({
       // @ts-ignore
@@ -28,10 +28,10 @@ export class EmailAlertChannel extends AlertChannel {
       port: smtpConfig.port,
       secure: smtpConfig.secure,
       auth: {
-        // type: smtpConfig.auth.type,
+        type: smtpConfig.auth.type,
         user: smtpConfig.auth.user,
         pass: smtpConfig.auth.pass,
-        // accessToken: smtpConfig.auth.accessToken,
+        accessToken: smtpConfig.auth.accessToken,
       },
     });
   }
@@ -46,7 +46,7 @@ export class EmailAlertChannel extends AlertChannel {
       });
       return (info.accepted as string[]).length > 0;
     } catch (error) {
-      console.error("Error sending email:", error);
+      console.error(`Email Channel (${this.alertId}): error sending email, ${error}`);
       return false;
     }
   }
@@ -56,6 +56,7 @@ export class EmailAlertChannel extends AlertChannel {
       await this.transporter.verify();
       return true;
     } catch (error) {
+      console.error(`Email Channel (${this.alertId}): health check failed, ${error}`);
       return false;
     }
   }

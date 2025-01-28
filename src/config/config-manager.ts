@@ -223,7 +223,7 @@ export class Configuration {
           if (channels.email.smtp.auth.type.toLowerCase() == 'login' && !channels.email.smtp.auth.pass){
             throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.auth.pass' because type is defined as 'login'`);
           }
-          const emailAlertChannel = new EmailAlertChannel(channels.email.smtp);
+          const emailAlertChannel = new EmailAlertChannel(alert.id, channels.email.smtp);
           Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
         }
         if (channels.email.webhook){
@@ -242,8 +242,8 @@ export class Configuration {
             `SMS channel for alert '${alert.id}' cannot have both 'twilioAPIKey' and 'webhook'.`
           );
         }
-        const emailAlertChannel = new SMSAlertChannel();
-        Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+        const smsAlertChannel = new SMSAlertChannel(alert.id);
+        Alerts.instance().addAlertChannel(alert.id, smsAlertChannel);
       }
     });
   }

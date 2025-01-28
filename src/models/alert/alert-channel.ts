@@ -1,6 +1,9 @@
 export abstract class AlertChannel {
+  public alertId: string;
 
-  protected constructor() {}
+  protected constructor(alertId: string) {
+    this.alertId = alertId;
+  }
 
   /**
    * Sends a message to the target using the alert channel.
