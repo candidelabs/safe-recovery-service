@@ -8,6 +8,7 @@ import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
 import {KMSSigner} from "../models/signer/kms-signer";
+import {e164Regex} from "../utils";
 
 type Config = {
   options: {
@@ -33,7 +34,11 @@ type Config = {
         webhook?: string;
       };
       sms?: {
-        twilioAPIKey?: string;
+        twilio?: {
+          accountSid: string,
+          authToken: string,
+          fromNumber: string
+        };
         webhook?: string;
       };
     };
@@ -192,7 +197,7 @@ export class Configuration {
       if (channels.email) {
         if (!channels.email.smtp && !channels.email.webhook) {
           throw new Error(
-            `Email channel for alert '${alert.id}' must have either 'smtpServer' or 'webhook'.`
+            `Email channel for alert '${alert.id}' must have either 'smtp' or 'webhook'.`
           );
         }
         if (channels.email.smtp && channels.email.webhook) {
@@ -232,18 +237,35 @@ export class Configuration {
       }
 
       if (channels.sms) {
-        if (!channels.sms.twilioAPIKey && !channels.sms.webhook) {
+        if (!channels.sms.twilio && !channels.sms.webhook) {
           throw new Error(
-            `SMS channel for alert '${alert.id}' must have either 'twilioAPIKey' or 'webhook'.`
+            `SMS channel for alert '${alert.id}' must have either 'twilio' or 'webhook'.`
           );
         }
-        if (channels.sms.twilioAPIKey && channels.sms.webhook) {
+        if (channels.sms.twilio && channels.sms.webhook) {
           throw new Error(
-            `SMS channel for alert '${alert.id}' cannot have both 'twilioAPIKey' and 'webhook'.`
+            `SMS channel for alert '${alert.id}' cannot have both 'twilio' and 'webhook'.`
           );
         }
-        const smsAlertChannel = new SMSAlertChannel(alert.id);
-        Alerts.instance().addAlertChannel(alert.id, smsAlertChannel);
+        if (channels.sms.twilio){
+          if (
+            !channels.sms.twilio.accountSid
+            || !channels.sms.twilio.authToken
+            || !channels.sms.twilio.fromNumber
+          ) {
+            throw new Error(`SMS channel for alert '${alert.id}' must have all fields 'twilio.accountSid', 'twilio.authToken', and 'twilio.fromNumber' defined.`);
+          }
+          if (!e164Regex.test(channels.sms.twilio.fromNumber)){
+            throw new Error(`SMS channel for alert '${alert.id}' must have a valid 'twilio.fromNumber' value that follows E.164 format (https://www.twilio.com/docs/glossary/what-e164).`);
+          }
+          const smsAlertChannel = new SMSAlertChannel(
+            alert.id,
+            channels.sms.twilio.accountSid,
+            channels.sms.twilio.authToken,
+            channels.sms.twilio.fromNumber
+          );
+          Alerts.instance().addAlertChannel(alert.id, smsAlertChannel);
+        }
       }
     });
   }

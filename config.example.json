@@ -43,7 +43,11 @@
           }
         },
         "sms": {
-          "twilioAPIKey": "x"
+          "twilio": {
+            "accountSid": "....",
+            "authToken": "....",
+            "fromNumber": "..."
+          }
         }
       }
     },
