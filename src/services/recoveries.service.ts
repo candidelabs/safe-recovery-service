@@ -1,8 +1,6 @@
 import httpStatus from "http-status";
-import { ApiError, createEmojiSet } from "../utils";
-import {ethers} from "ethers";
-import {getSafeInstance, getSocialModuleInstance} from "../utils/contractSource";
-import { isValidSignature } from "../utils/valid_signature";
+import {BigNumber, ethers} from "ethers";
+import { isValidSignature, getSafeInstance, getSocialModuleInstance, ApiError, createEmojiSet } from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import { Prisma, RecoveryRequest } from "@prisma/client";
@@ -33,16 +31,16 @@ export const create = async (account: string, newOwners: string[], newThreshold:
     );
   }
   const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
-  const recoveryNonce: number = await socialRecoveryModule.nonce(account);
-  const recoveryRequest = await prisma.recoveryRequest.create(
+  const recoveryNonce: BigNumber = await socialRecoveryModule.nonce(account);
+  let recoveryRequest = await prisma.recoveryRequest.create(
     {
       data: {
         emoji: createEmojiSet(15, false),
         account: account.toLowerCase(),
         newOwners: newOwners.map(e => e.toLowerCase()),
-        newThreshold,
+        newThreshold: newThreshold,
         chainId,
-        nonce: recoveryNonce,
+        nonce: recoveryNonce.toBigInt(),
         signatures: [],
         executeTransactionHash: "",
         finalizeTransactionHash: "",
@@ -53,7 +51,7 @@ export const create = async (account: string, newOwners: string[], newThreshold:
   );
   try {
     await signRecoveryHash(recoveryRequest, signer, signature);
-    await prisma.recoveryRequest.update({
+    recoveryRequest = await prisma.recoveryRequest.update({
       data: {discoverable: true},
       where: {id: recoveryRequest.id}
     });
@@ -63,7 +61,7 @@ export const create = async (account: string, newOwners: string[], newThreshold:
     });
     throw e
   }
-  return
+  return recoveryRequest;
 };
 
 

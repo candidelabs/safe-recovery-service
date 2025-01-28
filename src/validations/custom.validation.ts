@@ -31,7 +31,7 @@ export const ethereumPrivateKey: Joi.CustomValidator = (value, helpers) => {
 };
 
 export const hexBigInt: Joi.CustomValidator = (value, helpers) => {
-  if (/^0x[0-9a-fA-F]+$/.test(value)) {
+  if (!/^0x[0-9a-fA-F]+$/.test(value)) {
     return helpers.message({
       custom: "{{#label}} must be a valid hexadecimal number",
     });

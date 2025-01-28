@@ -8,7 +8,7 @@ import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
 import {KMSSigner} from "../models/signer/kms-signer";
-import {e164Regex} from "../utils";
+import {e164Regex} from "../utils/utilities";
 
 type Config = {
   options: {
@@ -131,8 +131,8 @@ export class Configuration {
       throw new Error("Options.env must be either 'development' or 'production'");
     }
     const port = Number(options.port);
-    if (isNaN(port)) {
-      throw new Error("Port must be a valid number.");
+    if (isNaN(port) || port <= 0) {
+      throw new Error("Options.port must be a valid positive number.");
     }
     if (options.sentryDSN){
       this.sentryDSN = options.sentryDSN;
@@ -207,8 +207,8 @@ export class Configuration {
         }
         if (channels.email.smtp){
           const smtpPort = Number(channels.email.smtp.port);
-          if (isNaN(smtpPort)) {
-            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.port' as a valid number.`);
+          if (isNaN(smtpPort) || smtpPort <= 0) {
+            throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.port' as a valid positive number.`);
           }
           if (
             !channels.email.smtp.from
@@ -265,6 +265,9 @@ export class Configuration {
             channels.sms.twilio.fromNumber
           );
           Alerts.instance().addAlertChannel(alert.id, smsAlertChannel);
+        }
+        if (channels.sms.webhook){
+          // todo
         }
       }
     });

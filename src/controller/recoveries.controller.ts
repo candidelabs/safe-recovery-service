@@ -1,11 +1,11 @@
 import httpStatus from "http-status";
-import { ApiError, catchAsync } from "../utils";
+import {ApiError, catchAsync, JsonBigIntParser} from "../utils";
 import * as RecoveriesService from "../services/recoveries.service";
 
 interface PostRequestBody {
   account: string;
   newOwners: string[];
-  threshold: number;
+  newThreshold: number;
   chainId: number;
   signer: string;
   signature: string;
@@ -22,13 +22,13 @@ export const post = catchAsync(async (req, res) => {
   const response = await RecoveriesService.create(
     params.account,
     params.newOwners,
+    params.newThreshold,
     params.chainId,
-    params.threshold,
     params.signer,
     params.signature
   );
 
-  res.send(response);
+  res.send(JsonBigIntParser(response));
 });
 
 export const sign = catchAsync(async (req, res) => {
@@ -54,7 +54,7 @@ export const fetchByAddress = catchAsync(async (req, res) => {
     BigInt(nonce),
   );
 
-  res.send(recoveryRequests);
+  res.send(JsonBigIntParser(recoveryRequests));
 });
 
 export const fetchById = catchAsync(async (req, res) => {
@@ -72,5 +72,5 @@ export const fetchById = catchAsync(async (req, res) => {
     );
   }
 
-  res.send(request);
+  res.send(JsonBigIntParser(request));
 });
