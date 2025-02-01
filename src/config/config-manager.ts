@@ -8,7 +8,7 @@ import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
 import {KMSSigner} from "../models/signer/kms-signer";
-import {e164Regex} from "../utils";
+import {e164Regex, periodToSeconds} from "../utils";
 
 type Config = {
   options: {
@@ -52,10 +52,12 @@ type Config = {
       executeRecoveryRequests?: {
         enabled: boolean;
         signer?: string;
+        rateLimit?: {maxPerAccount: string | number, period: string} | '~';
       } | '~';
       finalizeRecoveryRequests?: {
         enabled: boolean;
         signer?: string;
+        rateLimit?: {maxPerAccount: string | number, period: string} | '~';
       } | string;
       alerts?: string | '~';
     };
@@ -293,7 +295,7 @@ export class Configuration {
         throw new Error(`Network '${networkName}' must have a valid ethereum address for 'recoveryModuleAddress'.`);
       }
       //
-      if (typeof networkConfig.executeRecoveryRequests == "string" && networkConfig.executeRecoveryRequests !== "~") throw new Error(`Network '${networkName}' cannot have 'finalizeRecoveryRequests' field as a string.`);
+      if (typeof networkConfig.executeRecoveryRequests == "string" && networkConfig.executeRecoveryRequests !== "~") throw new Error(`Network '${networkName}' cannot have 'executeRecoveryRequests' field as a string.`);
       if (!networkConfig.executeRecoveryRequests || typeof networkConfig.executeRecoveryRequests == "string"){
         networkConfig.executeRecoveryRequests = {enabled: false};
       }
@@ -307,6 +309,21 @@ export class Configuration {
           throw new Error(
             `Network '${networkName}' executeRecoveryRequests.signer is not found in declared signers.`
           );
+        }
+      }
+      //
+      let executionSponsorshipRateLimiting: {maxPerAccount: number, period: number} | undefined = undefined;
+      if (typeof networkConfig.executeRecoveryRequests.rateLimit == "string" && networkConfig.executeRecoveryRequests.rateLimit !== "~") throw new Error(`Network '${networkName}' cannot have 'executeRecoveryRequests.rateLimit' field as a string.`);
+      if (!networkConfig.executeRecoveryRequests.rateLimit || typeof networkConfig.executeRecoveryRequests.rateLimit == "string"){
+        executionSponsorshipRateLimiting = undefined;
+      }else{
+        const maxPerAccount = Number(networkConfig.executeRecoveryRequests.rateLimit.maxPerAccount);
+        if (isNaN(maxPerAccount) || maxPerAccount <= 0) {
+          throw new Error("executeRecoveryRequests.rateLimit.maxPerAccount must be a valid positive number.");
+        }
+        executionSponsorshipRateLimiting = {
+          maxPerAccount: Number(networkConfig.executeRecoveryRequests.rateLimit.maxPerAccount),
+          period: periodToSeconds(networkConfig.executeRecoveryRequests.rateLimit.period),
         }
       }
       //
@@ -326,6 +343,20 @@ export class Configuration {
           );
         }
       }
+      let finalizationSponsorshipRateLimiting: {maxPerAccount: number, period: number} | undefined = undefined;
+      if (typeof networkConfig.finalizeRecoveryRequests.rateLimit == "string" && networkConfig.finalizeRecoveryRequests.rateLimit !== "~") throw new Error(`Network '${networkName}' cannot have 'finalizeRecoveryRequests.rateLimit' field as a string.`);
+      if (!networkConfig.finalizeRecoveryRequests.rateLimit || typeof networkConfig.finalizeRecoveryRequests.rateLimit == "string"){
+        finalizationSponsorshipRateLimiting = undefined;
+      }else{
+        const maxPerAccount = Number(networkConfig.finalizeRecoveryRequests.rateLimit.maxPerAccount);
+        if (isNaN(maxPerAccount) || maxPerAccount <= 0) {
+          throw new Error("finalizeRecoveryRequests.rateLimit.maxPerAccount must be a valid positive number.");
+        }
+        finalizationSponsorshipRateLimiting = {
+          maxPerAccount: Number(networkConfig.finalizeRecoveryRequests.rateLimit.maxPerAccount),
+          period: periodToSeconds(networkConfig.finalizeRecoveryRequests.rateLimit.period),
+        }
+      }
       //
       if (networkConfig.alerts && networkConfig.alerts != "~") {
         if (!Alerts.instance().getAlertChannels(networkConfig.alerts)){
@@ -339,8 +370,8 @@ export class Configuration {
         chainId,
         networkConfig.recoveryModuleAddress,
         new ethers.providers.JsonRpcProvider(networkConfig.jsonRpcEndpoint),
-        networkConfig.executeRecoveryRequests,
-        networkConfig.finalizeRecoveryRequests,
+        {...networkConfig.executeRecoveryRequests, rateLimit: executionSponsorshipRateLimiting},
+        {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts
       );
     });

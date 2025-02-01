@@ -1,6 +1,13 @@
 import httpStatus from "http-status";
 import {BigNumber, ethers} from "ethers";
-import {ApiError, createEmojiSet, getSafeInstance, getSocialModuleInstance, isValidSignature,} from "../utils";
+import {
+  ApiError,
+  createEmojiSet,
+  getSafeInstance,
+  getSocialModuleInstance,
+  isValidSignature,
+  parseSeconds,
+} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import {Prisma, RecoveryRequest} from "@prisma/client";
@@ -43,8 +50,8 @@ export const create = async (account: string, newOwners: string[], newThreshold:
         chainId,
         nonce: recoveryNonce.toBigInt(),
         signatures: [],
-        executeData: {sponsored: false, transactionHash: "0x"},
-        finalizeData: {sponsored: false, transactionHash: "0x"},
+        executeData: {sponsored: false, transactionHash: ""},
+        finalizeData: {sponsored: false, transactionHash: ""},
         status: "PENDING",
         discoverable: false,
       }
@@ -159,6 +166,25 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       `Execution sponsorship is not enabled for this network (${network.chainId})`
     );
   }
+  if (network.executeRecoveryRequestConfig.rateLimit){
+    const period = network.executeRecoveryRequestConfig.rateLimit.period;
+    const maxPerAccount = network.executeRecoveryRequestConfig.rateLimit.maxPerAccount;
+    const lastPeriod = new Date(Date.now() - (period*1000));
+    const sponsoredRequestsInPeriod = await prisma.recoveryRequest.count({
+      where: {
+        account: {equals: request.account},
+        chainId: {equals: network.chainId},
+        createdAt: {gte: lastPeriod},
+        executeData: {path: ['sponsored'], equals: true}
+      }
+    });
+    if (sponsoredRequestsInPeriod >= maxPerAccount){
+      throw new ApiError(
+        httpStatus.TOO_MANY_REQUESTS,
+        `You are only allowed ${maxPerAccount} execution sponsorships every ${parseSeconds(period)}`
+      );
+    }
+  }
   //
   const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
   const guardianThreshold = await socialRecoveryModule.threshold(request.account) as BigNumber;
@@ -217,7 +243,12 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
         executeData["sponsored"] = true;
         executeData["transactionHash"] = transactionHash;
         await prisma.recoveryRequest.update({
-          data: {executeData},
+          data: {executeData, status: "EXECUTED"},
+          where: {id: request.id}
+        });
+      }else{
+        await prisma.recoveryRequest.update({
+          data: {status: "PENDING"},
           where: {id: request.id}
         });
       }
@@ -234,6 +265,25 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
       httpStatus.FORBIDDEN,
       `Finalization sponsorship is not enabled for this network (${network.chainId})`
     );
+  }
+  if (network.finalizeRecoveryRequestConfig.rateLimit){
+    const period = network.finalizeRecoveryRequestConfig.rateLimit.period;
+    const maxPerAccount = network.finalizeRecoveryRequestConfig.rateLimit.maxPerAccount;
+    const lastPeriod = new Date(Date.now() - (period*1000));
+    const sponsoredRequestsInPeriod = await prisma.recoveryRequest.count({
+      where: {
+        account: {equals: request.account},
+        chainId: {equals: network.chainId},
+        createdAt: {gte: lastPeriod},
+        finalizeData: {path: ['sponsored'], equals: true}
+      }
+    });
+    if (sponsoredRequestsInPeriod >= maxPerAccount){
+      throw new ApiError(
+        httpStatus.TOO_MANY_REQUESTS,
+        `You are only allowed ${maxPerAccount} finalization sponsorships every ${parseSeconds(period)}`
+      );
+    }
   }
   //
   const finalizeData = request.finalizeData as Prisma.JsonObject;
@@ -275,7 +325,12 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
         finalizeData["sponsored"] = true;
         finalizeData["transactionHash"] = transactionHash;
         await prisma.recoveryRequest.update({
-          data: {finalizeData},
+          data: {finalizeData, status: "FINALIZED"},
+          where: {id: request.id}
+        });
+      }else{
+        await prisma.recoveryRequest.update({
+          data: {status: "EXECUTED"},
           where: {id: request.id}
         });
       }

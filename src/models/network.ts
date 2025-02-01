@@ -4,11 +4,13 @@ import {StaticInstanceManager} from "./static-instance-manager";
 interface ExecuteRecoveryRequestConfig {
   enabled: boolean;
   signer?: string;
+  rateLimit?: {maxPerAccount: number, period: number};
 }
 
 interface FinalizeRecoveryRequestConfig {
   enabled: boolean;
   signer?: string;
+  rateLimit?: {maxPerAccount: number, period: number}; // max sponsorships per account per period (in seconds)
 }
 
 export class Network {

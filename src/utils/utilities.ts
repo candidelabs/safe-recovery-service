@@ -67,3 +67,51 @@ export function scientificToRealNumber(input: string): string {
     return input;
   }
 }
+
+export function periodToSeconds(period: string): number {
+  const match = period.match(/^(\d+)(ms|[smhd])$/);
+  if (!match) {
+    throw new Error("Invalid period format. Expected format like '1h', '5m', '24h', '500ms', etc...");
+  }
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 'ms':
+      return value / 1000;
+    case 's':
+      return value;
+    case 'm':
+      return value * 60;
+    case 'h':
+      return value * 60 * 60;
+    case 'd':
+      return value * 60 * 60 * 24;
+    default:
+      throw new Error("Unsupported unit. Supported units are 'ms', 's', 'm', 'h', 'd'.");
+  }
+}
+
+export function parseSeconds(seconds: number): string {
+  const units = [
+    { unit: 'year', seconds: 365 * 24 * 60 * 60 },
+    { unit: 'month', seconds: 30 * 24 * 60 * 60 },
+    { unit: 'week', seconds: 7 * 24 * 60 * 60 },
+    { unit: 'day', seconds: 24 * 60 * 60 },
+    { unit: 'hour', seconds: 60 * 60 },
+    { unit: 'minute', seconds: 60 },
+    { unit: 'second', seconds: 1 }
+  ];
+
+  let remainingSeconds = seconds;
+  const parts: string[] = [];
+
+  for (const { unit, seconds: unitSeconds } of units) {
+    const count = Math.floor(remainingSeconds / unitSeconds);
+    if (count > 0) {
+      parts.push(`${count} ${unit}${count > 1 ? 's' : ''}`);
+      remainingSeconds %= unitSeconds;
+    }
+  }
+
+  return parts.join(', ') || '0 seconds';
+}
