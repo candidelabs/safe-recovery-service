@@ -70,7 +70,7 @@ export class KMSSigner extends Signer {
 
   async sign(payload: string): Promise<string> {
     try {
-      const message = Buffer.from(ethers.utils.keccak256(payload)._0xRemove(), 'hex');
+      const message = Buffer.from(payload._0xRemove(), 'hex');
       const command = new SignCommand({
         KeyId: this.keyId,
         Message: message,

@@ -14,7 +14,7 @@ export class PrivateKeySigner extends Signer {
   }
 
   async sign(payload: string): Promise<string> {
-    return this._signer.signMessage(payload);
+    return ethers.utils.joinSignature(this._signer._signingKey().signDigest(payload));
   }
 
   async healthCheck(): Promise<boolean> {

@@ -34,3 +34,9 @@ export const fetchById = {
     id: Joi.string().required(),
   }),
 };
+
+export const finalizeOrExecute = {
+  body: Joi.object().keys({
+    id: Joi.string().required(),
+  }),
+};

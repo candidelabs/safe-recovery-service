@@ -3,6 +3,5 @@ export * from "./file";
 export * from "./valid_signature";
 export * from "./error";
 export * from "./utilities";
-export * from "./logger";
 export * from "./pick";
 export * from "./emoji";

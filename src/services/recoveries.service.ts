@@ -1,9 +1,10 @@
 import httpStatus from "http-status";
 import {BigNumber, ethers} from "ethers";
-import { isValidSignature, getSafeInstance, getSocialModuleInstance, ApiError, createEmojiSet } from "../utils";
+import {ApiError, createEmojiSet, getSafeInstance, getSocialModuleInstance, isValidSignature,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
-import { Prisma, RecoveryRequest } from "@prisma/client";
+import {Prisma, RecoveryRequest} from "@prisma/client";
+import {ChainExecutor} from "./chain-executor.service";
 
 export const create = async (account: string, newOwners: string[], newThreshold: number, chainId: number, signer: string, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
@@ -42,8 +43,8 @@ export const create = async (account: string, newOwners: string[], newThreshold:
         chainId,
         nonce: recoveryNonce.toBigInt(),
         signatures: [],
-        executeTransactionHash: "",
-        finalizeTransactionHash: "",
+        executeData: {sponsored: false, transactionHash: "0x"},
+        finalizeData: {sponsored: false, transactionHash: "0x"},
         status: "PENDING",
         discoverable: false,
       }
@@ -111,7 +112,6 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
     if (_signature[0].toLowerCase() == signer.toLowerCase()) return true;
   }
   signatures.push([signer, signature]);
-  //
   signatures = signatures.sort((a, b) => a[0].localeCompare(b[0]));
   //
   await prisma.recoveryRequest.update({
@@ -148,4 +148,138 @@ export const findByAccountAddress = async (account: string, chainId: number, non
 
 export const findById = async (id: string) => {
   return prisma.recoveryRequest.findFirst({where:{id}});
+};
+
+const executionMutex = new Set<string>()
+export const sponsorExecution = async (request: RecoveryRequest) => {
+  const network = Network.instances.get(request.chainId.toString())!;
+  if (!network.executeRecoveryRequestConfig.enabled){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `Execution sponsorship is not enabled for this network (${network.chainId})`
+    );
+  }
+  //
+  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
+  const guardianThreshold = await socialRecoveryModule.threshold(request.account) as BigNumber;
+  const accountNonce = await socialRecoveryModule.nonce(request.account) as BigNumber;
+  if (!accountNonce.eq(request.nonce)){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `This recovery request has an invalid nonce`
+    );
+  }
+  if (guardianThreshold.gt((request.signatures as Prisma.JsonArray).length)){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `This recovery request has insufficient signatures (collected ${(request.signatures as Prisma.JsonArray).length} signatures, account threshold is ${guardianThreshold.toNumber()})`
+    );
+  }
+  //
+  const executeData = request.executeData as Prisma.JsonObject;
+  if (typeof executeData["transactionHash"] == "string" && executeData["transactionHash"]._0xRemove().length > 0) return executeData["transactionHash"];
+  if (request.status === "EXECUTED") return executeData["transactionHash"];
+  //
+  const onChainRequest = await socialRecoveryModule.getRecoveryRequest(request.account)
+  if (onChainRequest.executeAfter !== 0){
+    if ((onChainRequest.guardiansApprovalCount as BigNumber).gte((request.signatures as Prisma.JsonArray).length)){
+      throw new ApiError(
+        httpStatus.NOT_FOUND,
+        `This recovery request cannot replace the current active on-chain recovery request`
+      );
+    }
+  }
+  if (executionMutex.has(request.id) || request.status === "EXECUTION-IN-PROGRESS"){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `Execution already pending`
+    );
+  }
+  executionMutex.add(request.id);
+  const callData = socialRecoveryModule.interface.encodeFunctionData(
+    "multiConfirmRecovery",
+    [
+      request.account,
+      request.newOwners,
+      request.newThreshold,
+      request.signatures,
+      true,
+    ]
+  );
+  ChainExecutor.instance().addTransaction({
+    to: network.recoveryModuleAddress,
+    value: 0n,
+    callData,
+    chainId: network.chainId,
+    signerId: network.finalizeRecoveryRequestConfig.signer!,
+    callback: async (success, transactionHash) => {
+      if (success){
+        executeData["sponsored"] = true;
+        executeData["transactionHash"] = transactionHash;
+        await prisma.recoveryRequest.update({
+          data: {executeData},
+          where: {id: request.id}
+        });
+      }
+    }
+  });
+  executionMutex.delete(request.id);
+};
+
+const finalizationMutex = new Set<string>()
+export const sponsorFinalization = async (request: RecoveryRequest) => {
+  const network = Network.instances.get(request.chainId.toString())!;
+  if (!network.finalizeRecoveryRequestConfig.enabled){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `Finalization sponsorship is not enabled for this network (${network.chainId})`
+    );
+  }
+  //
+  const finalizeData = request.finalizeData as Prisma.JsonObject;
+  if (typeof finalizeData["transactionHash"] == "string" && finalizeData["transactionHash"]._0xRemove().length > 0) return finalizeData["transactionHash"];
+  if (request.status === "FINALIZED") return finalizeData["transactionHash"];
+  //
+  let socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
+  //
+  const onChainRequest = await socialRecoveryModule.getRecoveryRequest(request.account)
+  if (onChainRequest.executeAfter == 0){
+    throw new ApiError(
+      httpStatus.NOT_FOUND,
+      `No recovery request found on chain`
+    );
+  }
+  const currentTimestamp = (await network.jsonRPCProvider.getBlock("latest")).timestamp;
+  if (onChainRequest.executeAfter > currentTimestamp){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `Recovery request is not yet ready for finalization`
+    );
+  }
+  if (finalizationMutex.has(request.id) || request.status === "FINALIZATION-IN-PROGRESS"){
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      `Finalization already pending`
+    );
+  }
+  finalizationMutex.add(request.id);
+  const callData = socialRecoveryModule.interface.encodeFunctionData("finalizeRecovery", [request.account]);
+  ChainExecutor.instance().addTransaction({
+    to: network.recoveryModuleAddress,
+    value: 0n,
+    callData,
+    chainId: network.chainId,
+    signerId: network.finalizeRecoveryRequestConfig.signer!,
+    callback: async (success, transactionHash) => {
+      if (success){
+        finalizeData["sponsored"] = true;
+        finalizeData["transactionHash"] = transactionHash;
+        await prisma.recoveryRequest.update({
+          data: {finalizeData},
+          where: {id: request.id}
+        });
+      }
+    }
+  });
+  finalizationMutex.delete(request.id);
 };

@@ -8,7 +8,7 @@ import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
 import {KMSSigner} from "../models/signer/kms-signer";
-import {e164Regex} from "../utils/utilities";
+import {e164Regex} from "../utils";
 
 type Config = {
   options: {
@@ -49,15 +49,15 @@ type Config = {
       chainId: string | number;
       jsonRpcEndpoint: string;
       recoveryModuleAddress: string;
-      executeRecoveryRequests: {
+      executeRecoveryRequests?: {
         enabled: boolean;
         signer?: string;
-      };
-      finalizeRecoveryRequests: {
+      } | '~';
+      finalizeRecoveryRequests?: {
         enabled: boolean;
         signer?: string;
-      };
-      alerts?: string;
+      } | string;
+      alerts?: string | '~';
     };
   };
 };
@@ -293,6 +293,10 @@ export class Configuration {
         throw new Error(`Network '${networkName}' must have a valid ethereum address for 'recoveryModuleAddress'.`);
       }
       //
+      if (typeof networkConfig.executeRecoveryRequests == "string" && networkConfig.executeRecoveryRequests !== "~") throw new Error(`Network '${networkName}' cannot have 'finalizeRecoveryRequests' field as a string.`);
+      if (!networkConfig.executeRecoveryRequests || typeof networkConfig.executeRecoveryRequests == "string"){
+        networkConfig.executeRecoveryRequests = {enabled: false};
+      }
       if (networkConfig.executeRecoveryRequests.enabled && !networkConfig.executeRecoveryRequests.signer) {
         throw new Error(
           `Network '${networkName}' executeRecoveryRequests requires a 'signer' when enabled.`
@@ -306,6 +310,10 @@ export class Configuration {
         }
       }
       //
+      if (typeof networkConfig.finalizeRecoveryRequests == "string" && networkConfig.finalizeRecoveryRequests !== "~") throw new Error(`Network '${networkName}' cannot have 'finalizeRecoveryRequests' field as a string.`);
+      if (!networkConfig.finalizeRecoveryRequests || typeof networkConfig.finalizeRecoveryRequests == "string"){
+        networkConfig.finalizeRecoveryRequests = {enabled: false};
+      }
       if (networkConfig.finalizeRecoveryRequests.enabled && !networkConfig.finalizeRecoveryRequests.signer) {
         throw new Error(
           `Network '${networkName}' finalizeRecoveryRequests requires a 'signer' when enabled.`

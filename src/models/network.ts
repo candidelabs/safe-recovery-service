@@ -16,8 +16,8 @@ export class Network {
   public chainId: number;
   public recoveryModuleAddress: string;
   public jsonRPCProvider: ethers.providers.JsonRpcProvider;
-  private executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig;
-  private finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig;
+  public executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig;
+  public finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig;
   private alert?: string;
   //
   public static supportedChainIds: number[] = [];

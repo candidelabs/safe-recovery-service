@@ -1,5 +1,5 @@
 import express from "express";
-import { validate } from "../../middlewares";
+import {validate} from "../../middlewares";
 import * as recoveriesValidation from "../../validations/recoveries.validation";
 import * as recoveriesController from "../../controller/recoveries.controller";
 
@@ -18,5 +18,13 @@ router
 router
   .route("/fetchById")
   .get(validate(recoveriesValidation.fetchById), recoveriesController.fetchById);
+
+router
+  .route("/execute")
+  .post(validate(recoveriesValidation.finalizeOrExecute), recoveriesController.execute);
+
+router
+  .route("/finalize")
+  .get(validate(recoveriesValidation.finalizeOrExecute), recoveriesController.finalize);
 
 export default router;

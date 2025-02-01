@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,20 +8,20 @@ datasource db {
 }
 
 model RecoveryRequest {
-  id                      String   @id @default(uuid())
-  emoji                   String
-  account                 String
-  chainId                 Int
-  newOwners               String[]
-  newThreshold            Int
-  nonce                   BigInt
-  signatures              Json
-  executeTransactionHash  String?  @default("")
-  finalizeTransactionHash String?  @default("")
-  status                  String
-  discoverable            Boolean  @default(true)
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id           String   @id @default(uuid())
+  emoji        String
+  account      String
+  chainId      Int
+  newOwners    String[]
+  newThreshold Int
+  nonce        BigInt
+  signatures   Json
+  executeData  Json
+  finalizeData Json
+  status       String
+  discoverable Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([account])
 }

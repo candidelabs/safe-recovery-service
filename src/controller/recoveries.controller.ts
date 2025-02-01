@@ -33,7 +33,6 @@ export const post = catchAsync(async (req, res) => {
 
 export const sign = catchAsync(async (req, res) => {
   const { id, signer, signature } = req.body as SignRequestBody;
-
   await RecoveriesService.signRecoveryHash(
     id, signer, signature
   );
@@ -47,7 +46,6 @@ export const fetchByAddress = catchAsync(async (req, res) => {
     chainId: number;
     nonce: string;
   };
-
   const recoveryRequests = await RecoveriesService.findByAccountAddress(
     account,
     chainId,
@@ -61,7 +59,6 @@ export const fetchById = catchAsync(async (req, res) => {
   const { id } = req.query as {
     id: string;
   };
-
   const request = await RecoveriesService.findById(
     id,
   );
@@ -73,4 +70,33 @@ export const fetchById = catchAsync(async (req, res) => {
   }
 
   res.send(JsonBigIntParser(request));
+});
+
+export const execute = catchAsync(async (req, res) => {
+  const { id } = req.body;
+  const request = await RecoveriesService.findById(id);
+  if (request == null){
+    throw new ApiError(
+      httpStatus.NOT_FOUND,
+      `Recovery request not found`
+    );
+  }
+  await RecoveriesService.sponsorExecution(request);
+
+  res.send({success:true});
+});
+
+
+export const finalize = catchAsync(async (req, res) => {
+  const { id } = req.body;
+  const request = await RecoveriesService.findById(id);
+  if (request == null){
+    throw new ApiError(
+      httpStatus.NOT_FOUND,
+      `Recovery request not found`
+    );
+  }
+  await RecoveriesService.sponsorFinalization(request);
+
+  res.send({success:true});
 });

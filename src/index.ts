@@ -3,15 +3,16 @@ import {Configuration} from "./config/config-manager";
 import "./utils/extensions/string.extensions"
 import "./instrument";
 /////////////////////////////////////////////////////////////////////////////
-import express, { type Express } from "express";
+import express, {type Express} from "express";
 import helmet from "helmet";
 import compression from "compression";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
-import {ApiError, httpRequestErrorLogger, httpRequestSuccessLogger, logger} from "./utils";
-import { errorConverter, errorHandler } from "./middlewares";
+import {ApiError} from "./utils";
+import {httpRequestErrorLogger, httpRequestSuccessLogger, logger} from "./utils/logger";
+import {errorConverter, errorHandler} from "./middlewares";
 
 const app: Express = express();
 
