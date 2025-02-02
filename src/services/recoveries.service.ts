@@ -101,12 +101,17 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
   }
   //
   const recoveryHash = await getRecoveryRequestExecutionHash(socialRecoveryModule, recoveryRequest!);
-  const validSignature: boolean = await isValidSignature(
-    signer,
-    ethers.utils.arrayify(recoveryHash),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider,
-  );
+  let validSignature: boolean;
+  try {
+    validSignature = await isValidSignature(
+      signer,
+      ethers.utils.arrayify(recoveryHash),
+      ethers.utils.arrayify(signature),
+      network.jsonRPCProvider,
+    );
+  } catch (e) {
+    validSignature = false;
+  }
   if (!validSignature){
     throw new ApiError(
       httpStatus.BAD_REQUEST,

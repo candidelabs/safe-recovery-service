@@ -25,6 +25,6 @@ router
 
 router
   .route("/finalize")
-  .get(validate(recoveriesValidation.finalizeOrExecute), recoveriesController.finalize);
+  .post(validate(recoveriesValidation.finalizeOrExecute), recoveriesController.finalize);
 
 export default router;
