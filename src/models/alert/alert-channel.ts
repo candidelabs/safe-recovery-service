@@ -1,17 +1,36 @@
+import {MessageTemplates} from "./message-templates";
+
 export abstract class AlertChannel {
   public alertId: string;
+  public channelName: string;
 
-  protected constructor(alertId: string) {
+  protected constructor(alertId: string, channelName: string) {
     this.alertId = alertId;
+    this.channelName = channelName;
   }
 
   /**
-   * Sends a message to the target using the alert channel.
-   * @param target The target email address or phone number.
-   * @param header The message header or subject.
-   * @param body The message body.
+   * Verifies and sanitizes a channel target.
    */
-  abstract sendMessage(target: string, header: string, body: string): Promise<boolean>;
+  abstract sanitizeTarget(target: string): Promise<string | undefined>;
+
+  /**
+   * Generates a challenge that can be later verified (outputs the raw challenge and a hashed version).
+   */
+  abstract generateChallenge(seed: string): Promise<[string, string]>;
+
+  /**
+   * Verifies a challenge to be correct when provided with the correct seed.
+   */
+  abstract verifyChallenge(challenge: string, hashedChallenge: string, seed: string): Promise<boolean>;
+
+  /**
+   * Sends a message to the target using the alert channel.
+   * @param templateId The message template id.
+   * @param target The target email address or phone number.
+   * @param templateOverrides The template overrides.
+   */
+  abstract sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, string>): Promise<boolean>;
 
   /**
    * Performs a health check to determine if the alert channel is available.

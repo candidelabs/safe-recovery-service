@@ -1,7 +1,7 @@
 import {AlertChannel} from "./alert-channel";
 
 export class Alerts {
-  private alertConfig: Map<string, AlertChannel[]> = new Map();
+  private alertConfig: Map<string, Map<string, AlertChannel>> = new Map();
   //
   private static _instance?: Alerts;
 
@@ -16,15 +16,19 @@ export class Alerts {
     return Alerts._instance;
   }
 
-  public getAlertChannels(id: string){
-    return this.alertConfig.get(id);
+  public alertIdExists(id: string){
+    return this.alertConfig.has(id);
+  }
+
+  public getAlertChannel(id: string, channel: string){
+    if (id === "") return;
+    return this.alertConfig.get(id)?.get(channel);
   }
 
   public addAlertChannel(id: string, alertChannel: AlertChannel){
-    if (this.alertConfig.has(id)){
-      this.alertConfig.get(id)!.push(alertChannel);
-      return;
+    if (!this.alertConfig.has(id)){
+      this.alertConfig.set(id, new Map());
     }
-    this.alertConfig.set(id, [alertChannel]);
+    this.alertConfig.get(id)!.set(alertChannel.channelName, alertChannel);
   }
 }
