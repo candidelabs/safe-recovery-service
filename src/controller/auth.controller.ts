@@ -1,0 +1,102 @@
+import * as authService from "../services/auth.service";
+import {catchAsync} from "../utils";
+
+interface CreateRegistrationBody {
+  account: string;
+  chainId: number;
+  channel: string;
+  target: string;
+  timestamp: number;
+  signature: string;
+}
+
+interface SubmitChallengeBody {
+  challengeId: string;
+  challenge: string;
+}
+
+interface FetchRegistrationsBody {
+  account: string;
+  chainId: number;
+  timestamp: number;
+  signature: string;
+}
+
+interface DeleteRegistrationBody {
+  registrationId: string;
+  chainId: number;
+  timestamp: number;
+  signature: string;
+}
+
+interface RequestSignatureBody {
+  account: string;
+  newOwners: string[];
+  newThreshold: number;
+  chainId: number;
+}
+
+interface SubmitSignatureChallengeBody {
+  requestId: string;
+  challengeId: string;
+  challenge: string;
+}
+
+export const createRegistration = catchAsync(async (req, res) => {
+  const params = req.body as CreateRegistrationBody;
+  const registrationRequestId = await authService.createRegistration(
+    params.account,
+    params.chainId,
+    params.channel,
+    params.target,
+    params.timestamp,
+    params.signature
+  );
+  res.send({challengeId: registrationRequestId});
+});
+
+export const submitRegistrationChallenge = catchAsync(async (req, res) => {
+  const params = req.body as SubmitChallengeBody;
+  const [registrationId, guardianAddress] = await authService.submitRegistrationChallenge(
+    params.challengeId,
+    params.challenge
+  );
+  res.send({
+    registrationId,
+    guardianAddress
+  });
+});
+
+export const fetchRegistrations = catchAsync(async (req, res) => {
+  const params = req.query as unknown as FetchRegistrationsBody;
+  const registrations = await authService.fetchRegistrations(
+    params.account,
+    params.chainId,
+    params.timestamp,
+    params.signature
+  );
+  res.send({registrations});
+});
+
+export const deleteRegistration = catchAsync(async (req, res) => {
+  const params = req.body as DeleteRegistrationBody;
+  const success = await authService.deleteRegistration(
+    params.registrationId,
+    params.chainId,
+    params.timestamp,
+    params.signature
+  );
+  res.send({success});
+});
+
+export const requestSignature = catchAsync(async (req, res) => {
+  const params = req.body as RequestSignatureBody;
+  // todo add implementation
+  res.send(params);
+});
+
+export const submitSignatureRequestChallenge = catchAsync(async (req, res) => {
+  const params = req.body as SubmitSignatureChallengeBody;
+  // todo add implementation
+  res.send(params);
+});

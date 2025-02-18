@@ -25,3 +25,42 @@ model RecoveryRequest {
 
   @@index([account])
 }
+
+model AuthRegistration {
+  id        String   @id @default(uuid())
+  account   String
+  chainId   Int
+  channel   String
+  target    String
+  guardian  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([account])
+}
+
+model AuthRegistrationRequest {
+  id            String    @id @default(uuid())
+  account       String
+  chainId       Int
+  channel       String
+  target        String
+  challengeHash String
+  verified      Boolean
+  verifiedAt    DateTime?
+  tries         Int
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([account])
+}
+
+model AuthRegistrationLogs {
+  id        String   @id @default(uuid())
+  account   String
+  action    String
+  message   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
