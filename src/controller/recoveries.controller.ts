@@ -2,7 +2,7 @@ import httpStatus from "http-status";
 import {ApiError, catchAsync, JsonBigIntParser} from "../utils";
 import * as RecoveriesService from "../services/recoveries.service";
 
-interface PostRequestBody {
+interface CreateRecoveryBody {
   account: string;
   newOwners: string[];
   newThreshold: number;
@@ -11,14 +11,14 @@ interface PostRequestBody {
   signature: string;
 }
 
-interface SignRequestBody {
+interface SignRecoveryBody {
   id: string;
   signer: string;
   signature: string;
 }
 
-export const post = catchAsync(async (req, res) => {
-  const params = req.body as PostRequestBody;
+export const create = catchAsync(async (req, res) => {
+  const params = req.body as CreateRecoveryBody;
   const response = await RecoveriesService.create(
     params.account,
     params.newOwners,
@@ -32,7 +32,7 @@ export const post = catchAsync(async (req, res) => {
 });
 
 export const sign = catchAsync(async (req, res) => {
-  const { id, signer, signature } = req.body as SignRequestBody;
+  const { id, signer, signature } = req.body as SignRecoveryBody;
   await RecoveriesService.signRecoveryHash(
     id, signer, signature
   );

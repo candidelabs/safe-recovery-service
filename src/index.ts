@@ -15,6 +15,7 @@ import {httpRequestErrorLogger, httpRequestSuccessLogger, logger} from "./utils/
 import {errorConverter, errorHandler} from "./middlewares";
 
 const app: Express = express();
+const configuration = Configuration.instance();
 
 // HTTP request logger
 app.use(httpRequestSuccessLogger);
@@ -35,11 +36,16 @@ app.use(compression());
 // enable cors
 app.use(cors());
 
+if (configuration.trustProxy){
+  app.set('trust proxy', 1);
+}
+
 // Apply generic rate limit
 app.use(
   rateLimit({
+    validate: {xForwardedForHeader: false},
     windowMs: 60 * 1000, // 1 minutes
-    max: 25, // Limit each IP to 5 requests per `window`
+    limit: 25, // Limit each IP to 25 requests per `window`
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
     legacyHeaders: false, // Disable the `X-RateLimit-*` headers
   })
@@ -59,7 +65,6 @@ app.use(errorConverter);
 // handle error
 app.use(errorHandler);
 
-const configuration = Configuration.instance();
 app.listen(configuration.port, () => {
   logger.info(`Listening to port ${configuration.port}`);
 });

@@ -5,7 +5,9 @@ import * as recoveriesController from "../../controller/recoveries.controller";
 
 const router = express.Router();
 
-router.route("/create").post(validate(recoveriesValidation.create), recoveriesController.post);
+router
+  .route("/create")
+  .post(validate(recoveriesValidation.create), recoveriesController.create);
 
 router
   .route("/sign")

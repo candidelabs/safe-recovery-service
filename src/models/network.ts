@@ -20,7 +20,8 @@ export class Network {
   public jsonRPCProvider: ethers.providers.JsonRpcProvider;
   public executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig;
   public finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig;
-  private alert?: string;
+  public guardian?: string;
+  public alert?: string;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -32,6 +33,7 @@ export class Network {
     jsonRPCProvider: ethers.providers.JsonRpcProvider,
     executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig,
     finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig,
+    guardian: string | undefined,
     alert: string | undefined,
   ) {
     this.name = name;
@@ -40,6 +42,7 @@ export class Network {
     this.jsonRPCProvider = jsonRPCProvider;
     this.executeRecoveryRequestConfig = executeRecoveryRequestConfig;
     this.finalizeRecoveryRequestConfig = finalizeRecoveryRequestConfig;
+    this.guardian = guardian;
     this.alert = alert;
     Network.supportedChainIds.push(chainId);
     Network.instances.add(this);

@@ -13,8 +13,9 @@ import {e164Regex, periodToSeconds} from "../utils";
 type Config = {
   options: {
     env: string;
-    port: string | number;
+    port: number | string;
     sentryDSN?: string;
+    trustProxy: boolean | string;
   };
   signers: Array<{
     id: string;
@@ -59,6 +60,7 @@ type Config = {
         signer?: string;
         rateLimit?: {maxPerAccount: string | number, period: string} | '~';
       } | string;
+      guardian?: string | '~';
       alerts?: string | '~';
     };
   };
@@ -68,6 +70,7 @@ export class Configuration {
   public environment!: string;
   public port!: number;
   public sentryDSN?: string;
+  public trustProxy!: boolean;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -141,6 +144,7 @@ export class Configuration {
     }
     this.environment = options.env;
     this.port = port;
+    this.trustProxy = options.trustProxy.toString().toLowerCase() === "true";
   }
 
   private initializeSigners(signers: Config["signers"]) {
@@ -358,8 +362,16 @@ export class Configuration {
         }
       }
       //
+      if (networkConfig.guardian && networkConfig.guardian != "~") {
+        if (!Signers.instance().getSigner(networkConfig.guardian)){
+          throw new Error(
+            `Specified guardian for network '${networkName}' is not found in declared signers.`
+          );
+        }
+      }
+      //
       if (networkConfig.alerts && networkConfig.alerts != "~") {
-        if (!Alerts.instance().getAlertChannels(networkConfig.alerts)){
+        if (!Alerts.instance().alertIdExists(networkConfig.alerts)){
           throw new Error(
             `Alerts for network '${networkName}' is not found in declared alerts.`
           );
@@ -372,6 +384,7 @@ export class Configuration {
         new ethers.providers.JsonRpcProvider(networkConfig.jsonRpcEndpoint),
         {...networkConfig.executeRecoveryRequests, rateLimit: executionSponsorshipRateLimiting},
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
+        networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts
       );
     });
