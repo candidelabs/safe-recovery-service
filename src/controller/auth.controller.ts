@@ -24,7 +24,6 @@ interface FetchRegistrationsBody {
 
 interface DeleteRegistrationBody {
   registrationId: string;
-  chainId: number;
   timestamp: number;
   signature: string;
 }
@@ -82,7 +81,6 @@ export const deleteRegistration = catchAsync(async (req, res) => {
   const params = req.body as DeleteRegistrationBody;
   const success = await authService.deleteRegistration(
     params.registrationId,
-    params.chainId,
     params.timestamp,
     params.signature
   );
@@ -91,12 +89,21 @@ export const deleteRegistration = catchAsync(async (req, res) => {
 
 export const requestSignature = catchAsync(async (req, res) => {
   const params = req.body as RequestSignatureBody;
-  // todo add implementation
-  res.send(params);
+  const response = await authService.requestSignature(
+    params.account,
+    params.newOwners,
+    params.newThreshold,
+    params.chainId
+  );
+  res.send(response);
 });
 
 export const submitSignatureRequestChallenge = catchAsync(async (req, res) => {
   const params = req.body as SubmitSignatureChallengeBody;
-  // todo add implementation
-  res.send(params);
+  const response = await authService.submitSignatureRequestChallenge(
+    params.requestId,
+    params.challengeId,
+    params.challenge,
+  );
+  res.send(response);
 });
