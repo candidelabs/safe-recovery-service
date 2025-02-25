@@ -22,6 +22,17 @@ export class SMSAlertChannel extends AlertChannel {
     return phoneRegex.test(sanitizedPhone) ? sanitizedPhone : undefined;
   }
 
+  async maskTarget(target: string): Promise<string> {
+    const countryCode = target.slice(0, 2);
+    const numberPart = target.slice(2);
+    if (numberPart.length <= 4) {
+      return `${countryCode}${numberPart}`;
+    }
+    const visibleDigits = numberPart.slice(-4);
+    const maskedPart = '*'.repeat(numberPart.length - 4);
+    return `${countryCode}${maskedPart}${visibleDigits}`;
+  }
+
   async generateChallenge(seed: string): Promise<[string, string]> {
     const otp = Array.from(crypto.getRandomValues(new Uint8Array(6)))
       .map(num => (num % 10).toString())

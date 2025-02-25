@@ -15,6 +15,11 @@ export abstract class AlertChannel {
   abstract sanitizeTarget(target: string): Promise<string | undefined>;
 
   /**
+   * Masks a channel target.
+   */
+  abstract maskTarget(target: string): Promise<string>;
+
+  /**
    * Generates a challenge that can be later verified (outputs the raw challenge and a hashed version).
    */
   abstract generateChallenge(seed: string): Promise<[string, string]>;

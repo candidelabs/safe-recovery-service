@@ -38,6 +38,20 @@ export class EmailAlertChannel extends AlertChannel {
     });
   }
 
+  async sanitizeTarget(target: string): Promise<string | undefined> {
+    const sanitizedEmail = target.trim().toLowerCase();
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return emailRegex.test(sanitizedEmail) ? sanitizedEmail : undefined;
+  }
+
+  async maskTarget(target: string): Promise<string> {
+    const [localPart, domain] = target.split('@');
+    const [domainName, domainExt] = domain.split('.');
+    const maskedLocal = localPart.length <= 2 ? localPart : localPart[0] + '*'.repeat(localPart.length - 2) + localPart[localPart.length - 1];
+    const maskedDomain = domainName.length <= 1 ? domainName : domainName[0] + '*'.repeat(domainName.length - 1);
+    return `${maskedLocal}@${maskedDomain}.${domainExt}`;
+  }
+
   async generateChallenge(seed: string): Promise<[string, string]> {
     const otp = Array.from(crypto.getRandomValues(new Uint8Array(6)))
       .map(num => (num % 10).toString())
@@ -47,12 +61,6 @@ export class EmailAlertChannel extends AlertChannel {
 
   async verifyChallenge(challenge: string, hashedChallenge: string, seed: string): Promise<boolean> {
     return ethers.utils.id(seed + challenge) === hashedChallenge;
-  }
-
-  async sanitizeTarget(target: string): Promise<string | undefined> {
-    const sanitizedEmail = target.trim().toLowerCase();
-    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    return emailRegex.test(sanitizedEmail) ? sanitizedEmail : undefined;
   }
 
   async sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, string>): Promise<boolean> {
