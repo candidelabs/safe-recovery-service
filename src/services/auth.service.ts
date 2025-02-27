@@ -55,7 +55,7 @@ export const createRegistration = async (account: string, chainId: number, chann
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase());
   await alertChannel.sendMessage("otpVerification", target, {
-    "subject": "",
+    "subject": "OTP Verification for Safe Recovery",
     "otp": challenge
   });
   //
@@ -253,7 +253,7 @@ export const requestSignature = async (account: string, newOwners: string[], new
       }
     });
     alertChannel.sendMessage("otpVerification", registration.target, {
-      "subject": "",
+      "subject": "OTP Verification for Safe Recovery",
       "otp": challenge
     });
     auths.push({
@@ -348,6 +348,13 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
       signatureRequest.nonce,
     );
     const signature = await signer.sign(recoveryHash);
+    await prisma.authSignatureRequest.update({
+      data: {
+        guardian: guardianAddress,
+        signature,
+      },
+      where: {id: signatureRequest.id}
+    });
     return {
       success: true,
       signer: guardianAddress,
