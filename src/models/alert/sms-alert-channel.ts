@@ -15,11 +15,47 @@ export class SMSAlertChannel extends AlertChannel {
   }
 
   async sanitizeTarget(target: string): Promise<string | undefined> {
-    // Remove all non-numeric characters except "+"
-    let sanitizedPhone = target.trim().replace(/[^0-9+]/g, "");
-    // Ensure it starts with "+" and has 10-15 digits (E.164 format)
-    const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-    return phoneRegex.test(sanitizedPhone) ? sanitizedPhone : undefined;
+    if (!target || target.trim().length === 0) {
+      return undefined;
+    }
+    // Remove any whitespace, hyphens, parentheses, and dots
+    let sanitizedNumber = target.replace(/[\s\-\(\)\.]/g, "");
+    // Check if it already starts with +
+    if (!sanitizedNumber.startsWith("+")) {
+      // If it starts with 00 (international prefix), replace with +
+      if (sanitizedNumber.startsWith("00")) {
+        sanitizedNumber = "+" + sanitizedNumber.slice(2);
+      }
+      // If it starts with a single 0, assume country code needed
+      else if (sanitizedNumber.startsWith("0")) {
+        return undefined;
+      }
+      // If no + and no special prefix, assume it's invalid
+      else {
+        return undefined;
+      }
+    }
+
+    // E.164 format: + followed by 1-3 digit country code and 6-14 digit number
+    // Total length including + should be 8-15 characters
+    const e164Regex = /^\+[1-9]\d{6,14}$/;
+    if (!e164Regex.test(sanitizedNumber)) {
+      // Check specific issues
+      if (sanitizedNumber.length < 8) { // Phone number too short (minimum 7 digits after country code)
+        return undefined;
+      } else if (sanitizedNumber.length > 15) { // Phone number too long (maximum 14 digits after country code)
+        return undefined;
+      } else if (sanitizedNumber[1] === "0") { // Country code cannot start with 0
+        return undefined;
+      } else { // Invalid E.164 format. Must be +[country code][phone number]
+        return undefined
+      }
+    }
+    const lookup = await this.twilioClient.lookups.v2.phoneNumbers(sanitizedNumber).fetch();
+    if (!lookup.valid){
+      return undefined;
+    }
+    return lookup.phoneNumber;
   }
 
   async maskTarget(target: string): Promise<string> {
