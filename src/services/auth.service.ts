@@ -19,11 +19,10 @@ export const createRegistration = async (account: string, chainId: number, chann
     throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported on this network`);
   }
   //
-  const _target = await alertChannel.sanitizeTarget(target);
-  if (!_target) {
+  const sanitizedTarget = await alertChannel.sanitizeTarget(target);
+  if (!sanitizedTarget) {
     throw new ApiError(httpStatus.FORBIDDEN, `Target '${target}' is not compatible with '${channel}' channel`);
   }
-  target = _target;
   //
   const currentTimestamp = Date.now();
   // timestamp should be within 5 minutes of signature timestamp
@@ -40,6 +39,7 @@ export const createRegistration = async (account: string, chainId: number, chann
   if (!validSignature) {
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
   }
+  target = sanitizedTarget;
   //
   const existingRegistration = await prisma.authRegistration.findFirst({
     where: {
