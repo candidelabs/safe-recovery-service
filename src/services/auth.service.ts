@@ -103,7 +103,7 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   );
   if (!validChallenge){
     await prisma.authRegistrationRequest.update({
-      data: {tries: registrationRequest.tries + 1},
+      data: {tries: {increment: 1}},
       where: {id: registrationRequest.id}
     });
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid challenge`);
@@ -320,7 +320,7 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
   );
   if (!validChallenge){
     await prisma.signatureRequestVerification.update({
-      data: {tries: challengeRequest.tries + 1},
+      data: {tries: {increment: 1}},
       where: {id: challengeRequest.id}
     });
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid challenge`);
