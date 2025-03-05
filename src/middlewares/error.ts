@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from "express";
 import { status as httpStatus } from "http-status";
 import { ApiError } from "../utils";
 import {Configuration} from "../config/config-manager";
-import {logger} from "../utils/logger";
+import Logger from "../utils/logger";
 
 export const errorConverter = (
   err: any,
@@ -36,7 +36,7 @@ export const errorHandler = (err: any, _req: Request, res: Response) => {
   };
 
   if (Configuration.instance().environment === "development") {
-    logger.error(err);
+    Logger.error(err);
   }
 
   res.status(statusCode).send(response);

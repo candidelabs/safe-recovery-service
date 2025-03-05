@@ -6,6 +6,7 @@ import { readFile } from "./utils/file";
 
 const rawConfig = readFile("config.json") as any;
 const configuration = Configuration.instance(rawConfig);
+
 if (isURL(configuration.sentryDSN ?? "")) {
   Sentry.init({
     dsn: Configuration.instance().sentryDSN,

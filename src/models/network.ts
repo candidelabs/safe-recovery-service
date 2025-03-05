@@ -1,5 +1,6 @@
 import {ethers} from "ethers";
 import {StaticInstanceManager} from "./static-instance-manager";
+import {Indexer} from "../services/indexer.service";
 
 interface ExecuteRecoveryRequestConfig {
   enabled: boolean;
@@ -13,6 +14,11 @@ interface FinalizeRecoveryRequestConfig {
   rateLimit?: {maxPerAccount: number, period: number}; // max sponsorships per account per period (in seconds)
 }
 
+interface IndexerConfig {
+  enabled: boolean,
+  startBlock: number,
+}
+
 export class Network {
   public name: string;
   public chainId: number;
@@ -22,6 +28,7 @@ export class Network {
   public finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig;
   public guardian?: string;
   public alert?: string;
+  public indexer: Indexer;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -35,6 +42,7 @@ export class Network {
     finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig,
     guardian: string | undefined,
     alert: string | undefined,
+    indexer: IndexerConfig
   ) {
     this.name = name;
     this.chainId = chainId;
@@ -44,6 +52,8 @@ export class Network {
     this.finalizeRecoveryRequestConfig = finalizeRecoveryRequestConfig;
     this.guardian = guardian;
     this.alert = alert;
+    this.indexer = new Indexer(this, indexer.startBlock, indexer.enabled);
+    this.indexer.start();
     Network.supportedChainIds.push(chainId);
     Network.instances.add(this);
   }

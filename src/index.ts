@@ -11,15 +11,16 @@ import rateLimit from "express-rate-limit";
 import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
 import {ApiError} from "./utils";
-import {httpRequestErrorLogger, httpRequestSuccessLogger, logger} from "./utils/logger";
+import Logger from "./utils/logger";
 import {errorConverter, errorHandler} from "./middlewares";
 
 const app: Express = express();
 const configuration = Configuration.instance();
 
 // HTTP request logger
-app.use(httpRequestSuccessLogger);
-app.use(httpRequestErrorLogger);
+app.use(Logger.httpRequestSuccessLogger());
+// @ts-ignore
+app.use(Logger.httpRequestErrorLogger());
 
 // set security HTTP headers
 app.use(helmet());
@@ -66,5 +67,5 @@ app.use(errorConverter);
 app.use(errorHandler);
 
 app.listen(configuration.port, () => {
-  logger.info(`Listening to port ${configuration.port}`);
+  Logger.info(`Listening to port ${configuration.port}`);
 });

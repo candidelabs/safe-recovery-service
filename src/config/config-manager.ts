@@ -62,6 +62,10 @@ type Config = {
       } | string;
       guardian?: string | '~';
       alerts?: string | '~';
+      indexer: {
+        enabled: boolean,
+        startBlock: number
+      };
     };
   };
 };
@@ -76,7 +80,6 @@ export class Configuration {
 
   private constructor(config: Config) {
     this.config = this.resolveEnvVariables(config);
-    this.initializeConfig();
   }
 
   public static instance(config?: Config): Configuration {
@@ -85,12 +88,9 @@ export class Configuration {
         throw new Error("Configuration not initialized. Provide config on first use.");
       }
       Configuration._instance = new Configuration(config);
+      Configuration._instance.initializeConfig();
     }
     return Configuration._instance;
-  }
-
-  public getConfig(): Config {
-    return this.config;
   }
 
   private resolveEnvVariables(config: Config): Config {
@@ -377,6 +377,19 @@ export class Configuration {
           );
         }
       }
+      //
+      if (!networkConfig.indexer) {
+        throw new Error(`Network '${networkName}' must have an 'indexer' configuration object.`);
+      }
+      if (networkConfig.indexer.enabled === undefined) {
+        throw new Error(`Network '${networkName}' 'indexer.enabled' must be a valid boolean value.`);
+      }
+      networkConfig.indexer.enabled = networkConfig.indexer.enabled.toString().toLowerCase() === "true";
+      const indexerStartBlock = Number(networkConfig.indexer.startBlock);
+      if (isNaN(indexerStartBlock)) {
+        throw new Error(`Network '${networkName}' 'indexer.startBlock' must be a valid number.`);
+      }
+      networkConfig.indexer.startBlock = indexerStartBlock;
       new Network(
         networkName,
         chainId,
@@ -385,7 +398,8 @@ export class Configuration {
         {...networkConfig.executeRecoveryRequests, rateLimit: executionSponsorshipRateLimiting},
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
         networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
-        networkConfig.alerts == "~" ? undefined : networkConfig.alerts
+        networkConfig.alerts == "~" ? undefined : networkConfig.alerts,
+        networkConfig.indexer
       );
     });
     if (Network.instances.instances.length === 0) {

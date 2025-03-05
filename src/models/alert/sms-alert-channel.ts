@@ -2,6 +2,7 @@ import { AlertChannel } from "./alert-channel";
 import twilio, { Twilio } from "twilio";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
+import Logger from "../../utils/logger";
 
 export class SMSAlertChannel extends AlertChannel {
   private twilioClient: Twilio;
@@ -84,7 +85,7 @@ export class SMSAlertChannel extends AlertChannel {
     try {
       const template = getTemplate("sms", templateId);
       if (!template) {
-        console.error(`SMS Channel (${this.alertId}): Message Template "${templateId}" not found.`);
+        Logger.error(`SMS Channel (${this.alertId}): Message Template "${templateId}" not found.`);
         return false;
       }
       let body = template.body;
@@ -99,12 +100,12 @@ export class SMSAlertChannel extends AlertChannel {
         to: target,
       });
       if (message.errorCode !== null){
-        console.error(`SMS Channel (${this.alertId}): failed to send message, ${message.errorCode}, ${message.errorMessage}`);
+        Logger.error(`SMS Channel (${this.alertId}): failed to send message, ${message.errorCode}, ${message.errorMessage}`);
         return false;
       }
       return true;
     } catch (error) {
-      console.error(`SMS Channel (${this.alertId}): failed to send message, ${error}`);
+      Logger.error(`SMS Channel (${this.alertId}): failed to send message, ${error}`);
       return false;
     }
   }
@@ -114,7 +115,7 @@ export class SMSAlertChannel extends AlertChannel {
       await this.twilioClient.api.accounts(this.twilioClient.accountSid).fetch();
       return true;
     } catch (error) {
-      console.error(`SMS Channel (${this.alertId}): health check failed, ${error}`);
+      Logger.error(`SMS Channel (${this.alertId}): health check failed, ${error}`);
       return false;
     }
   }

@@ -2,6 +2,7 @@ import { AlertChannel } from "./alert-channel";
 import nodemailer, {Transporter} from "nodemailer";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
+import Logger from "../../utils/logger";
 
 export interface SmtpConfig {
   from: string;
@@ -67,7 +68,7 @@ export class EmailAlertChannel extends AlertChannel {
     try {
       const template = getTemplate("email", templateId);
       if (!template) {
-        console.error(`Email Channel (${this.alertId}): Message Template "${templateId}" not found.`);
+        Logger.error(`Email Channel (${this.alertId}): Message Template "${templateId}" not found.`);
         return false;
       }
       let subject = template.subject;
@@ -87,7 +88,7 @@ export class EmailAlertChannel extends AlertChannel {
 
       return (info.accepted as string[]).length > 0;
     } catch (error) {
-      console.error(`Email Channel (${this.alertId}): Error sending email, ${error}`);
+      Logger.error(`Email Channel (${this.alertId}): Error sending email, ${error}`);
       return false;
     }
   }
@@ -97,7 +98,7 @@ export class EmailAlertChannel extends AlertChannel {
       await this.transporter.verify();
       return true;
     } catch (error) {
-      console.error(`Email Channel (${this.alertId}): health check failed, ${error}`);
+      Logger.error(`Email Channel (${this.alertId}): health check failed, ${error}`);
       return false;
     }
   }

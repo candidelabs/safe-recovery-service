@@ -115,3 +115,25 @@ export function parseSeconds(seconds: number): string {
 
   return parts.join(', ') || '0 seconds';
 }
+
+export function toNormalCase(input: string): string {
+  // First, handle different separators and convert to array of words
+  let words = input
+    // Replace kebab-case (-) with spaces
+    .replace(/-/g, ' ')
+    // Replace snake_case (_) with spaces
+    .replace(/_/g, ' ')
+    // Split camelCase by detecting uppercase letters
+    .replace(/([A-Z])/g, ' $1')
+    // Split on spaces and filter out empty strings
+    .split(/\s+/)
+    .filter(word => word.length > 0);
+
+  // Capitalize first letter of each word and join with spaces
+  return words
+    .map(word =>
+      word.charAt(0).toUpperCase() +
+      word.slice(1).toLowerCase()
+    )
+    .join(' ');
+}

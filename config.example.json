@@ -84,7 +84,11 @@
         }
       },
       "guardian": "signer-1",
-      "alerts": "alert-2"
+      "alerts": "alert-2",
+      "indexer": {
+        "enabled": true,
+        "startBlock": 4337
+      }
     }
   }
 }
