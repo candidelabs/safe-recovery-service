@@ -85,11 +85,14 @@ This configuration file is used to set up and customize the service. It consists
 	+ `jsonRpcEndpoint`: The JSON-RPC endpoint of the network.
 	+ `recoveryModuleAddress`: The address of the recovery module.
 	+ `executeRecoveryRequests`: Controls whether the service will execute the recovery after all required signatures are collected. It has a `enabled` boolean field, and requires the `id` of a `signer` to be specified if enabled.
+      + `rateLimit`: Controls the rate limiting for recovery executions by the service (omitted or `~` if no rate limit)
+        * `maxPerAccount`: The maximum number of recovery executions allowed per account within the specified period.
+        * `period`: The time period for which the rate limit is applied.
 	+ `finalizeRecoveryRequests`: Controls whether the service will finalize the recovery after the grace period is over. It has a `enabled` boolean field, and requires the `id` of a `signer` to be specified if enabled.
+	  + `rateLimit`: Controls the rate limiting for recovery finalizations by the service (omitted or `~` if no rate limit)
+        * `maxPerAccount`: The maximum number of recovery finalizations allowed per account within the specified period.
+        * `period`: The time period for which the rate limit is applied.
 	+ `alerts`: Optionally specifies the alert to use for this network with with an alert `id`.
-    + `rateLimit`: Settings to controls the rate limiting:
-        * `maxPerAccount`: The maximum number of requests allowed per account within the specified period. Can be disabled with `"~"`.
-        * `period`: The time period for which the rate limit is applied. Can be disabled with `"~"`.
 
 > [!TIP]
 The config file supports loading values from `.env`. Prefix the value with `ENV::` followed by the name of the env variable. Example: `privateKey: ENV::PRIVATE_KEY` loads the value of the `PRIVATE_KEY` .env variable into the `privateKey` field
