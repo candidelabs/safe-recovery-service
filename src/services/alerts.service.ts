@@ -7,20 +7,15 @@ import {
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
-import {AlertChannel} from "../models/alert/alert-channel";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
+import {Configuration} from "../config/config-manager";
+
 
 export const createSubscription = async (account: string, chainId: number, channel: string, target: string, timestamp: number, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
-  let alertChannel: AlertChannel | undefined;
-  for (const network of Network.instances.instances) {
-    const _alertChannel = Alerts.instance().getAlertChannel(network.alert ?? "", channel);
-    if (!_alertChannel) continue;
-    alertChannel = _alertChannel;
-    break;
-  }
+  const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
-    throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported on any network`);
+    throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported for alerts`);
   }
   //
   const sanitizedTarget = await alertChannel.sanitizeTarget(target);
@@ -89,13 +84,7 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
     throw new ApiError(httpStatus.BAD_REQUEST, `Alert subscription already active`);
   }
   //
-  let alertChannel: AlertChannel | undefined;
-  for (const network of Network.instances.instances){
-    const _alertChannel = Alerts.instance().getAlertChannel(network.alert ?? "", alertSubscription.channel);
-    if (!_alertChannel) continue;
-    alertChannel = _alertChannel;
-    break;
-  }
+  const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, alertSubscription.channel);
   if (!alertChannel){
     throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, `Channel '${alertSubscription.channel}' no longer exists, please contact support`);
   }

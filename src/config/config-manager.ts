@@ -14,6 +14,7 @@ type Config = {
   options: {
     env: string;
     port: number | string;
+    indexerAlert: string;
     sentryDSN?: string;
     trustProxy: boolean | string;
   };
@@ -74,6 +75,7 @@ export class Configuration {
   public environment!: string;
   public port!: number;
   public sentryDSN?: string;
+  public indexerAlert!: string;
   public trustProxy!: boolean;
   private readonly config: Config;
   private static _instance?: Configuration;
@@ -128,8 +130,8 @@ export class Configuration {
   }
 
   private initializeOptions(options: Config["options"]) {
-    if (!options.env || !options.port) {
-      throw new Error("Options configuration is invalid. 'env' and 'port' are required.");
+    if (!options.env || !options.port || !options.indexerAlert) {
+      throw new Error("Options configuration is invalid. 'env', 'port' and 'indexerAlert' are required.");
     }
     options.env = options.env.toLowerCase();
     if (options.env !== "development" && options.env !== "production") {
@@ -144,7 +146,8 @@ export class Configuration {
     }
     this.environment = options.env;
     this.port = port;
-    this.trustProxy = options.trustProxy.toString().toLowerCase() === "true";
+    this.indexerAlert = options.indexerAlert;
+    this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
   }
 
   private initializeSigners(signers: Config["signers"]) {
@@ -277,6 +280,9 @@ export class Configuration {
         }
       }
     });
+    if (!Alerts.instance().alertIdExists(this.indexerAlert)){
+      throw new Error(`options.indexerAlert '${this.indexerAlert}' is not found in declared alerts.`);
+    }
   }
 
   private initializeNetworks(networks: Config["networks"]) {
