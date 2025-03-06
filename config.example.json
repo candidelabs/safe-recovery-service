@@ -2,6 +2,7 @@
   "options": {
     "env": "development",
     "port": "4337",
+    "indexerAlert": "alert-1",
     "trustProxy": true,
     "sentryDSN": "..."
   },

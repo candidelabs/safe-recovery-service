@@ -46,9 +46,11 @@ This configuration file is used to set up and customize the service. It consists
 
 #### Options
 
-* `env`: The environment in which the service is running. Can be either `"development"` or `"production"`.
-* `port`: The port number where the server will run.
-* `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes.
+* `env`: The environment in which the service is running. Can be either `"development"` or `"production"`. (required)
+* `port`: The port number where the server will run. (required)
+* `indexerAlert`: Specifies the alert id to use for the alert system. (required)
+* `trustProxy`: Specifies whether the app is sitting behind a proxy and trusts this proxy. (optional, default: true)
+* `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes. (optional)
 
 #### Signers
 
