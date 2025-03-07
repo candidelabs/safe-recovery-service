@@ -303,20 +303,21 @@ export class Indexer {
       }
       const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
       if (accountSubscriptions && accountSubscriptions.length > 0){
-        const promise = accountEventTracker.getEventSummary(account, this.network.chainId).then((message) => {
+        const message = await accountEventTracker.getEventSummary(account, this.network.chainId);
+        if (message){
           for (const subscription of accountSubscriptions){
-            prisma.alertSubscriptionNotification.create({
+            const promise = prisma.alertSubscriptionNotification.create({
               data: {
                 account: account,
                 channel: subscription.channel,
                 target: subscription.target,
-                data: {message},
+                data: {message: {...message}},
                 deliveryStatus: "PENDING"
               }
             });
+            promises.push(promise);
           }
-        });
-        promises.push(promise);
+        }
       }
       accountEventTracker.clearEventsForAccount(account, this.network.chainId);
     }

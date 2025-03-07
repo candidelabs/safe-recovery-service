@@ -81,16 +81,26 @@ export class SMSAlertChannel extends AlertChannel {
     return ethers.utils.id(seed + challenge) === hashedChallenge;
   }
 
-  async sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, string>): Promise<boolean> {
+  async sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, any>): Promise<boolean> {
     try {
       const template = getTemplate("sms", templateId);
       if (!template) {
         Logger.error(`SMS Channel (${this.alertId}): Message Template "${templateId}" not found.`);
         return false;
       }
-      let body = template.body;
+      let body: string;
+      if (typeof template.body === "function"){
+        if (templateOverrides) {
+          body = template.body(templateOverrides.argumentData)
+        }else{
+          body = template.body();
+        }
+      }else{
+        body = template.body;
+      }
       if (templateOverrides) {
         for (const [key, value] of Object.entries(templateOverrides)) {
+          if (key == "argumentData") continue;
           body = body.replace(new RegExp(`{{${key}}}`, "g"), value);
         }
       }

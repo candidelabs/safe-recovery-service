@@ -116,6 +116,15 @@ export function parseSeconds(seconds: number): string {
   return parts.join(', ') || '0 seconds';
 }
 
+export function escapeHtml(text: string) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+};
+
 export function toNormalCase(input: string): string {
   // First, handle different separators and convert to array of words
   let words = input

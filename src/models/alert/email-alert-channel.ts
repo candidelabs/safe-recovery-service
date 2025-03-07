@@ -64,17 +64,28 @@ export class EmailAlertChannel extends AlertChannel {
     return ethers.utils.id(seed + challenge) === hashedChallenge;
   }
 
-  async sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, string>): Promise<boolean> {
+  async sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, any>): Promise<boolean> {
     try {
       const template = getTemplate("email", templateId);
       if (!template) {
         Logger.error(`Email Channel (${this.alertId}): Message Template "${templateId}" not found.`);
         return false;
       }
-      let subject = template.subject;
-      let body = template.body;
+      let subject: string;
+      let body: string;
+      subject = template.subject;
+      if (typeof template.body === "function"){
+        if (templateOverrides) {
+          body = template.body(templateOverrides.argumentData)
+        }else{
+          body = template.body();
+        }
+      }else{
+        body = template.body;
+      }
       if (templateOverrides) {
         for (const [key, value] of Object.entries(templateOverrides)) {
+          if (key == "argumentData") continue;
           subject = subject.replace(new RegExp(`{{${key}}}`, "g"), value);
           body = body.replace(new RegExp(`{{${key}}}`, "g"), value);
         }

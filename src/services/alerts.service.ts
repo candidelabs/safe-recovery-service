@@ -9,7 +9,9 @@ import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
 import {Configuration} from "../config/config-manager";
-
+import {AlertSubscriptionNotification, Prisma} from "@prisma/client";
+import * as cron from "node-cron";
+import {SummaryMessageData} from "../utils/interfaces";
 
 export const createSubscription = async (account: string, chainId: number, channel: string, target: string, timestamp: number, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
@@ -54,7 +56,7 @@ export const createSubscription = async (account: string, chainId: number, chann
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase());
   await alertChannel.sendMessage("otpVerification", target, {
-    "subject": "OTP Verification for Safe Recovery",
+    "subject": "OTP Verification for Safe Recovery Module Alerts",
     "otp": challenge
   });
   //
@@ -167,3 +169,45 @@ export const unsubscribe = async (subscriptionId: string) => {
   AccountEventTracker.instance().removeSubscription(alertSubscription.account, alertSubscription.id);
   return true;
 };
+
+let sendingBusy = false;
+export const startSendNotificationsCronJob = () => {
+  const cronJob = cron.schedule('*/10 * * * * *', async () => {
+    if (sendingBusy) return;
+    sendingBusy = true;
+    const notifications = await prisma.alertSubscriptionNotification.findMany({where: {deliveryStatus: "PENDING"}});
+    for (const notification of notifications) {
+      await _sendNotification(notification);
+    }
+    sendingBusy = false;
+  });
+  cronJob.start();
+}
+
+async function _sendNotification(notification: AlertSubscriptionNotification){
+  const indexerAlertId = Configuration.instance().indexerAlert;
+  const alertChannel = Alerts.instance().getAlertChannel(indexerAlertId, notification.channel);
+  if (!alertChannel){
+    const data = {...notification.data as Prisma.JsonObject, failedReason: `Alert channel ${notification.channel} not found on ${indexerAlertId}`};
+    await prisma.alertSubscriptionNotification.update({
+      data: {data: data, deliveryStatus: "FAILED",},
+      where: {id: notification.id}
+    });
+    return;
+  }
+  const message = (notification.data as Record<string, any>)["message"] as SummaryMessageData;
+  await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENDING",}, where: {id: notification.id}});
+  const success = await alertChannel.sendMessage(
+    "notification",
+    notification.target,
+    {
+      argumentData: message,
+      subject: "Security: Changes have been made to your social recovery setting",
+    }
+  );
+  if (success){
+    await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENT",}, where: {id: notification.id}});
+  }else{
+    await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "FAILED",}, where: {id: notification.id}});
+  }
+}

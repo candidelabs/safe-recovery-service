@@ -35,7 +35,7 @@ export abstract class AlertChannel {
    * @param target The target email address or phone number.
    * @param templateOverrides The template overrides.
    */
-  abstract sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, string>): Promise<boolean>;
+  abstract sendMessage(templateId: MessageTemplates, target: string, templateOverrides?: Record<string, any>): Promise<boolean>;
 
   /**
    * Performs a health check to determine if the alert channel is available.

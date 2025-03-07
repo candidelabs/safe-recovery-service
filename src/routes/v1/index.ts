@@ -1,6 +1,7 @@
 import express, { Router } from "express";
 import recoveriesRoute from "./recoveries.route";
 import authRoute from "./auth.route";
+import alertsRoute from "./alerts.route";
 
 const router = express.Router();
 
@@ -11,7 +12,8 @@ type Route = {
 
 const defaultRoutes: Array<Route> = [
   { path: "/recoveries", route: recoveriesRoute },
-  { path: "/auth", route: authRoute }
+  { path: "/auth", route: authRoute },
+  { path: "/alerts", route: alertsRoute },
 ];
 
 defaultRoutes.forEach((route) => {

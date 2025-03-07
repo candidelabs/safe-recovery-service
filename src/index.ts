@@ -1,3 +1,5 @@
+import {startSendNotificationsCronJob} from "./services/alerts.service";
+
 require('dotenv').config();
 import {Configuration} from "./config/config-manager";
 import "./utils/extensions/string.extensions"
@@ -10,9 +12,10 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
-import {ApiError} from "./utils";
+import {ApiError, delay} from "./utils";
 import Logger from "./utils/logger";
 import {errorConverter, errorHandler} from "./middlewares";
+import {AccountEventTracker} from "./models/events/account-event-tracker";
 
 const app: Express = express();
 const configuration = Configuration.instance();
@@ -68,4 +71,9 @@ app.use(errorHandler);
 
 app.listen(configuration.port, () => {
   Logger.info(`Listening to port ${configuration.port}`);
+  //
+  delay(2500).then(async () => {
+    await AccountEventTracker.instance().loadSubscriptions();
+    startSendNotificationsCronJob();
+  })
 });

@@ -6,6 +6,7 @@ import {GuardianAddedEvent} from "./guardian-added-event";
 import {GuardianRevokedEvent} from "./guardian-revoked-event";
 import {ChangedThresholdEvent} from "./changed-threshold-event";
 import {prisma} from "../../config/prisma-client";
+import {SummaryMessageData} from "../../utils/interfaces";
 
 interface SubscriptionData {
   subscriptionId: string;
@@ -20,7 +21,6 @@ export class AccountEventTracker {
 
   private constructor() {
     this.eventsByAccount = new Map();
-    this.loadSubscriptions();
   }
 
   public static instance(): AccountEventTracker {
@@ -30,7 +30,7 @@ export class AccountEventTracker {
     return AccountEventTracker._instance;
   }
 
-  private async loadSubscriptions(){
+  public async loadSubscriptions(){
     const subscriptions = await prisma.alertSubscription.findMany({where:{active: true}});
     for (const subscription of subscriptions){
       if (!this.subscriptions.has(subscription.account)){
@@ -119,63 +119,64 @@ export class AccountEventTracker {
     return chainAccounts;
   }
 
-  public async getEventSummary(account: string, chainId: number): Promise<string> {
+  public async getEventSummary(account: string, chainId: number): Promise<SummaryMessageData | undefined> {
     const events = this.getEventsForAccount(account, chainId);
     if (events.length === 0) {
-      return "";
+      return undefined;
     }
 
     const network = Network.instances.get(chainId.toString())!;
     const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
 
     let latestRecoveryEvent: IndexedEvent | undefined;
-    for (const event of events){
+    for (const event of events) {
       if (event.eventType !== EventType.RecoveryExecuted
-      && event.eventType !== EventType.RecoveryFinalized
-      && event.eventType !== EventType.RecoveryCanceled) continue;
+        && event.eventType !== EventType.RecoveryFinalized
+        && event.eventType !== EventType.RecoveryCanceled) continue;
       latestRecoveryEvent = event;
     }
 
-    // Separate critical and non-critical events
     const guardianManagementEvents = events.filter(e =>
       e.eventType === EventType.GuardianAdded ||
       e.eventType === EventType.GuardianRevoked ||
       e.eventType === EventType.ChangedThreshold
     );
 
-    const messageParts: string[] = [`Security: Changes have been made to your social recovery settings on ${toNormalCase(network.name)} (chainId: ${network.chainId})`];
+    const result: SummaryMessageData = {
+      header: `Security: Changes have been made to your social recovery settings on ${toNormalCase(network.name)} (chainId: ${network.chainId})`
+    };
+
+    // Handle critical events
     if (latestRecoveryEvent) {
-      messageParts.push("=== CRITICAL ===\n");
       const data = latestRecoveryEvent.getIndexedData();
       let details: string;
       switch (latestRecoveryEvent.eventType) {
         case EventType.RecoveryExecuted:
           details = `RECOVERY EXECUTED
-  New Threshold: ${data.newThreshold}
-  Nonce: ${data.nonce}
-  Execute After: ${new Date(Number(data.executeAfter)).toISOString()}
-  Guardian Approvals: ${data.guardiansApprovalCount}
-  Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
+New Threshold: ${data.newThreshold}
+Nonce: ${data.nonce}
+Execute After: ${new Date(Number(data.executeAfter)).toISOString()}
+Guardian Approvals: ${data.guardiansApprovalCount}
+Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
           break;
         case EventType.RecoveryFinalized:
           details = `RECOVERY FINALIZED
-  New Threshold: ${data.newThreshold}
-  Nonce: ${data.nonce}
-  Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
+New Threshold: ${data.newThreshold}
+Nonce: ${data.nonce}
+Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
           break;
         case EventType.RecoveryCanceled:
           details = `RECOVERY CANCELED
-  Nonce: ${data.nonce}
-  Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
+Nonce: ${data.nonce}
+Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
           break;
         default:
-          details = ''; // Shouldn't happen
+          details = '';
       }
-      messageParts.push(details + "\n");
-      messageParts.push("==============================\n");
+      result.critical = details
     }
 
-    // Handle non-critical events summary
+    // Handle non-critical events
     let guardianAddCount = 0;
     let guardianRevokeCount = 0;
     let latestThreshold: bigint | undefined;
@@ -220,14 +221,12 @@ export class AccountEventTracker {
     if (latestThreshold !== undefined) {
       summaryParts.push(`Threshold: ${latestThreshold}`);
     }
-    summaryParts.push(`Current Guardians:\n${currentGuardians.join("\n")}`)
-
+    summaryParts.push(`Current Guardians:\n${currentGuardians.join("\n")}`);
 
     if (summaryParts.length > 0) {
-      messageParts.push("Account Changes:\n");
-      messageParts.push('• ' + summaryParts.join('\n• ') + "\n");
+      result.accountChanges = summaryParts
     }
 
-    return messageParts.join('\n');
+    return result;
   }
 }
