@@ -95,6 +95,9 @@ This configuration file is used to set up and customize the service. It consists
         * `maxPerAccount`: The maximum number of recovery finalizations allowed per account within the specified period.
         * `period`: The time period for which the rate limit is applied.
 	+ `alerts`: Optionally specifies the alert to use for this network with with an alert `id`.
+    + `indexer`: Specifies whether the indexer is enabled, and the first indexing block for first time run
+      * `enabled`: A boolean indicating whether the indexer is enabled.
+      * `startBlock`: A number that specifies from which block should the indexer start indexing (should be the block at which the recovery module was deployed), Note: this value will be ignored after the first time the indexer starts as it'll rely on its recorded last indexed block
 
 > [!TIP]
 The config file supports loading values from `.env`. Prefix the value with `ENV::` followed by the name of the env variable. Example: `privateKey: ENV::PRIVATE_KEY` loads the value of the `PRIVATE_KEY` .env variable into the `privateKey` field
