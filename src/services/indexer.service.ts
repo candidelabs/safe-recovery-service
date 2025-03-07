@@ -86,11 +86,16 @@ export class Indexer {
     //
     if (!this.active) return;
     Logger.debug(`Started Indexer (${this.network.name})!`);
-    this.cronJob = cron.schedule('*/15 * * * * *', async () => {
-      if (!this.storingBusy && !this.indexingBusy){
-        this.storeEvents(this.latestFromBlock);
+    let counter = 0;
+    this.cronJob = cron.schedule('*/5 * * * * *', async () => {
+      if (counter % 2 == 0){
+        const storeEvents = !this.storingBusy && !this.indexingBusy;
+        if (storeEvents){
+          await this.storeEvents(this.latestFromBlock);
+        }
       }
-      if (!this.indexingBusy){
+      const indexNewBlocks = !this.indexingBusy && !this.storingBusy;
+      if (indexNewBlocks){
         this.indexNewBlocks();
       }
     });
