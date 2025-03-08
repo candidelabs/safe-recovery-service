@@ -57,10 +57,15 @@
       "id": "alert-2",
       "channels": {
         "email": {
-          "webhook": "https://....com"
+          "webhook": {
+            "endpoint": "https://webhook.endpoint/",
+            "authorizationHeader": "Bearer BEARER_TOKEN"
+          }
         },
         "sms": {
-          "webhook": "https://....com"
+          "webhook": {
+            "endpoint": "https://webhook.endpoint/"
+          }
         }
       }
     }

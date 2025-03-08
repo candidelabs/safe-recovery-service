@@ -3,16 +3,24 @@ import twilio, { Twilio } from "twilio";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
 import Logger from "../../utils/logger";
+import {TwilioConfig, WebhookConfig} from "../../utils/interfaces";
+import ky from "ky";
 
 export class SMSAlertChannel extends AlertChannel {
-  private twilioClient: Twilio;
-  private readonly fromNumber: string;
+  private readonly twilioConfig?: TwilioConfig;
+  private readonly twilioClient?: Twilio;
+  private webhook?: WebhookConfig;
 
-  constructor(alertId: string, accountSid: string, authToken: string, fromNumber: string) {
+  constructor(alertId: string, twilioConfig: TwilioConfig | undefined, webhookConfig: WebhookConfig | undefined) {
     super(alertId, "sms");
     this.alertId = alertId;
-    this.twilioClient = twilio(accountSid, authToken);
-    this.fromNumber = fromNumber;
+    if (twilioConfig){
+      this.twilioConfig = twilioConfig;
+      this.twilioClient = twilio(twilioConfig.accountSid, twilioConfig.authToken);
+    }
+    if (webhookConfig){
+      this.webhook = webhookConfig;
+    }
   }
 
   async sanitizeTarget(target: string): Promise<string | undefined> {
@@ -52,11 +60,14 @@ export class SMSAlertChannel extends AlertChannel {
         return undefined
       }
     }
-    const lookup = await this.twilioClient.lookups.v2.phoneNumbers(sanitizedNumber).fetch();
-    if (!lookup.valid){
-      return undefined;
+    if (this.twilioClient){
+      const lookup = await this.twilioClient.lookups.v2.phoneNumbers(sanitizedNumber).fetch();
+      if (!lookup.valid){
+        return undefined;
+      }
+      return lookup.phoneNumber;
     }
-    return lookup.phoneNumber;
+    return sanitizedNumber;
   }
 
   async maskTarget(target: string): Promise<string> {
@@ -104,16 +115,37 @@ export class SMSAlertChannel extends AlertChannel {
           body = body.replace(new RegExp(`{{${key}}}`, "g"), value);
         }
       }
-      const message = await this.twilioClient.messages.create({
-        body: body,
-        from: this.fromNumber,
-        to: target,
-      });
-      if (message.errorCode !== null){
-        Logger.error(`SMS Channel (${this.alertId}): failed to send message, ${message.errorCode}, ${message.errorMessage}`);
-        return false;
+      if (this.twilioClient){
+        const message = await this.twilioClient.messages.create({
+          body: body,
+          from: this.twilioConfig!.fromNumber,
+          to: target,
+        });
+        if (message.errorCode !== null){
+          Logger.error(`SMS Channel (${this.alertId}): Twilio client failed to send message, ${message.errorCode}, ${message.errorMessage}`);
+          return false;
+        }
+        return true;
+      }else{
+        const headers: Record<string, string> = {};
+        if (this.webhook!.authorizationHeader){
+          headers["Authorization"] = this.webhook!.authorizationHeader;
+        }
+        const webhookPayload = {
+          channel: "sms",
+          target: target,
+          text: body,
+        };
+        const response = await ky.post(this.webhook!.endpoint, {json: webhookPayload, headers});
+        if (response.status >= 200 && response.status < 300) {
+          return true;
+        } else {
+          Logger.error(
+            `SMS Channel (${this.alertId}): Webhook failed with status ${response.status}`
+          );
+          return false;
+        }
       }
-      return true;
     } catch (error) {
       Logger.error(`SMS Channel (${this.alertId}): failed to send message, ${error}`);
       return false;
@@ -122,7 +154,19 @@ export class SMSAlertChannel extends AlertChannel {
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.twilioClient.api.accounts(this.twilioClient.accountSid).fetch();
+      if (this.twilioClient){
+        await this.twilioClient.api.accounts(this.twilioClient.accountSid).fetch();
+      }else{
+        const headers: Record<string, string> = {};
+        if (this.webhook!.authorizationHeader){
+          headers["Authorization"] = this.webhook!.authorizationHeader;
+        }
+        const response = await ky.get(this.webhook!.endpoint, {
+          searchParams: {"channel": "sms"},
+          headers
+        });
+        return response.status >= 200 && response.status < 300;
+      }
       return true;
     } catch (error) {
       Logger.error(`SMS Channel (${this.alertId}): health check failed, ${error}`);

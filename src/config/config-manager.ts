@@ -3,12 +3,14 @@ import {ethereumAddress, ethereumPrivateKey} from "../validations/custom.validat
 import {PrivateKeySigner} from "../models/signer/private-key-signer";
 import {Signers} from "../models/signer/signers";
 import {Alerts} from "../models/alert/alerts";
-import {EmailAlertChannel, SmtpConfig} from "../models/alert/email-alert-channel";
+import {EmailAlertChannel} from "../models/alert/email-alert-channel";
 import {SMSAlertChannel} from "../models/alert/sms-alert-channel";
 import {Network} from "../models/network";
 import {ethers} from "ethers";
 import {KMSSigner} from "../models/signer/kms-signer";
 import {e164Regex, periodToSeconds} from "../utils";
+import {SmtpConfig, TwilioConfig, WebhookConfig} from "../utils/interfaces";
+import isURL from "validator/lib/isURL";
 
 type Config = {
   options: {
@@ -33,15 +35,11 @@ type Config = {
     channels: {
       email?: {
         smtp?: SmtpConfig;
-        webhook?: string;
+        webhook?: WebhookConfig;
       };
       sms?: {
-        twilio?: {
-          accountSid: string,
-          authToken: string,
-          fromNumber: string
-        };
-        webhook?: string;
+        twilio?: TwilioConfig
+        webhook?: WebhookConfig;
       };
     };
   }>;
@@ -200,7 +198,7 @@ export class Configuration {
       }
       const channels = alert.channels;
       if (!channels.email && !channels.sms) {
-        throw new Error(`Alert '${alert.id}' must have at least one channel (email or sms).`);
+        throw new Error(`Alert '${alert.id}' must have at least one channel defined (email or sms).`);
       }
 
       if (channels.email) {
@@ -214,6 +212,7 @@ export class Configuration {
             `Email channel for alert '${alert.id}' cannot have both 'smtp' and 'webhook' defined.`
           );
         }
+        let emailAlertChannel: EmailAlertChannel;
         if (channels.email.smtp){
           const smtpPort = Number(channels.email.smtp.port);
           if (isNaN(smtpPort) || smtpPort <= 0) {
@@ -237,12 +236,18 @@ export class Configuration {
           if (channels.email.smtp.auth.type.toLowerCase() == 'login' && !channels.email.smtp.auth.pass){
             throw new Error(`Email channel for alert '${alert.id}' must have 'smtp.auth.pass' because type is defined as 'login'`);
           }
-          const emailAlertChannel = new EmailAlertChannel(alert.id, channels.email.smtp);
-          Alerts.instance().addAlertChannel(alert.id, emailAlertChannel);
+          emailAlertChannel = new EmailAlertChannel(alert.id, channels.email.smtp, undefined);
         }
         if (channels.email.webhook){
-          // todo
+          if (!channels.email.webhook.endpoint){
+            throw new Error(`Email channel for alert '${alert.id}' webhook config must have 'webhook.endpoint' defined.`);
+          }
+          if (!isURL(channels.email.webhook.endpoint)){
+            throw new Error(`Email channel for alert '${alert.id}' invalid url for 'webhook.endpoint' defined.`);
+          }
+          emailAlertChannel = new EmailAlertChannel(alert.id, undefined, channels.email.webhook);
         }
+        Alerts.instance().addAlertChannel(alert.id, emailAlertChannel!);
       }
 
       if (channels.sms) {
@@ -256,28 +261,30 @@ export class Configuration {
             `SMS channel for alert '${alert.id}' cannot have both 'twilio' and 'webhook'.`
           );
         }
+        let smsAlertChannel: SMSAlertChannel;
         if (channels.sms.twilio){
           if (
             !channels.sms.twilio.accountSid
             || !channels.sms.twilio.authToken
             || !channels.sms.twilio.fromNumber
           ) {
-            throw new Error(`SMS channel for alert '${alert.id}' must have all fields 'twilio.accountSid', 'twilio.authToken', and 'twilio.fromNumber' defined.`);
+            throw new Error(`SMS channel for alert '${alert.id}' twilio config must have all fields 'twilio.accountSid', 'twilio.authToken', and 'twilio.fromNumber' defined.`);
           }
           if (!e164Regex.test(channels.sms.twilio.fromNumber)){
-            throw new Error(`SMS channel for alert '${alert.id}' must have a valid 'twilio.fromNumber' value that follows E.164 format (https://www.twilio.com/docs/glossary/what-e164).`);
+            throw new Error(`SMS channel for alert '${alert.id}' twilio config must have a valid 'twilio.fromNumber' value that follows E.164 format (https://www.twilio.com/docs/glossary/what-e164).`);
           }
-          const smsAlertChannel = new SMSAlertChannel(
-            alert.id,
-            channels.sms.twilio.accountSid,
-            channels.sms.twilio.authToken,
-            channels.sms.twilio.fromNumber
-          );
-          Alerts.instance().addAlertChannel(alert.id, smsAlertChannel);
+          smsAlertChannel = new SMSAlertChannel(alert.id, channels.sms.twilio, undefined);
         }
         if (channels.sms.webhook){
-          // todo
+          if (!channels.sms.webhook.endpoint){
+            throw new Error(`SMS channel for alert '${alert.id}' webhook config must have 'webhook.endpoint' defined.`);
+          }
+          if (!isURL(channels.sms.webhook.endpoint)){
+            throw new Error(`SMS channel for alert '${alert.id}' invalid url for 'webhook.endpoint' defined.`);
+          }
+          smsAlertChannel = new SMSAlertChannel(alert.id, undefined, channels.sms.webhook);
         }
+        Alerts.instance().addAlertChannel(alert.id, smsAlertChannel!);
       }
     });
     if (!Alerts.instance().alertIdExists(this.indexerAlert)){

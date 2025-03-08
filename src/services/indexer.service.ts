@@ -119,7 +119,6 @@ export class Indexer {
           await delay(350);
           continue;
         }
-        // logger.info(`Indexing blocks from ${fromBlock} to ${toBlock}`);
         concurrentRequests++;
         const promise = this.processBlockRange(fromBlock, toBlock, (success) => {
           concurrentRequests--;

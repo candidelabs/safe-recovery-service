@@ -3,40 +3,35 @@ import nodemailer, {Transporter} from "nodemailer";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
 import Logger from "../../utils/logger";
+import ky from "ky";
+import {SmtpConfig, WebhookConfig} from "../../utils/interfaces";
 
-export interface SmtpConfig {
-  from: string;
-  //
-  host: string;
-  port: number;
-  secure: boolean;
-  auth: {
-    type: 'oauth2' | 'login';
-    user: string;
-    pass?: string;
-    accessToken?: string
-  }
-}
 
 export class EmailAlertChannel extends AlertChannel {
-  private smtpConfig: SmtpConfig;
-  private transporter: Transporter;
+  private smtp?: SmtpConfig;
+  private transporter?: Transporter;
+  private webhook?: WebhookConfig;
 
-  constructor(alertId: string, smtpConfig: SmtpConfig) {
+  constructor(alertId: string, smtp: SmtpConfig | undefined, webhookConfig: WebhookConfig | undefined) {
     super(alertId, "email");
-    this.smtpConfig = smtpConfig;
-    this.transporter = nodemailer.createTransport({
-      // @ts-ignore
-      host: smtpConfig.host,
-      port: smtpConfig.port,
-      secure: smtpConfig.secure,
-      auth: {
-        type: smtpConfig.auth.type,
-        user: smtpConfig.auth.user,
-        pass: smtpConfig.auth.pass,
-        accessToken: smtpConfig.auth.accessToken,
-      },
-    });
+    if (smtp){
+      this.smtp = smtp;
+      this.transporter = nodemailer.createTransport({
+        // @ts-ignore
+        host: smtp.host,
+        port: smtp.port,
+        secure: smtp.secure,
+        auth: {
+          type: smtp.auth.type,
+          user: smtp.auth.user,
+          pass: smtp.auth.pass,
+          accessToken: smtp.auth.accessToken,
+        },
+      });
+    }
+    if (webhookConfig){
+      this.webhook = webhookConfig;
+    }
   }
 
   async sanitizeTarget(target: string): Promise<string | undefined> {
@@ -90,14 +85,36 @@ export class EmailAlertChannel extends AlertChannel {
           body = body.replace(new RegExp(`{{${key}}}`, "g"), value);
         }
       }
-      const info = await this.transporter.sendMail({
-        from: this.smtpConfig.from,
-        to: target,
-        subject: subject,
-        [template.isHtml ? "html" : "text"]: body,
-      });
+      if (this.transporter){
+        const info = await this.transporter.sendMail({
+          from: this.smtp!.from,
+          to: target,
+          subject: subject,
+          [template.isHtml ? "html" : "text"]: body,
+        });
 
-      return (info.accepted as string[]).length > 0;
+        return (info.accepted as string[]).length > 0;
+      }else{
+        const headers: Record<string, string> = {};
+        if (this.webhook!.authorizationHeader){
+          headers["Authorization"] = this.webhook!.authorizationHeader;
+        }
+        const webhookPayload = {
+          channel: "email",
+          target: target,
+          subject: subject,
+          [template.isHtml ? "html" : "text"]: body,
+        };
+        const response = await ky.post(this.webhook!.endpoint, {json: webhookPayload, headers});
+        if (response.status >= 200 && response.status < 300) {
+          return true;
+        } else {
+          Logger.error(
+            `Email Channel (${this.alertId}): Webhook failed with status ${response.status}`
+          );
+          return false;
+        }
+      }
     } catch (error) {
       Logger.error(`Email Channel (${this.alertId}): Error sending email, ${error}`);
       return false;
@@ -106,7 +123,19 @@ export class EmailAlertChannel extends AlertChannel {
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.transporter.verify();
+      if (this.transporter){
+        await this.transporter.verify();
+      }else{
+        const headers: Record<string, string> = {};
+        if (this.webhook!.authorizationHeader){
+          headers["Authorization"] = this.webhook!.authorizationHeader;
+        }
+        const response = await ky.get(this.webhook!.endpoint, {
+          searchParams: {"channel": "email"},
+          headers
+        });
+        return response.status >= 200 && response.status < 300;
+      }
       return true;
     } catch (error) {
       Logger.error(`Email Channel (${this.alertId}): health check failed, ${error}`);

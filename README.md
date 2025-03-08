@@ -72,11 +72,16 @@ This configuration file is used to set up and customize the service. It consists
             * `smtp` authentication can be done using either:
                 + `oauth2`: Requires `user` and `accessToken`.
                 + `login`: Requires `user` and `password`.
-    	- `webhook`: With a URL.
+		- `webhook`: With a webhook `endpoint` and an optional `authorizationHeader`.
 	+ `sms`: Can be configured using either:
 		- `twilio`: With `accountSid`, `authToken`, and `fromNumber` settings in [Twilio](https://www.twilio.com).
-		- `webhook`: With a URL.
-* Alerts are optional.
+		- `webhook`: With a webhook `endpoint` and an optional `authorizationHeader`.
+* For channels that are configured with webhook, webhooks will get called either with a POST request or a GET request
+  - `POST webhook.endpoint` webhook service is responsible to deliver the message to the target specified, example requests payloads:
+  	- `{channel: "email", taget: target, subject: subject, ["html" or "text"]: message}`
+    - `{channel: "sms", target: target, text: message}`
+    - Response should be a status code between 200-299, which should indicate that the message was sent successfully.
+  - `GET webhook.endpoint` used to check the health and availability of the webhook service, the request will contain a query parameter `channel=email or sms`, response can be any status code between 200-299
 
 #### Networks
 

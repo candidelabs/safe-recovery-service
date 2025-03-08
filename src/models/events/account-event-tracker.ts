@@ -192,6 +192,7 @@ Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transa
             guardianRevokeCount--;
             revokedGuardians.delete(_event.guardian);
           }
+          if (addedGuardians.has(_event.guardian)) continue;
           guardianAddCount++;
           addedGuardians.add(_event.guardian);
           break;
@@ -201,6 +202,7 @@ Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transa
             guardianAddCount--;
             addedGuardians.delete(_event.guardian);
           }
+          if (revokedGuardians.has(_event.guardian)) continue;
           guardianRevokeCount++;
           revokedGuardians.add(_event.guardian);
           break;
