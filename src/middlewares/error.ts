@@ -20,7 +20,12 @@ export const errorConverter = (
   next(error);
 };
 
-export const errorHandler = (err: any, _req: Request, res: Response) => {
+export const errorHandler = (
+  err: any,
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) => {
   let { statusCode, message } = err;
   if (Configuration.instance().environment === "production" && !err.isOperational) {
     statusCode = httpStatus.INTERNAL_SERVER_ERROR;
@@ -39,5 +44,5 @@ export const errorHandler = (err: any, _req: Request, res: Response) => {
     Logger.error(err);
   }
 
-  res.status(statusCode).send(response);
+  res.status(statusCode).json(response);
 };
