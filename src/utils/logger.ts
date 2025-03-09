@@ -1,9 +1,9 @@
 import { Response } from "express";
 import winston from "winston";
-import Sentry from "winston-transport-sentry-node";
 import isURL from "validator/lib/isURL";
 import morgan from "morgan";
 import {Configuration} from "../config/config-manager";
+import {WinstonSentryTransport} from "./winston-sentry-transport";
 
 class Logger {
   private static logger: winston.Logger | undefined;
@@ -37,7 +37,7 @@ class Logger {
         transports: isURL(Configuration.instance().sentryDSN ?? "")
           ? [
             ...this.baseTransport,
-            new Sentry({
+            new WinstonSentryTransport({
               sentry: {
                 dsn: Configuration.instance().sentryDSN,
               },

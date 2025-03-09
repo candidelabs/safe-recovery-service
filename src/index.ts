@@ -1,5 +1,3 @@
-import {startSendNotificationsCronJob} from "./services/alerts.service";
-
 require('dotenv').config();
 import {Configuration} from "./config/config-manager";
 import "./utils/extensions/string.extensions"
@@ -16,6 +14,7 @@ import {ApiError, delay} from "./utils";
 import Logger from "./utils/logger";
 import {errorConverter, errorHandler} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
+import {startSendNotificationsCronJob} from "./services/alerts.service";
 
 const app: Express = express();
 const configuration = Configuration.instance();
