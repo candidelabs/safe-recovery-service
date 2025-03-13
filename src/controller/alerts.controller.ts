@@ -6,7 +6,7 @@ interface SubscribeBody {
   chainId: number;
   channel: string;
   target: string;
-  timestamp: number;
+  message: string;
   signature: string;
 }
 
@@ -18,7 +18,7 @@ interface ActivateSubscriptionBody {
 interface FetchSubscriptionsBody {
   account: string;
   chainId: number;
-  timestamp: number;
+  message: string;
   signature: string;
 }
 
@@ -33,7 +33,7 @@ export const subscribe = catchAsync(async (req, res) => {
     params.chainId,
     params.channel,
     params.target,
-    params.timestamp,
+    params.message,
     params.signature,
   );
   res.send({subscriptionId});
@@ -50,7 +50,7 @@ export const fetchSubscriptions = catchAsync(async (req, res) => {
   const subscriptions = await alertsService.fetchSubscriptions(
     params.account,
     params.chainId,
-    params.timestamp,
+    params.message,
     params.signature
   );
   res.send({subscriptions});

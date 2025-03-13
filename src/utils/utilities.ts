@@ -2,6 +2,9 @@ import {Network} from "../models/network";
 import {BigNumber, ethers, UnsignedTransaction} from "ethers";
 import {GasPriceEstimator} from "../services/gas-price-estimator.service";
 import {hexValue} from "ethers/lib/utils";
+import {SiweErrorType, SiweMessage} from "siwe";
+import {ApiError} from "./error";
+import httpStatus from "http-status";
 
 export const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 export const e164Regex = /^\+?[1-9]\d{1,14}$/;
@@ -146,3 +149,81 @@ export function toNormalCase(input: string): string {
     )
     .join(' ');
 }
+
+const nonceTracker: Set<string> = new Set();
+export function verifySiweMessageData(message: SiweMessage, account: string, chainId: number, statement: string): [boolean, string] {
+  const messageAccount = message.address.toLowerCase();
+  if (message.version !== "1"){
+    return [false, `this service only accepts messages (siwe) that are formatted in version '1'`];
+  }
+  if (messageAccount !== account.toLowerCase()){
+    return [false, `invalid account address in signed message (expected: ${account}, actual ${messageAccount})`];
+  }
+  if (message.statement !== statement){
+    return [false, `invalid message statement in signed message (expected: ${statement}, actual ${message.statement})`];
+  }
+  if (!message.chainId){
+    return [false, `chainId in signed message MUST be specified`];
+  }
+  if (message.chainId !== chainId){
+    return [false, `invalid chainId in signed message (expected: ${chainId}, actual ${message.chainId})`];
+  }
+  const messageIdentifier = ethers.utils.defaultAbiCoder.encode(
+    ["address", "uint256", "string", "string"],
+    [messageAccount, message.chainId, message.statement, message.nonce]
+  );
+  if (nonceTracker.has(messageIdentifier)){
+    return [false, `nonce has been already used in a previous request, please use a random nonce`];
+  }
+  if (!message.issuedAt){
+    return [false, `issuedAt in signed message MUST be specified`];
+  }
+  const messageTimestamp = Date.parse(message.issuedAt);
+  if (Number.isNaN(messageTimestamp)){
+    return [false, `issuedAt could not be parsed in signed message, please make sure it is correctly formatted`];
+  }
+  const currentTimestamp = Date.now();
+  if (message.notBefore){
+    const notBeforeTimestamp = Date.parse(message.notBefore);
+    if (Number.isNaN(notBeforeTimestamp)){
+      return [false, `notBefore could not be parsed in signed message, please make sure it is correctly formatted`];
+    }
+    if (notBeforeTimestamp > currentTimestamp) {
+      return [false, `notBeforeTimestamp has not yet passed, this signature cannot be used until then`];
+    }
+  }
+  if (message.expirationTime){
+    const expirationTimestamp = Date.parse(message.expirationTime);
+    if (Number.isNaN(expirationTimestamp)){
+      return [false, `expirationTime could not be parsed in signed message, please make sure it is correctly formatted`];
+    }
+    if (expirationTimestamp < currentTimestamp) {
+      return [false, `expirationTimestamp has passed and signature has expired`];
+    }
+  }else{
+    if ((currentTimestamp - messageTimestamp) > (60*5*1000)) {
+      return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
+    }
+  }
+  nonceTracker.add(messageIdentifier);
+  return [true, ""];
+}
+
+export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string) {
+  const network = Network.instances.get(chainId.toString())!;
+  const siweMessage = new SiweMessage(message);
+  const [success, errorMessage] = verifySiweMessageData(siweMessage, account, chainId, statement);
+  if (!success){
+    throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${errorMessage}`);
+  }
+  const validSignature = await siweMessage.verify({signature}, {provider: network.jsonRPCProvider});
+  if (!validSignature.success) {
+    if (validSignature.error!.type == SiweErrorType.INVALID_SIGNATURE){
+      throw new ApiError(httpStatus.FORBIDDEN, `SIWE Message: invalid signature, make sure you correctly signed this request, learn more here ...`); // todo add link for signature generation
+    }else{
+      throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${validSignature.error!.type}, received: ${validSignature.error!.received}, expected: ${validSignature.error!.expected}`);
+    }
+  }
+  return true;
+}
+

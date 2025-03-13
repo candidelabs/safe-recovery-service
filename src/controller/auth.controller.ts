@@ -6,7 +6,7 @@ interface CreateRegistrationBody {
   chainId: number;
   channel: string;
   target: string;
-  timestamp: number;
+  message: string;
   signature: string;
 }
 
@@ -18,13 +18,13 @@ interface SubmitChallengeBody {
 interface FetchRegistrationsBody {
   account: string;
   chainId: number;
-  timestamp: number;
+  message: string;
   signature: string;
 }
 
 interface DeleteRegistrationBody {
   registrationId: string;
-  timestamp: number;
+  message: string;
   signature: string;
 }
 
@@ -48,7 +48,7 @@ export const createRegistration = catchAsync(async (req, res) => {
     params.chainId,
     params.channel,
     params.target,
-    params.timestamp,
+    params.message,
     params.signature
   );
   res.send({challengeId: registrationRequestId});
@@ -71,7 +71,7 @@ export const fetchRegistrations = catchAsync(async (req, res) => {
   const registrations = await authService.fetchRegistrations(
     params.account,
     params.chainId,
-    params.timestamp,
+    params.message,
     params.signature
   );
   res.send({registrations});
@@ -81,7 +81,7 @@ export const deleteRegistration = catchAsync(async (req, res) => {
   const params = req.body as DeleteRegistrationBody;
   const success = await authService.deleteRegistration(
     params.registrationId,
-    params.timestamp,
+    params.message,
     params.signature
   );
   res.send({success});

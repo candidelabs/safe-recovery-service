@@ -1,20 +1,15 @@
 import httpStatus from "http-status";
-import {ethers} from "ethers";
-import {
-  ApiError,
-  isValidSignature,
-} from "../utils";
+import {ApiError, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
-import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
 import {Configuration} from "../config/config-manager";
 import {AlertSubscriptionNotification, Prisma} from "@prisma/client";
 import * as cron from "node-cron";
 import {SummaryMessageData} from "../utils/interfaces";
+import {MessageStatements} from "../utils/constants";
 
-export const createSubscription = async (account: string, chainId: number, channel: string, target: string, timestamp: number, signature: string) => {
-  const network = Network.instances.get(chainId.toString())!;
+export const createSubscription = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
     throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported for alerts`);
@@ -25,23 +20,12 @@ export const createSubscription = async (account: string, chainId: number, chann
     throw new ApiError(httpStatus.FORBIDDEN, `Target '${target}' is not compatible with '${channel}' channel`);
   }
   //
-  const currentTimestamp = Date.now();
-  // timestamp should be within 5 minutes of signature timestamp
-  if (Math.abs(currentTimestamp - timestamp) > (60*5*1000)) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Timestamp expired, signature timestamp should be within 5 minutes of sending the request`);
-  }
-  const message = `${channel}:${target}:${timestamp}`; // todo proper message
-  const validSignature = await isValidSignature(
-    account,
-    ethers.utils.toUtf8Bytes(message),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider
-  );
-  if (!validSignature) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
-  }
-  target = sanitizedTarget;
+  let statement = MessageStatements["alerts-subscribe"];
+  statement = statement.replace("{{target}}", target);
+  statement = statement.replace("{{channel}}", channel);
+  await validateSIWEMessage(message, account, chainId, statement, signature);
   //
+  target = sanitizedTarget;
   const existingSubscription = await prisma.alertSubscription.findFirst({
     where: {
       account: {equals: account.toLowerCase()},
@@ -123,25 +107,9 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
   return true;
 };
 
-export const fetchSubscriptions = async (account: string, chainId: number, timestamp: number, signature: string) => {
-  const network = Network.instances.get(chainId.toString())!;
-  //
-  const currentTimestamp = Date.now();
-  // timestamp should be within 5 minutes of signature timestamp
-  if (Math.abs(currentTimestamp - timestamp) > (60*5*1000)) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Timestamp expired, signature timestamp should be within 5 minutes of sending the request`);
-  }
-  //
-  const message = `${chainId}:${timestamp}`; // todo proper message
-  const validSignature = await isValidSignature(
-    account,
-    ethers.utils.toUtf8Bytes(message),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider
-  );
-  if (!validSignature) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
-  }
+export const fetchSubscriptions = async (account: string, chainId: number, message: string, signature: string) => {
+  let statement = MessageStatements["alerts-fetch"];
+  await validateSIWEMessage(message, account, chainId, statement, signature);
   //
   const subscriptions = await prisma.alertSubscription.findMany({
     where: {

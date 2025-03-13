@@ -1,4 +1,5 @@
 import Joi from "joi";
+import {SiweMessage} from "siwe";
 
 export const ethereumAddress: Joi.CustomValidator = (value, helpers) => {
   if (!value.match(/^0x[a-fA-F0-9]{40}$/)) {
@@ -38,3 +39,15 @@ export const hexBigInt: Joi.CustomValidator = (value, helpers) => {
   }
   return value;
 }
+
+export const siweMessage: Joi.CustomValidator = (value, helpers) => {
+  try {
+    new SiweMessage(value);
+  } catch (e) {
+    console.log(e);
+    return helpers.message({
+      custom: `{{#label}} must be a valid SIWE (EIP-4361) message: ${e}`,
+    });
+  }
+  return value;
+};

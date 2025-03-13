@@ -1,15 +1,13 @@
 import httpStatus from "http-status";
-import {BigNumber, ethers} from "ethers";
-import {
-  ApiError, getSocialModuleInstance,
-  isValidSignature,
-} from "../utils";
+import {BigNumber} from "ethers";
+import {ApiError, getSocialModuleInstance, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
+import {MessageStatements} from "../utils/constants";
 
-export const createRegistration = async (account: string, chainId: number, channel: string, target: string, timestamp: number, signature: string) => {
+export const createRegistration = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
   if (!network.guardian){
     throw new ApiError(httpStatus.BAD_REQUEST, `Recovery Guardian is not enabled on this network`);
@@ -24,23 +22,12 @@ export const createRegistration = async (account: string, chainId: number, chann
     throw new ApiError(httpStatus.FORBIDDEN, `Target '${target}' is not compatible with '${channel}' channel`);
   }
   //
-  const currentTimestamp = Date.now();
-  // timestamp should be within 5 minutes of signature timestamp
-  if (Math.abs(currentTimestamp - timestamp) > (60*5*1000)) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Timestamp expired, signature timestamp should be within 5 minutes of sending the request`);
-  }
-  const message = `${chainId}:${channel}:${target}:${timestamp}`; // todo proper message
-  const validSignature = await isValidSignature(
-    account,
-    ethers.utils.toUtf8Bytes(message),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider
-  );
-  if (!validSignature) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
-  }
-  target = sanitizedTarget;
+  let statement = MessageStatements["auth-register"];
+  statement = statement.replace("{{target}}", target);
+  statement = statement.replace("{{channel}}", channel);
+  await validateSIWEMessage(message, account, chainId, statement, signature);
   //
+  target = sanitizedTarget;
   const existingRegistration = await prisma.authRegistration.findFirst({
     where: {
       account: {equals: account.toLowerCase()},
@@ -131,25 +118,10 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   return [registration.id, guardian];
 };
 
-export const fetchRegistrations = async (account: string, chainId: number, timestamp: number, signature: string) => {
-  const network = Network.instances.get(chainId.toString())!;
+export const fetchRegistrations = async (account: string, chainId: number, message: string, signature: string) => {
   //
-  const currentTimestamp = Date.now();
-  // timestamp should be within 5 minutes of signature timestamp
-  if (Math.abs(currentTimestamp - timestamp) > (60*5*1000)) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Timestamp expired, signature timestamp should be within 5 minutes of sending the request`);
-  }
-  //
-  const message = `${chainId}:${timestamp}`; // todo proper message
-  const validSignature = await isValidSignature(
-    account,
-    ethers.utils.toUtf8Bytes(message),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider
-  );
-  if (!validSignature) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
-  }
+  let statement = MessageStatements["auth-fetch"];
+  await validateSIWEMessage(message, account, chainId, statement, signature);
   //
   const registrations = await prisma.authRegistration.findMany({
     where: {
@@ -165,29 +137,15 @@ export const fetchRegistrations = async (account: string, chainId: number, times
   return registrations;
 };
 
-export const deleteRegistration = async (registrationId: string, timestamp: number, signature: string) => {
+export const deleteRegistration = async (registrationId: string, message: string, signature: string) => {
   const authRegistration = await prisma.authRegistration.findFirst({where: {id: {equals: registrationId},}});
   if (!authRegistration){
     throw new ApiError(httpStatus.NOT_FOUND, `Could not find registration with this id`);
   }
   //
-  const currentTimestamp = Date.now();
-  // timestamp should be within 5 minutes of signature timestamp
-  if (Math.abs(currentTimestamp - timestamp) > (60*5*1000)) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Timestamp expired, signature timestamp should be within 5 minutes of sending the request`);
-  }
-  //
-  const network = Network.instances.get(authRegistration.chainId.toString())!;
-  const message = `${registrationId}:${timestamp}`; // todo proper message
-  const validSignature = await isValidSignature(
-    authRegistration.account,
-    ethers.utils.toUtf8Bytes(message),
-    ethers.utils.arrayify(signature),
-    network.jsonRPCProvider
-  );
-  if (!validSignature) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid signature, make sure you correctly signed this request, learn more here ...}`); // todo add link for signature generation
-  }
+  let statement = MessageStatements["auth-delete"];
+  statement = statement.replace("{{id}}", authRegistration.id);
+  await validateSIWEMessage(message, authRegistration.account, authRegistration.chainId, statement, signature);
   //
   await prisma.authRegistration.delete({
     where: {id: registrationId}
