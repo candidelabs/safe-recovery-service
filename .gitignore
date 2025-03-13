@@ -783,3 +783,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# mailpit database
+mailpit.db
