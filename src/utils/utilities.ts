@@ -216,13 +216,9 @@ export async function validateSIWEMessage(message: string, account: string, chai
   if (!success){
     throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${errorMessage}`);
   }
-  const validSignature = await siweMessage.verify({signature}, {provider: network.jsonRPCProvider});
+  const validSignature = await siweMessage.verify({signature}, {provider: network.jsonRPCProvider, suppressExceptions: true});
   if (!validSignature.success) {
-    if (validSignature.error!.type == SiweErrorType.INVALID_SIGNATURE){
-      throw new ApiError(httpStatus.FORBIDDEN, `SIWE Message: invalid signature, make sure you correctly signed this request, learn more here ...`); // todo add link for signature generation
-    }else{
-      throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${validSignature.error!.type}, received: ${validSignature.error!.received}, expected: ${validSignature.error!.expected}`);
-    }
+    throw new ApiError(httpStatus.FORBIDDEN, `SIWE Message: invalid signature, make sure you correctly signed this request, learn more here ...`); // todo add link for signature generation
   }
   return true;
 }
