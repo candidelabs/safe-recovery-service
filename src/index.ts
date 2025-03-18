@@ -16,7 +16,7 @@ import {errorConverter, errorHandler} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
 
-const app: Express = express();
+export const app: Express = express();
 const configuration = Configuration.instance();
 
 // HTTP request logger
