@@ -87,7 +87,7 @@ export class Indexer {
     if (!this.active) return;
     Logger.debug(`Started Indexer (${this.network.name})!`);
     let counter = 0;
-    this.cronJob = cron.schedule('*/5 * * * * *', async () => {
+    this.cronJob = cron.schedule('*/30 * * * * *', async () => {
       if (counter % 2 == 0){
         const storeEvents = !this.storingBusy && !this.indexingBusy;
         if (storeEvents){
@@ -107,7 +107,8 @@ export class Indexer {
     let concurrentRequests = 0;
     try {
       await this.processFailedRanges();
-      const latestOnchainBlock = await this.network.jsonRPCProvider.getBlockNumber();
+      const _latestOnchainBlock = await this.network.jsonRPCProvider.send("eth_blockNumber", []);
+      const latestOnchainBlock = parseInt(_latestOnchainBlock, 16);
       let fromBlock = this.latestFromBlock + 1;
       fromBlock = Math.min(fromBlock, latestOnchainBlock);
       let toBlock = fromBlock + this.blockRangeSize;
