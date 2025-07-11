@@ -1,3 +1,4 @@
+import Logger from "utils/logger";
 import {Network} from "../models/network";
 import {Signers} from "../models/signer/signers";
 import {populateTxGasPricesAndLimits} from "../utils";
@@ -77,6 +78,7 @@ export class ChainExecutor {
       }
       this.setProcessing(chainId, signerId, false);
     } catch (error) {
+      Logger.error(`Chain executor transaction failed : ${error}`);
       transactionData.retries = transactionData.retries ?? 0;
       if (transactionData.retries < ChainExecutor.MAX_RETRIES) {
         transactionData.retries++;
