@@ -25,6 +25,12 @@ export class Alerts {
     return this.alertConfig.get(id)?.get(channel);
   }
 
+  public getAlertChannels(id: string){
+    if (id === "") return;
+    if (!this.alertConfig.has(id)) return undefined;
+    return Array.from(this.alertConfig.get(id)!.values());
+  }
+
   public addAlertChannel(id: string, alertChannel: AlertChannel){
     if (!this.alertConfig.has(id)){
       this.alertConfig.set(id, new Map());
