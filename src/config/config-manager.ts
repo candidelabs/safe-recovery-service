@@ -19,6 +19,7 @@ type Config = {
     indexerAlert: string;
     sentryDSN?: string;
     trustProxy: boolean | string;
+    rateLimit: number | string;
   };
   signers: Array<{
     id: string;
@@ -75,6 +76,7 @@ export class Configuration {
   public sentryDSN?: string;
   public indexerAlert!: string;
   public trustProxy!: boolean;
+  public rateLimit!: number;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -139,6 +141,12 @@ export class Configuration {
     if (isNaN(port) || port <= 0) {
       throw new Error("Options.port must be a valid positive number.");
     }
+    
+    const rateLimit = Number(options.rateLimit);
+    if (isNaN(rateLimit) || rateLimit <= 0) {
+      throw new Error("Options.rateLimit must be a valid positive number.");
+    }
+
     if (options.sentryDSN){
       this.sentryDSN = options.sentryDSN;
     }
@@ -146,6 +154,7 @@ export class Configuration {
     this.port = port;
     this.indexerAlert = options.indexerAlert;
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
+    this.rateLimit = rateLimit;
   }
 
   private initializeSigners(signers: Config["signers"]) {

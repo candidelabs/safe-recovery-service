@@ -57,6 +57,7 @@
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-unused-imports": "^4.1.4",
+    "ethers6": "npm:ethers",
     "jest": "^29.7.0",
     "prettier": "^3.4.2",
     "prisma": "^6.2.1",
