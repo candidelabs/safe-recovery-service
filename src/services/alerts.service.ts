@@ -8,8 +8,11 @@ import {AlertSubscriptionNotification, Prisma} from "@prisma/client";
 import * as cron from "node-cron";
 import {SummaryMessageData} from "../utils/interfaces";
 import {MessageStatements} from "../utils/constants";
+import { SafeAccountV0_3_0 } from "abstractionkit";
+import {Network} from "../models/network";
 
-export const createSubscription = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
+
+export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
     throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported for alerts`);
@@ -23,22 +26,23 @@ export const createSubscription = async (account: string, chainId: number, chann
   let statement = MessageStatements["alerts-subscribe"];
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
-  await validateSIWEMessage(message, account, chainId, statement, signature);
+  await validateSIWEMessage(message, owner, chainId, statement, signature);
   //
   target = sanitizedTarget;
   const existingSubscription = await prisma.alertSubscription.findFirst({
     where: {
       account: {equals: account.toLowerCase()},
+      owner: {equals: owner.toLowerCase()},
       channel: {equals: channel},
       target: {equals: target.toLowerCase()},
       active: {equals: true}
     }
   });
   if (existingSubscription){
-    throw new ApiError(httpStatus.CONFLICT, `An active subscription already exists for ${account} using ${target} as ${channel}`);
+    throw new ApiError(httpStatus.CONFLICT, `An active subscription already exists for ${owner} in ${account} using ${target} as ${channel}`);
   }
   //
-  const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase());
+  const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase()+owner.toLowerCase());
   await alertChannel.sendMessage("otpVerification", target, {
     "subject": "OTP Verification for Safe Recovery Module Alerts",
     "otp": challenge
@@ -48,6 +52,7 @@ export const createSubscription = async (account: string, chainId: number, chann
     {
       data: {
         account: account.toLowerCase(),
+        owner: owner.toLowerCase(),
         channel,
         target,
         active: false,
@@ -83,7 +88,7 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
   const validChallenge = await alertChannel.verifyChallenge(
     challenge,
     alertSubscription.challengeHash,
-    alertSubscription.account.toLowerCase()
+    alertSubscription.account.toLowerCase() + alertSubscription.owner.toLowerCase()
   );
   if (!validChallenge){
     await prisma.alertSubscription.update({
@@ -99,6 +104,7 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
   });
   AccountEventTracker.instance().addSubscription(
     alertSubscription.account,
+    alertSubscription.owner,
     alertSubscription.id,
     alertSubscription.channel,
     alertSubscription.target,
@@ -107,13 +113,14 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
   return true;
 };
 
-export const fetchSubscriptions = async (account: string, chainId: number, message: string, signature: string) => {
+export const fetchSubscriptions = async (account: string, owner: string, chainId: number, message: string, signature: string) => {
   let statement = MessageStatements["alerts-fetch"];
-  await validateSIWEMessage(message, account, chainId, statement, signature);
+  await validateSIWEMessage(message, owner, chainId, statement, signature);
   //
   const subscriptions = await prisma.alertSubscription.findMany({
     where: {
       account: {equals: account.toLowerCase()},
+      owner: {equals: owner.toLowerCase()},
       active: {equals: true}
     },
     select: {
@@ -122,13 +129,41 @@ export const fetchSubscriptions = async (account: string, chainId: number, messa
       target: true
     }
   });
+  const safeAccount = new SafeAccountV0_3_0(account);
+  const network = Network.instances.get(chainId.toString())!;
+  const owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+  if(!owners.includes(owner)){
+    for(const subscription of subscriptions){
+      await prisma.alertSubscription.delete({
+        where: {id: subscription.id}
+      });
+    }
+    throw new ApiError(httpStatus.FORBIDDEN, `Not allowed to fetch subscriptions if not an owner`);
+  }
   return subscriptions;
 };
 
-export const unsubscribe = async (subscriptionId: string) => {
+export const unsubscribe = async (subscriptionId: string, chainId: number, owner: string | null, message: string | null, signature: string | null) => {
   const alertSubscription = await prisma.alertSubscription.findFirst({where: {id: {equals: subscriptionId},}});
   if (!alertSubscription){
     throw new ApiError(httpStatus.NOT_FOUND, `Could not find an alert subscription with this id`);
+  }
+  if (
+    owner != null &&
+    alertSubscription.owner == owner.toLowerCase() &&
+    message != null &&
+    signature != null
+  ){
+    const statement = MessageStatements["alerts-unsubscribe"];
+    await validateSIWEMessage(message, owner, chainId, statement, signature);
+  }else{
+    const safeAccount = new SafeAccountV0_3_0(alertSubscription.account);
+    const network = Network.instances.get(chainId.toString())!;
+    const owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+    if(owners.includes(alertSubscription.owner)){
+      throw new ApiError(httpStatus.FORBIDDEN, `Not allowed to remove an owner's subscription`);
+    } //any one can remove the subscription if it's attached owner is not
+      //currently on of the safe account owners
   }
   //
   await prisma.alertSubscription.delete({
