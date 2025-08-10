@@ -93,7 +93,7 @@ describe('alerts', ()=>{
             });
         });
         it('should fail with 403 to register if invalid signature', async ()=>{
-            await supertest(app).post('/v1/auth/register/')
+            await supertest(app).post('/v1/alerts/subscribe/')
             .send({
                 "account": "0x0000000000000000000000000000000000000000",
                 "owner": "0x0000000000000000000000000000000000000000",
@@ -105,7 +105,7 @@ describe('alerts', ()=>{
                   address: "0x0000000000000000000000000000000000000000",
                   domain: "service://safe-recovery-service",
                   uri: "service://safe-recovery-service",
-                  statement: "I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using user@example.com (via email)",
+                  statement: "I agree to receive Social Recovery Module alert notifications for my account address on all supported chains sent to user@example.com (via email)",
                   chainId: 11155111,
                   nonce: 0, 
                 },
@@ -117,6 +117,7 @@ describe('alerts', ()=>{
                 )
             });
         });
+
         it('should succeed with 200 to register if valid owner signature', async ()=>{
             const chainId = 11155111;
             let userOperation = await smartAccount.createUserOperation(
@@ -186,7 +187,6 @@ describe('alerts', ()=>{
             })
             .expect(200);
             subscriptionId = challengeIdRes.body.subscriptionId;
-            console.log("subscriptionId: ", subscriptionId);
         });
     });
 
@@ -234,6 +234,206 @@ describe('alerts', ()=>{
                 "challenge": otp,
             })
             .expect(200);
+        });
+    });
+
+    describe('alerts/subscriptions', ()=>{
+        it('should fail with 400 to register if wrong message format', async ()=>{
+            await supertest(app).get('/v1/alerts/subscriptions/')
+            .query({
+                "account": "0x0000000000000000000000000000000000000000",
+                "owner": "0x0000000000000000000000000000000000000000",
+                "chainId": 11155111,
+                "message":{
+                  statement: "invalid format",
+                },
+                "signature": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            })
+            .expect(400).then((response) => {
+                expect(response.body.message).toContain(
+                    "failed custom validation"
+                )
+            });
+        });
+        it('should fail with 400 to register if wrong message', async ()=>{
+            await supertest(app).get('/v1/alerts/subscriptions/')
+            .query({
+                "account": "0x0000000000000000000000000000000000000000",
+                "owner": "0x0000000000000000000000000000000000000000",
+                "chainId": 11155111,
+                "message":{
+                  version: "1",
+                  address: "0x0000000000000000000000000000000000000000",
+                  domain: "service://safe-recovery-service",
+                  uri: "service://safe-recovery-service",
+                  //statement: "I request to retrieve all authentication methods currently registered to my account with Safe Recovery Service",
+                  statement: "invalid message",
+                  chainId: 11155111,
+                  nonce: 0, 
+                },
+                "signature": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            })
+            .expect(400).then((response) => {
+                expect(response.body.message).toContain(
+                    "message"
+                )
+            });
+        });
+        it('should fail with 403 to register if invalid signature', async ()=>{
+            await supertest(app).get('/v1/alerts/subscriptions/')
+            .query({
+                account: "0x0000000000000000000000000000000000000000",
+                owner: "0x0000000000000000000000000000000000000000",
+                chainId: 11155111,
+                message:{
+                  version: "1",
+                  address: "0x0000000000000000000000000000000000000000",
+                  domain: "service://safe-recovery-service",
+                  uri: "service://safe-recovery-service",
+                  statement: "I request to retrieve all Social Recovery Module alert subscriptions linked to my account",
+                  chainId: 11155111,
+                },
+                signature: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            })
+            .expect(403).then((response) => {
+                expect(response.body.message).toContain(
+                    "invalid signature"
+                )
+            });
+        });
+
+        it('should succeed with 200 to if correct signature', async ()=>{
+            const domain = "example.com";
+            const statement = "I request to retrieve all Social Recovery Module alert subscriptions linked to my account";
+            const uri = "https://example.com";
+            const version = "1";
+            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
+            const issuedAt = new Date().toISOString();
+
+            const siweMessage = new SiweMessage({
+                domain,
+                address: ownerPublicAddress,
+                statement,
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+
+            const message = siweMessage.prepareMessage();
+            const signature = await owner.signMessage(message);
+
+            const subscriptionsRes = await supertest(app).get('/v1/alerts/subscriptions/')
+            .query({
+                account: smartAccount.accountAddress,
+                owner: ownerPublicAddress,
+                chainId: 11155111,
+                message:siweMessage,
+                signature
+            })
+            .expect(200);
+            const subscriptions = subscriptionsRes.body.subscriptions;
+            expect(subscriptions.length).toBe(1);
+            expect(subscriptions[0].channel).toBe("email");
+            expect(subscriptions[0].target).toBe("user@example.com");
+        });
+    });
+    describe('alerts/unsubscribe', ()=>{
+        it('should fail with 403 to if wrong owner signature', async ()=>{
+            const domain = "example.com";
+            const statement = "I request to unsubscribe all Social Recovery Module alert subscriptions linked to my account";
+            const uri = "https://example.com";
+            const version = "1";
+            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
+            const issuedAt = new Date().toISOString();
+
+            const siweMessage = new SiweMessage({
+                domain,
+                address: ownerPublicAddress,
+                statement,
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+
+            const message = siweMessage.prepareMessage();
+            const signature = await secondOwner.signMessage(message);
+
+            const res = await supertest(app).post('/v1/alerts/unsubscribe/')
+            .send({
+                subscriptionId,
+                chainId: 11155111,
+                owner: ownerPublicAddress,
+                message:siweMessage,
+                signature
+            })
+            .expect(403).then((response) => {
+                expect(response.body.message).toContain(
+                    "invalid signature"
+                )
+            });
+        });
+
+        it('should succeed with 200 to if correct owner signature', async ()=>{
+            const domain = "example.com";
+            const statement = "I request to unsubscribe all Social Recovery Module alert subscriptions linked to my account";
+            const uri = "https://example.com";
+            const version = "1";
+            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
+            const issuedAt = new Date().toISOString();
+
+            const unsubscripeSiweMessage = new SiweMessage({
+                domain,
+                address: ownerPublicAddress,
+                statement,
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+
+            let message = unsubscripeSiweMessage.prepareMessage();
+            let signature = await owner.signMessage(message);
+
+            const res = await supertest(app).post('/v1/alerts/unsubscribe/')
+            .send({
+                subscriptionId,
+                chainId: 11155111,
+                owner: ownerPublicAddress,
+                message:unsubscripeSiweMessage,
+                signature
+            })
+            .expect(200);
+            expect(res.body.success).toBe(true);
+
+            const fetchSubscriptionsSiweMessage = new SiweMessage({
+                domain,
+                address: ownerPublicAddress,
+                statement: "I request to retrieve all Social Recovery Module alert subscriptions linked to my account",
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+            message = fetchSubscriptionsSiweMessage.prepareMessage();
+            signature = await owner.signMessage(message);
+
+            const subscriptionsRes = await supertest(app).get('/v1/alerts/subscriptions/')
+            .query({
+                account: smartAccount.accountAddress,
+                owner: ownerPublicAddress,
+                chainId: 11155111,
+                message:fetchSubscriptionsSiweMessage,
+                signature
+            })
+            .expect(200);
+            const subscriptions = subscriptionsRes.body.subscriptions;
+            expect(subscriptions.length).toBe(0); //no subscriptions
         });
     });
 });
