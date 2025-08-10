@@ -43,12 +43,10 @@ const srm = new SocialRecoveryModule(
 let subscriptionId: string;
 
 describe('alerts', ()=>{
-    /*
     it('should return a 404 if wrong path', async ()=>{
         await supertest(app).get('/v1/alerts/wrong/').expect(404);
-    });*/
+    });
     describe('alerts/subscribe', ()=>{
-        /*
         it('should fail with 400 to register if wrong message format', async ()=>{
             await supertest(app).post('/v1/alerts/subscribe/')
             .send({
@@ -119,7 +117,6 @@ describe('alerts', ()=>{
                 )
             });
         });
-        */
         it('should succeed with 200 to register if valid owner signature', async ()=>{
             const chainId = 11155111;
             let userOperation = await smartAccount.createUserOperation(
@@ -206,7 +203,6 @@ describe('alerts', ()=>{
                 )
             });
         });
-
         it('should fail with 403 to register if challenge is wrong', async ()=>{
             await supertest(app).post('/v1/alerts/activate/')
             .send({
@@ -231,19 +227,13 @@ describe('alerts', ()=>{
                return 
             }
             const otp = otpRes[0]
-            console.log("otp: ", otp) 
 
             await supertest(app).post('/v1/alerts/activate/')
             .send({
                 "subscriptionId": subscriptionId,
-                "challenge": "wrongchallenge",
+                "challenge": otp,
             })
-            .expect(403).then((response) => {
-                expect(response.body.message).toContain(
-                    "Invalid challenge"
-                )
-            });
+            .expect(200);
         });
-
     });
 });
