@@ -1,4 +1,5 @@
 import express, { Router } from "express";
+import configRoute from "./config.route";
 import recoveriesRoute from "./recoveries.route";
 import authRoute from "./auth.route";
 import alertsRoute from "./alerts.route";
@@ -11,6 +12,7 @@ type Route = {
 };
 
 const defaultRoutes: Array<Route> = [
+  { path: "/config", route: configRoute },
   { path: "/recoveries", route: recoveriesRoute },
   { path: "/auth", route: authRoute },
   { path: "/alerts", route: alertsRoute },
