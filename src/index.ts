@@ -48,7 +48,7 @@ app.use(
   rateLimit({
     validate: {xForwardedForHeader: false},
     windowMs: 60 * 1000, // 1 minutes
-    limit: 25, // Limit each IP to 25 requests per `window`
+    limit: configuration.rateLimit, // Limit each IP to rateLimit per `window`
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
     legacyHeaders: false, // Disable the `X-RateLimit-*` headers
   })
