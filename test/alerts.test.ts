@@ -342,7 +342,7 @@ describe('alerts', ()=>{
     describe('alerts/unsubscribe', ()=>{
         it('should fail with 403 to if wrong owner signature', async ()=>{
             const domain = "example.com";
-            const statement = "I request to unsubscribe all Social Recovery Module alert subscriptions linked to my account";
+            const statement = "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account";
             const uri = "https://example.com";
             const version = "1";
             const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
@@ -379,7 +379,7 @@ describe('alerts', ()=>{
 
         it('should succeed with 200 to if correct owner signature', async ()=>{
             const domain = "example.com";
-            const statement = "I request to unsubscribe all Social Recovery Module alert subscriptions linked to my account";
+            const statement = "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account";
             const uri = "https://example.com";
             const version = "1";
             const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
