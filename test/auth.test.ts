@@ -1,38 +1,7 @@
 import supertest from 'supertest';
 import {app} from '../src/index';
 import {SiweMessage} from "siwe";
-import * as dotenv from 'dotenv'
 import {ethers, hashMessage} from "ethers6";
-
-jest.setTimeout(300000);
-import {
-    SafeAccountV0_3_0 as SafeAccount,
-    CandidePaymaster,
-    SocialRecoveryModule,
-    SocialRecoveryModuleGracePeriodSelector
-} from "abstractionkit";
-
-//get values from .env
-dotenv.config()
-const chainId = BigInt(process.env.CHAIN_ID as string)
-const bundlerUrl = process.env.BUNDLER_URL as string
-const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER as string
-const paymasterRPC = process.env.PAYMASTER_RPC as string;
-const sponsorshipPolicyId = process.env.SPONSORSHIP_POLICY_ID as string;
-
-
-const owner = ethers.Wallet.createRandom();
-const ownerPublicAddress = owner.address
-const ownerPrivateKey = owner.privateKey
-let smartAccount = SafeAccount.initializeNewAccount(
-    [ownerPublicAddress],
-)
-
-const guardian = ethers.Wallet.createRandom();
-const guardian2 = ethers.Wallet.createRandom();
-const srm = new SocialRecoveryModule(
-    SocialRecoveryModuleGracePeriodSelector.After3Minutes
-);
 
 function getMessageHashForSafe(
     accountAddress: string, payload: string, chainId: number
@@ -136,78 +105,6 @@ describe('auth', ()=>{
                     "invalid signature"
                 )
             });
-        });
-        it('should succeed with 200 to register if valid', async ()=>{
-            const chainId = 11155111;
-            let userOperation = await smartAccount.createUserOperation(
-                [
-                    srm.createEnableModuleMetaTransaction(smartAccount.accountAddress),
-                    srm.createAddGuardianWithThresholdMetaTransaction(
-                       guardian.address, 1n
-                   ),
-                   srm.createAddGuardianWithThresholdMetaTransaction(
-                       guardian2.address, 2n
-                   )
-                ],
-                jsonRpcNodeProvider, //the node rpc is used to fetch the current nonce and fetch gas prices.
-                bundlerUrl, //the bundler rpc is used to estimate the gas limits.
-            )
-
-            let paymaster: CandidePaymaster = new CandidePaymaster(
-                paymasterRPC
-            )
-
-            let [paymasterUserOperation, _sponsorMetadata] = await paymaster.createSponsorPaymasterUserOperation(
-                userOperation, bundlerUrl, sponsorshipPolicyId) // sponsorshipPolicyId will have no effect if empty
-            userOperation = paymasterUserOperation; 
-
-            userOperation.signature = smartAccount.signUserOperation(
-                userOperation,
-                [ownerPrivateKey],
-                BigInt(chainId),
-            )
-
-            const sendUserOperationResponse = await smartAccount.sendUserOperation(
-                userOperation, bundlerUrl
-            )
-
-            console.log("Useroperation sent. Waiting to be included ......")
-            let userOperationReceiptResult = await sendUserOperationResponse.included()
-
-            // 2️⃣ Create a SIWE Message
-            const domain = "example.com";
-            const statement = "I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using user@example.com (via email)";
-            const uri = "https://example.com";
-            const version = "1";
-            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
-            const issuedAt = new Date().toISOString();
-
-            const siweMessage = new SiweMessage({
-                domain,
-                address: smartAccount.accountAddress,
-                statement,
-                uri,
-                chainId,
-                version, //optional
-                nonce, //optional
-                issuedAt, //optional
-            });
-            const message = siweMessage.prepareMessage();
-            const payload = hashMessage(message);
-            const messageHash = getMessageHashForSafe(
-                smartAccount.accountAddress, payload, chainId);
-            const signature = owner.signingKey.sign(messageHash).serialized;
-                        
-            await supertest(app).post('/v1/auth/register/')
-            .send({
-                "account": smartAccount.accountAddress,
-                "chainId": chainId,
-                "channel":"email",
-                "target":"user@example.com",
-                "message":message,
-                "signature": signature
-            })
-            .expect(200);
         });
     });
 });

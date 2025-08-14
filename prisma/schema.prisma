@@ -115,6 +115,7 @@ model AuthSignatureRequestLogs {
 model AlertSubscription {
   id            String    @id @default(uuid())
   account       String
+  owner         String
   channel       String
   target        String
   active        Boolean
@@ -132,6 +133,7 @@ model AlertSubscription {
 model AlertLog {
   id        String   @id @default(uuid())
   account   String
+  owner     String
   action    String
   event     String
   message   String
@@ -242,6 +244,7 @@ enum AlertDeliveryStatus {
 model AlertSubscriptionNotification {
   id             String              @id @default(uuid())
   account        String
+  owner         String
   channel        String
   target         String
   data           Json
