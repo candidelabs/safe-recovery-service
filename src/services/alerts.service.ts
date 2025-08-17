@@ -104,7 +104,6 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
   });
   AccountEventTracker.instance().addSubscription(
     alertSubscription.account,
-    alertSubscription.owner,
     alertSubscription.id,
     alertSubscription.channel,
     alertSubscription.target,

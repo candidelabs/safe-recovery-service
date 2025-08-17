@@ -10,7 +10,6 @@ import {SummaryMessageData} from "../../utils/interfaces";
 
 interface SubscriptionData {
   subscriptionId: string;
-  owner: string;
   channel: string;
   target: string;
 }
@@ -39,20 +38,18 @@ export class AccountEventTracker {
       }
       this.subscriptions.get(subscription.account)!.push({
         subscriptionId: subscription.id,
-        owner: subscription.owner,
         channel: subscription.channel,
         target: subscription.target
       });
     }
   }
 
-  public addSubscription(account: string, owner: string,subscriptionId: string, channel: string, target: string){
+  public addSubscription(account: string, subscriptionId: string, channel: string, target: string){
     if (!this.subscriptions.has(account)){
       this.subscriptions.set(account, []);
     }
     this.subscriptions.get(account)!.push({
       subscriptionId,
-      owner,
       channel,
       target
     });
