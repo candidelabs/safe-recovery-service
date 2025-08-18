@@ -115,6 +115,7 @@ model AuthSignatureRequestLogs {
 model AlertSubscription {
   id            String    @id @default(uuid())
   account       String
+  owner         String
   channel       String
   target        String
   active        Boolean

@@ -14,4 +14,5 @@ export const MessageStatements = {
   //
   "alerts-subscribe": "I agree to receive Social Recovery Module alert notifications for my account address on all supported chains sent to {{target}} (via {{channel}})",
   "alerts-fetch": "I request to retrieve all Social Recovery Module alert subscriptions linked to my account",
+  "alerts-unsubscribe": "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account",
 }

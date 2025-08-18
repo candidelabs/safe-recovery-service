@@ -23,6 +23,7 @@ export class Network {
   public name: string;
   public chainId: number;
   public recoveryModuleAddress: string;
+  public jsonRPCEndpoint: string;
   public jsonRPCProvider: ethers.providers.JsonRpcProvider;
   public executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig;
   public finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig;
@@ -37,6 +38,7 @@ export class Network {
     name: string,
     chainId: number,
     recoveryModuleAddress: string,
+    jsonRPCEndpoint: string,
     jsonRPCProvider: ethers.providers.JsonRpcProvider,
     executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig,
     finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig,
@@ -47,6 +49,7 @@ export class Network {
     this.name = name;
     this.chainId = chainId;
     this.recoveryModuleAddress = recoveryModuleAddress;
+    this.jsonRPCEndpoint = jsonRPCEndpoint;
     this.jsonRPCProvider = jsonRPCProvider;
     this.executeRecoveryRequestConfig = executeRecoveryRequestConfig;
     this.finalizeRecoveryRequestConfig = finalizeRecoveryRequestConfig;

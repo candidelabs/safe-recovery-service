@@ -416,6 +416,7 @@ export class Configuration {
         networkName,
         chainId,
         networkConfig.recoveryModuleAddress,
+        networkConfig.jsonRpcEndpoint,
         new ethers.providers.JsonRpcProvider(networkConfig.jsonRpcEndpoint),
         {...networkConfig.executeRecoveryRequests, rateLimit: executionSponsorshipRateLimiting},
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
