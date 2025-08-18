@@ -30,6 +30,10 @@ const secondOwner = ethers.Wallet.createRandom();
 const secondOwnerPublicAddress = secondOwner.address
 const secondOwnerPrivateKey = secondOwner.privateKey
 
+const newOwner = ethers.Wallet.createRandom();
+const newOwnerPublicAddress = newOwner.address
+const newOwnerPrivateKey = newOwner.privateKey
+
 let smartAccount = SafeAccount.initializeNewAccount(
     [ownerPublicAddress ,secondOwnerPublicAddress],
     {threshold:2}
@@ -234,6 +238,54 @@ describe('alerts', ()=>{
                 "challenge": otp,
             })
             .expect(200);
+        });
+        it('should receive an email if a guardian initiated a recovery', async ()=>{
+            const recoveryHash = await srm.getRecoveryHash(
+                jsonRpcNodeProvider,
+                smartAccount.accountAddress,
+                [newOwnerPublicAddress], 
+                1,
+                0n
+            ) 
+            const guardian1Signature = ethers.utils.joinSignature(
+                guardian._signingKey().signDigest(recoveryHash)
+            );
+            const guardian2Signature = ethers.utils.joinSignature(
+                guardian2._signingKey().signDigest(recoveryHash)
+            );
+
+            const res = await supertest(app).post('/v1/recoveries/create/')
+            .send({
+                "account": smartAccount.accountAddress,
+                "newOwners": [newOwnerPublicAddress],
+                "newThreshold": 1,
+                "chainId": 11155111,
+                "signer": guardian.address,
+                "signature": guardian1Signature 
+            })
+            .expect(200);
+            await supertest(app).post('/v1/recoveries/sign')
+            .send({
+                'id': res.body.id,
+                'signer': guardian2.address,
+                'signature': guardian2Signature
+            }).expect(200);
+
+            const res1 = await supertest(app).post('/v1/recoveries/execute')
+            .send({
+                'id': res.body.id,
+            }).expect(200);
+
+            console.log("start waiting for recovery email");
+            await new Promise(resolve => setTimeout(resolve, 4*60*1000)); //2 minute
+            console.log("stop waiting for recovery email");
+
+            const fetchResponse = await fetch('http://localhost:8025/api/v1/messages')
+            const responseJson = await fetchResponse.json() as JsonObject;
+            const emails = responseJson['messages'] as JsonObject[];
+            const lastEmail = emails[0] as JsonObject;
+            expect(lastEmail["Subject"]).toContain("Security: Changes have been made to your social recovery setting")
+            expect(lastEmail["Snippet"]).toContain("RECOVERY EXECUTED")
         });
     });
 
