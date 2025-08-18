@@ -2,7 +2,7 @@ import supertest from 'supertest';
 import {app} from '../src/index';
 import {SiweMessage} from "siwe";
 import * as dotenv from 'dotenv'
-import {ethers, hashMessage} from "ethers6";
+import {ethers} from "ethers";
 
 jest.setTimeout(300000);
 import {

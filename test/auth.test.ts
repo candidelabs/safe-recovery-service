@@ -1,36 +1,5 @@
 import supertest from 'supertest';
 import {app} from '../src/index';
-import {SiweMessage} from "siwe";
-import {ethers, hashMessage} from "ethers6";
-
-function getMessageHashForSafe(
-    accountAddress: string, payload: string, chainId: number
-){
-    const SAFE_MSG_TYPEHASH = "0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca";
-    const DOMAIN_SEPARATOR_TYPEHASH = "0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218";
-    const domainSeparator = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "uint256", "address"],
-      [DOMAIN_SEPARATOR_TYPEHASH, chainId, accountAddress]
-    ));
-    const encodedMessage = ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "bytes32"],
-      [SAFE_MSG_TYPEHASH, ethers.keccak256(payload)]
-    );
-    const messageHash = ethers.keccak256(ethers.solidityPacked(
-      ["bytes1", "bytes1", "bytes32", "bytes32",],
-      [Uint8Array.from([0x19]), Uint8Array.from([0x01]), domainSeparator, ethers.keccak256(encodedMessage)]
-    ));
-    return messageHash;
-}
-
-function personalSign(
-    accountAddress: string, payload: string, chainId: number, privateKey: string
-){
-    payload = hashMessage(payload);
-    const messageHash = getMessageHashForSafe(accountAddress, payload, chainId);
-    const signer = new ethers.Wallet(privateKey);
-    return signer.signingKey.sign(messageHash).serialized;
-}
 
 describe('auth', ()=>{
     it('should return a 404 if wrong path', async ()=>{
