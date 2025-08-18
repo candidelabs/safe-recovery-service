@@ -142,28 +142,13 @@ export const fetchSubscriptions = async (account: string, owner: string, chainId
   return subscriptions;
 };
 
-export const unsubscribe = async (subscriptionId: string, chainId: number, owner: string | null, message: string | null, signature: string | null) => {
+export const unsubscribe = async (subscriptionId: string, chainId: number, owner: string, message: string, signature: string) => {
   const alertSubscription = await prisma.alertSubscription.findFirst({where: {id: {equals: subscriptionId},}});
   if (!alertSubscription){
     throw new ApiError(httpStatus.NOT_FOUND, `Could not find an alert subscription with this id`);
   }
-  if (
-    owner != null &&
-    alertSubscription.owner == owner.toLowerCase() &&
-    message != null &&
-    signature != null
-  ){
-    const statement = MessageStatements["alerts-unsubscribe"];
-    await validateSIWEMessage(message, owner, chainId, statement, signature);
-  }else{
-    const safeAccount = new SafeAccountV0_3_0(alertSubscription.account);
-    const network = Network.instances.get(chainId.toString())!;
-    const owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
-    if(owners.includes(alertSubscription.owner)){
-      throw new ApiError(httpStatus.FORBIDDEN, `Not allowed to remove an owner's subscription`);
-    } //any one can remove the subscription if it's attached owner is not
-      //currently on of the safe account owners
-  }
+  const statement = MessageStatements["alerts-unsubscribe"];
+  await validateSIWEMessage(message, owner, chainId, statement, signature);
   //
   await prisma.alertSubscription.delete({
     where: {id: subscriptionId}
