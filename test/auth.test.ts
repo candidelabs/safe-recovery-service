@@ -1,36 +1,78 @@
 import supertest from 'supertest';
 import {app} from '../src/index';
-import {SiweMessage} from "siwe";
-import {ethers, hashMessage} from "ethers6";
+import * as dotenv from 'dotenv'
+import {ethers} from "ethers";
 
-function getMessageHashForSafe(
-    accountAddress: string, payload: string, chainId: number
-){
-    const SAFE_MSG_TYPEHASH = "0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca";
-    const DOMAIN_SEPARATOR_TYPEHASH = "0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218";
-    const domainSeparator = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "uint256", "address"],
-      [DOMAIN_SEPARATOR_TYPEHASH, chainId, accountAddress]
-    ));
-    const encodedMessage = ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "bytes32"],
-      [SAFE_MSG_TYPEHASH, ethers.keccak256(payload)]
-    );
-    const messageHash = ethers.keccak256(ethers.solidityPacked(
-      ["bytes1", "bytes1", "bytes32", "bytes32",],
-      [Uint8Array.from([0x19]), Uint8Array.from([0x01]), domainSeparator, ethers.keccak256(encodedMessage)]
-    ));
-    return messageHash;
-}
+jest.setTimeout(300000);
+import {
+    SafeAccountV0_3_0 as SafeAccount,
+    CandidePaymaster,
+    SocialRecoveryModule,
+    SocialRecoveryModuleGracePeriodSelector,
+    getSafeMessageEip712Data,
+} from "abstractionkit";
+import { JsonObject } from '@prisma/client/runtime/library';
+import { SiweMessage } from 'siwe';
 
-function personalSign(
-    accountAddress: string, payload: string, chainId: number, privateKey: string
-){
-    payload = hashMessage(payload);
-    const messageHash = getMessageHashForSafe(accountAddress, payload, chainId);
-    const signer = new ethers.Wallet(privateKey);
-    return signer.signingKey.sign(messageHash).serialized;
-}
+//get values from .env
+dotenv.config()
+const chainId = BigInt(process.env.CHAIN_ID as string)
+const bundlerUrl = process.env.BUNDLER_URL as string
+const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER as string
+const paymasterRPC = process.env.PAYMASTER_RPC as string;
+const sponsorshipPolicyId = process.env.SPONSORSHIP_POLICY_ID as string;
+
+
+const owner = ethers.Wallet.createRandom();
+const ownerPublicAddress = owner.address
+const ownerPrivateKey = owner.privateKey
+
+const secondOwner = ethers.Wallet.createRandom();
+const secondOwnerPublicAddress = secondOwner.address
+const secondOwnerPrivateKey = secondOwner.privateKey
+
+const newOwner = ethers.Wallet.createRandom();
+const newOwnerPublicAddress = newOwner.address
+const newOwnerPrivateKey = newOwner.privateKey
+
+let smartAccount = SafeAccount.initializeNewAccount(
+    [ownerPublicAddress ,secondOwnerPublicAddress],
+    {threshold:2}
+)
+const srm = new SocialRecoveryModule(
+    SocialRecoveryModuleGracePeriodSelector.After3Minutes
+);
+
+beforeAll(async ()=>{
+    let userOperation = await smartAccount.createUserOperation(
+        [
+            srm.createEnableModuleMetaTransaction(smartAccount.accountAddress),
+        ],
+        jsonRpcNodeProvider, //the node rpc is used to fetch the current nonce and fetch gas prices.
+        bundlerUrl, //the bundler rpc is used to estimate the gas limits.
+    )
+
+    let paymaster: CandidePaymaster = new CandidePaymaster(
+        paymasterRPC
+    )
+
+    let [paymasterUserOperation, _sponsorMetadata] = await paymaster.createSponsorPaymasterUserOperation(
+        userOperation, bundlerUrl, sponsorshipPolicyId) // sponsorshipPolicyId will have no effect if empty
+    userOperation = paymasterUserOperation; 
+
+    userOperation.signature = smartAccount.signUserOperation(
+        userOperation,
+        [ownerPrivateKey, secondOwnerPrivateKey],
+        BigInt(chainId),
+    )
+
+    const sendUserOperationResponse = await smartAccount.sendUserOperation(
+        userOperation, bundlerUrl
+    )
+
+    console.log("Useroperation sent. Waiting to be included ......")
+    let userOperationReceiptResult = await sendUserOperationResponse.included()
+});
 
 describe('auth', ()=>{
     it('should return a 404 if wrong path', async ()=>{
@@ -105,6 +147,105 @@ describe('auth', ()=>{
                     "invalid signature"
                 )
             });
+        });
+
+
+        it('should fail with 403 to register if only one owner signature', async ()=>{
+            const domain = "example.com";
+            const statement = "I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using user@example.com (via email)";
+            const uri = "https://example.com";
+            const version = "1";
+            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
+            const issuedAt = new Date().toISOString();
+
+            const siweMessage = new SiweMessage({
+                domain,
+                address: smartAccount.accountAddress,
+                statement,
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+            const message = siweMessage.prepareMessage();
+            const safeTypedData = getSafeMessageEip712Data(
+                smartAccount.accountAddress,
+                chainId,
+                message
+            )
+            const owner1signature = await owner._signTypedData(
+                safeTypedData.domain,
+                safeTypedData.types,
+                safeTypedData.messageValue
+            );
+            await supertest(app).post('/v1/auth/register/')
+            .send({
+                "account": smartAccount.accountAddress,
+                "chainId": 11155111,
+                "channel":"email",
+                "target":"user@example.com",
+                "message":siweMessage,
+                "signature": owner1signature
+            })
+            .expect(403).then((response) => {
+                expect(response.body.message).toContain(
+                    "invalid signature"
+                )
+            });
+        });
+
+        it('should succeed with 200 to register if correct signature', async ()=>{
+            const domain = "example.com";
+            const statement = "I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using user@example.com (via email)";
+            const uri = "https://example.com";
+            const version = "1";
+            const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
+            const issuedAt = new Date().toISOString();
+
+            const siweMessage = new SiweMessage({
+                domain,
+                address: smartAccount.accountAddress,
+                statement,
+                uri,
+                chainId: Number(chainId),
+                version, //optional
+                nonce, //optional
+                issuedAt, //optional
+            });
+            const message = siweMessage.prepareMessage();
+            const safeTypedData = getSafeMessageEip712Data(
+                smartAccount.accountAddress,
+                chainId,
+                message
+            )
+            const owner1signature = await owner._signTypedData(
+                safeTypedData.domain,
+                safeTypedData.types,
+                safeTypedData.messageValue
+            );
+            const owner2signature = await secondOwner._signTypedData(
+                safeTypedData.domain,
+                safeTypedData.types,
+                safeTypedData.messageValue
+            );
+
+            const signature = SafeAccount.buildSignaturesFromSingerSignaturePairs(
+                [
+                    {signer: ownerPublicAddress, signature: owner1signature},
+                    {signer: secondOwnerPublicAddress, signature: owner2signature},
+                ]
+            )
+            await supertest(app).post('/v1/auth/register/')
+            .send({
+                "account": smartAccount.accountAddress,
+                "chainId": 11155111,
+                "channel":"email",
+                "target":"user@example.com",
+                "message":siweMessage,
+                "signature": signature
+            })
+            .expect(200);
         });
     });
 });

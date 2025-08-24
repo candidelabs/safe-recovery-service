@@ -36,7 +36,7 @@ export const unsubscribe = {
     subscriptionId: Joi.string().required(),
     owner: Joi.custom(ethereumAddress).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
-    message: Joi.custom(siweMessage),
-    signature: Joi.custom(hexString),
+    message: Joi.custom(siweMessage).required(),
+    signature: Joi.custom(hexString).required(),
   }),
 };

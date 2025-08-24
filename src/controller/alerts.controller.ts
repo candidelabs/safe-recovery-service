@@ -28,8 +28,8 @@ interface UnsubscribeBody {
   subscriptionId: string;
   owner: string;
   chainId: number;
-  message: string | null;
-  signature: string | null;
+  message: string;
+  signature: string;
 }
 
 export const subscribe = catchAsync(async (req, res) => {
