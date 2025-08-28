@@ -24,6 +24,7 @@ export const createSubscription = async (account: string, owner: string, chainId
   }
   //
   let statement = MessageStatements["alerts-subscribe"];
+  statement = statement.replace("{{account}}", account.toLowerCase());
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
   await validateSIWEMessage(message, owner, chainId, statement, signature);

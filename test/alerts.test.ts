@@ -109,7 +109,7 @@ describe('alerts', ()=>{
                   address: "0x0000000000000000000000000000000000000000",
                   domain: "service://safe-recovery-service",
                   uri: "service://safe-recovery-service",
-                  statement: "I agree to receive Social Recovery Module alert notifications for my account address on all supported chains sent to user@example.com (via email)",
+                  statement: "I agree to receive Social Recovery Module alert notifications for " + smartAccount.accountAddress.toLowerCase() + " on all supported chains sent to user@example.com (via email)",
                   chainId: 11155111,
                   nonce: 0, 
                 },
@@ -161,7 +161,7 @@ describe('alerts', ()=>{
 
             // 2️⃣ Create a SIWE Message
             const domain = "example.com";
-            const statement = "I agree to receive Social Recovery Module alert notifications for my account address on all supported chains sent to user@example.com (via email)";
+            const statement = "I agree to receive Social Recovery Module alert notifications for " + smartAccount.accountAddress.toLowerCase() + " on all supported chains sent to user@example.com (via email)";
             const uri = "https://example.com";
             const version = "1";
             const nonce = Math.random().toString(36).substring(2); // Generate a random nonce
