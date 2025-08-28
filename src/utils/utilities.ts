@@ -2,7 +2,7 @@ import {Network} from "../models/network";
 import {BigNumber, ethers, UnsignedTransaction} from "ethers";
 import {GasPriceEstimator} from "../services/gas-price-estimator.service";
 import {hexValue} from "ethers/lib/utils";
-import {SiweErrorType, SiweMessage} from "siwe";
+import {SiweMessage} from "siwe";
 import {ApiError} from "./error";
 import httpStatus from "http-status";
 
@@ -36,9 +36,14 @@ export async function populateTxGasPricesAndLimits(network: Network, sender: str
   //
   const gasLimit = await network.jsonRPCProvider.estimateGas({to: tx.to, data: tx.data, value: value});
   tx.gasLimit = hexValue(scaleBigNumber(gasLimit, 1.25));
-  const [baseFee, maxFeePerGas, maxPriorityFeePerGas] = await GasPriceEstimator.instance().estimate(network.chainId, 1.50);
-  tx.maxFeePerGas = hexValue(maxFeePerGas);
-  tx.maxPriorityFeePerGas = hexValue(maxPriorityFeePerGas);
+  const [_, maxFeePerGas, maxPriorityFeePerGas] = await GasPriceEstimator.instance().estimate(network.chainId, 1.50);
+  if (network.chainId == 100) { // gnosis has some fixed gas prices
+    tx.maxFeePerGas = hexValue(BigNumber.from("1000000000").mul(3));
+    tx.maxPriorityFeePerGas = hexValue(BigNumber.from("1000000000").mul(2));
+  }else{
+    tx.maxFeePerGas = hexValue(maxFeePerGas);
+    tx.maxPriorityFeePerGas = hexValue(maxPriorityFeePerGas);
+  }
   return tx;
 }
 
@@ -126,7 +131,7 @@ export function escapeHtml(text: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
-};
+}
 
 export function toNormalCase(input: string): string {
   // First, handle different separators and convert to array of words
