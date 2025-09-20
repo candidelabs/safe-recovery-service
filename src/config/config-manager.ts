@@ -66,6 +66,7 @@ type Config = {
         enabled: boolean,
         startBlock: number
       };
+      otpAlertBypassToken?: string;
     };
   };
 };
@@ -422,7 +423,8 @@ export class Configuration {
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
         networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts,
-        networkConfig.indexer
+        networkConfig.indexer,
+        networkConfig.otpAlertBypassToken
       );
     });
     if (Network.instances.instances.length === 0) {

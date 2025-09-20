@@ -12,7 +12,7 @@ import { SafeAccountV0_3_0 } from "abstractionkit";
 import {Network} from "../models/network";
 
 
-export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
+export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string, authorizationToken?: string) => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
     throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported for alerts`);
@@ -49,22 +49,61 @@ export const createSubscription = async (account: string, owner: string, chainId
     "otp": challenge
   });
   //
-  let alertSubscription = await prisma.alertSubscription.create(
-    {
-      data: {
-        account: account.toLowerCase(),
-        owner: owner.toLowerCase(),
-        channel,
-        target,
-        active: false,
-        challengeHash,
-        verified: false,
-        tries: 0,
-        expiresAt: new Date(Date.now() + 10*60*1000)
+  let isOtpBypass = false;
+  if (authorizationToken) {
+      const network = Network.instances.get(chainId.toString())!;
+      // The authorization header often follows the "Bearer <token>" format.
+      // We split the string to get just the token part.
+      const token = authorizationToken.split(' ')[1];
+
+      if (token && token === network.otpAlertBypassToken) {
+          isOtpBypass = true;
+      }else {
+          throw new ApiError(httpStatus.FORBIDDEN, `Invalid otp bypass authorization token`);
       }
-    }
-  );
-  return alertSubscription.id;
+  }
+  if(isOtpBypass){
+      const alertSubscription = await prisma.alertSubscription.create(
+        {
+          data: {
+            account: account.toLowerCase(),
+            owner: owner.toLowerCase(),
+            channel,
+            target,
+            active: true,
+            challengeHash,
+            verified: true,
+            verifiedAt: new Date(Date.now()),
+            tries: 0,
+            expiresAt: new Date(Date.now() + 10*60*1000)
+          }
+        }
+      );
+      AccountEventTracker.instance().addSubscription(
+        alertSubscription.account,
+        alertSubscription.id,
+        alertSubscription.channel,
+        alertSubscription.target,
+      );
+      return alertSubscription.id;
+  }else{
+    const alertSubscription = await prisma.alertSubscription.create(
+        {
+          data: {
+            account: account.toLowerCase(),
+            owner: owner.toLowerCase(),
+            channel,
+            target,
+            active: false,
+            challengeHash,
+            verified: false,
+            tries: 0,
+            expiresAt: new Date(Date.now() + 10*60*1000)
+          }
+        }
+      );
+      return alertSubscription.id;
+  }
 };
 
 export const activateSubscription = async (subscriptionId: string, challenge: string) => {

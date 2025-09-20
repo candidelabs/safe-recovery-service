@@ -30,6 +30,7 @@ export class Network {
   public guardian?: string;
   public alert?: string;
   public indexer: Indexer;
+  public otpAlertBypassToken?: string;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -44,7 +45,8 @@ export class Network {
     finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig,
     guardian: string | undefined,
     alert: string | undefined,
-    indexer: IndexerConfig
+    indexer: IndexerConfig,
+    otpAlertBypassToken: string | undefined
   ) {
     this.name = name;
     this.chainId = chainId;
@@ -59,6 +61,7 @@ export class Network {
     this.indexer.start();
     Network.supportedChainIds.push(chainId);
     Network.instances.add(this);
+    this.otpAlertBypassToken = otpAlertBypassToken;
   }
 
   public id() {

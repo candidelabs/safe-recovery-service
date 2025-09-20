@@ -34,14 +34,19 @@ interface UnsubscribeBody {
 
 export const subscribe = catchAsync(async (req, res) => {
   const params = req.body as SubscribeBody;
+
+  // The secret token to compare against
+  const authHeader = req.headers['authorization'];
+
   const subscriptionId = await alertsService.createSubscription(
-    params.account,
-    params.owner,
-    params.chainId,
-    params.channel,
-    params.target,
-    params.message,
-    params.signature,
+      params.account,
+      params.owner,
+      params.chainId,
+      params.channel,
+      params.target,
+      params.message,
+      params.signature,
+      authHeader
   );
   res.send({subscriptionId});
 });
