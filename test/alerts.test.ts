@@ -109,7 +109,7 @@ describe('alerts', ()=>{
                   address: "0x0000000000000000000000000000000000000000",
                   domain: "service://safe-recovery-service",
                   uri: "service://safe-recovery-service",
-                  statement: "I agree to receive Social Recovery Module alert notifications for " + smartAccount.accountAddress.toLowerCase() + " on all supported chains sent to user@example.com (via email)",
+                  statement: "I agree to receive Social Recovery Module alert notifications for 0x0000000000000000000000000000000000000000 on all supported chains sent to user@example.com (via email)",
                   chainId: 11155111,
                   nonce: 0, 
                 },
