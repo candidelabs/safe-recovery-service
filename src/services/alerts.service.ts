@@ -56,7 +56,7 @@ export const createSubscription = async (account: string, owner: string, chainId
       // We split the string to get just the token part.
       const token = authorizationToken.split(' ')[1];
 
-      if (token && token === network.otpAlertBypassToken) {
+      if (token && token !== "" && token === network.otpAlertBypassToken) {
           isOtpBypass = true;
       }else {
           throw new ApiError(httpStatus.FORBIDDEN, `Invalid otp bypass authorization token`);
