@@ -8,7 +8,7 @@ import {AlertSubscriptionNotification, Prisma} from "@prisma/client";
 import * as cron from "node-cron";
 import {SummaryMessageData} from "../utils/interfaces";
 import {MessageStatements} from "../utils/constants";
-import { SafeAccountV0_3_0 } from "abstractionkit";
+import {SafeAccountV0_3_0 as SafeAccount} from "abstractionkit";
 import {Network} from "../models/network";
 
 
@@ -28,6 +28,14 @@ export const createSubscription = async (account: string, owner: string, chainId
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
   await validateSIWEMessage(message, owner, chainId, statement, signature);
+  //
+  const safeAccount = new SafeAccount(account);
+  const network = Network.instances.get(chainId.toString())!;
+  let owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+  owners = owners.map(e => e.toLowerCase());
+  if (!owners.includes(owner.toLowerCase())){
+    throw new ApiError(httpStatus.FORBIDDEN, `Owner must be a valid owner for the account provided`);
+  }
   //
   target = sanitizedTarget;
   const existingSubscription = await prisma.alertSubscription.findFirst({
@@ -129,17 +137,6 @@ export const fetchSubscriptions = async (account: string, owner: string, chainId
       target: true
     }
   });
-  const safeAccount = new SafeAccountV0_3_0(account);
-  const network = Network.instances.get(chainId.toString())!;
-  const owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
-  if(!owners.includes(owner)){
-    for(const subscription of subscriptions){
-      await prisma.alertSubscription.delete({
-        where: {id: subscription.id}
-      });
-    }
-    throw new ApiError(httpStatus.FORBIDDEN, `Not allowed to fetch subscriptions if not an owner`);
-  }
   return subscriptions;
 };
 
