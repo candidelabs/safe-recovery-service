@@ -143,7 +143,7 @@ export class AccountEventTracker {
     );
 
     const result: SummaryMessageData = {
-      header: `Security: Changes have been made to your social recovery settings on ${toNormalCase(network.name)} (chainId: ${network.chainId})`
+      header: `Security: Changes have been made to your social recovery settings for account ${account} on ${toNormalCase(network.name)} (chainId: ${network.chainId})`
     };
 
     // Handle critical events
