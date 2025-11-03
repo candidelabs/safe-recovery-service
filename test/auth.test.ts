@@ -11,16 +11,15 @@ import {
     SocialRecoveryModuleGracePeriodSelector,
     getSafeMessageEip712Data,
 } from "abstractionkit";
-import { JsonObject } from '@prisma/client/runtime/library';
 import { SiweMessage } from 'siwe';
 
 //get values from .env
 dotenv.config()
-const chainId = BigInt(process.env.CHAIN_ID as string)
-const bundlerUrl = process.env.BUNDLER_URL as string
-const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER as string
-const paymasterRPC = process.env.PAYMASTER_RPC as string;
-const sponsorshipPolicyId = process.env.SPONSORSHIP_POLICY_ID as string;
+const chainId = BigInt(process.env.CHAIN_ID_1 as string)
+const bundlerUrl = process.env.BUNDLER_URL_1 as string
+const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER_1 as string
+const paymasterRPC = process.env.PAYMASTER_RPC_1 as string;
+const sponsorshipPolicyId = process.env.SPONSORSHIP_POLICY_ID_1 as string;
 
 
 const owner = ethers.Wallet.createRandom();

@@ -36,7 +36,42 @@ export function getTemplate(channel: string, template: MessageTemplates): Record
 
 //
 
-function generateEventSummaryEmail(summary: SummaryMessageData): string {
+function generateEventSummaryEmail(summaries: SummaryMessageData[]): string {
+    const contents:string[] = summaries.map(summary => generateSingleEventSummaryEmail(summary));
+    const compinedContent = contents.reduce((compinedContent, content) => compinedContent + content);
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security Update</title>
+  <style>
+    @media only screen and (max-width: 600px) {
+      .container { padding: 10px !important; }
+      h1 { font-size: 20px !important; }
+      h2 { font-size: 16px !important; }
+      pre, li { font-size: 12px !important; }
+    }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f0f0f0;">
+  <div class="container" style="max-width: 600px; margin: 20px auto; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+    <div style="text-align: center; padding-bottom: 20px; border-bottom: 1px solid #eee;">
+      <h1 style="color: #1976d2; margin: 0; font-size: 24px;">Security Update</h1>
+    </div>
+    ${compinedContent} 
+    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px;">
+      <p style="margin: 0;">This is an automated security notification</p>
+      <p style="margin: 5px 0;">For support, contact our team at support@example.com</p>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+
+}
+function generateSingleEventSummaryEmail(summary: SummaryMessageData): string {
   // Critical section
   const criticalSection = summary.critical ? `
     <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 15px 0;">
@@ -68,47 +103,23 @@ function generateEventSummaryEmail(summary: SummaryMessageData): string {
   ` : '';
 
   return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Security Update</title>
-  <style>
-    @media only screen and (max-width: 600px) {
-      .container { padding: 10px !important; }
-      h1 { font-size: 20px !important; }
-      h2 { font-size: 16px !important; }
-      pre, li { font-size: 12px !important; }
-    }
-  </style>
-</head>
-<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f0f0f0;">
-  <div class="container" style="max-width: 600px; margin: 20px auto; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-    <div style="text-align: center; padding-bottom: 20px; border-bottom: 1px solid #eee;">
-      <h1 style="color: #1976d2; margin: 0; font-size: 24px;">Security Update</h1>
-    </div>
-    
     <div style="padding: 20px 0;">
       <p style="color: #333; font-size: 16px; margin: 0 0 15px 0;">
         ${escapeHtml(summary.header)}
       </p>
-      
       ${criticalSection}
       ${accountChangesSection}
+      <hr>
     </div>
-
-    <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px;">
-      <p style="margin: 0;">This is an automated security notification</p>
-      <p style="margin: 5px 0;">For support, contact our team at support@example.com</p>
-    </div>
-  </div>
-</body>
-</html>
   `.trim();
 }
 
-export function generateEventSummarySMS(summary: SummaryMessageData): string {
+export function generateEventSummarySMS(summaries: SummaryMessageData[]): string {
+    const contents:string[] = summaries.map(summary => generateSingleEventSummarySMS(summary));
+    const compinedContent = contents.reduce((compinedContent, content) => compinedContent + content);
+    return compinedContent;
+}
+export function generateSingleEventSummarySMS(summary: SummaryMessageData): string {
   const headerMatch = summary.header.match(/on (\w+) \(chainId: (\d+)\)/);
   const network = headerMatch ? `${headerMatch[1]} (${headerMatch[2]})` : "Unknown";
 
@@ -128,7 +139,7 @@ export function generateEventSummarySMS(summary: SummaryMessageData): string {
     const details = summary.accountChanges
       .map(d => d.replace(/\n/g, ";"))
       .join(",");
-    message += `\nGuardian Changes: ${details}`;
+    message += `\nGuardian Changes: ${details}\n`;
   }
 
   return message;

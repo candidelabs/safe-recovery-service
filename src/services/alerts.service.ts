@@ -155,44 +155,80 @@ export const unsubscribe = async (subscriptionId: string, chainId: number, owner
   return true;
 };
 
+interface NotificationAccumilationTrigger {
+   [key: string]: Date;
+}
+
 let sendingBusy = false;
+let notificationAccumilationTrigger: NotificationAccumilationTrigger = {}; 
 export const startSendNotificationsCronJob = () => {
   const cronJob = cron.schedule('*/10 * * * * *', async () => {
     if (sendingBusy) return;
     sendingBusy = true;
     const notifications = await prisma.alertSubscriptionNotification.findMany({where: {deliveryStatus: "PENDING"}});
+    const targetTriggered:string[] = [];
     for (const notification of notifications) {
-      await _sendNotification(notification);
+      let target = notification.target;
+      if(!(target in notificationAccumilationTrigger)){ 
+        notificationAccumilationTrigger[target] = new Date();
+      }
+    }
+    for (const target in notificationAccumilationTrigger) {
+     if(
+          (
+              (Date.now() - notificationAccumilationTrigger[target].getTime())/1000
+          ) > 60 // 1 minute
+      ){
+        targetTriggered.push(target);
+      }
+    }
+
+    for (const target of targetTriggered) {
+        const targetNotifications = await prisma.alertSubscriptionNotification.findMany(
+            {where: {deliveryStatus: "PENDING", target: target}}
+        );
+        await _sendNotification(target, targetNotifications);
+        delete notificationAccumilationTrigger[target];
     }
     sendingBusy = false;
   });
   cronJob.start();
 }
 
-async function _sendNotification(notification: AlertSubscriptionNotification){
+async function _sendNotification(target: string, notifications: AlertSubscriptionNotification[]){
   const indexerAlertId = Configuration.instance().indexerAlert;
-  const alertChannel = Alerts.instance().getAlertChannel(indexerAlertId, notification.channel);
+  //using the alert from the first notification for now
+  const alertChannel = Alerts.instance().getAlertChannel(indexerAlertId, notifications[0].channel);
   if (!alertChannel){
-    const data = {...notification.data as Prisma.JsonObject, failedReason: `Alert channel ${notification.channel} not found on ${indexerAlertId}`};
+    const data = {...notifications[0].data as Prisma.JsonObject, failedReason: `Alert channel ${notifications[0].channel} not found on ${indexerAlertId}`};
     await prisma.alertSubscriptionNotification.update({
       data: {data: data, deliveryStatus: "FAILED",},
-      where: {id: notification.id}
+      where: {id: notifications[0].id}
     });
     return;
   }
-  const message = (notification.data as Record<string, any>)["message"] as SummaryMessageData;
-  await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENDING",}, where: {id: notification.id}});
+  let messages:SummaryMessageData[] = [];
+  for (const notification of notifications){
+      messages.push(
+          (notification.data as Record<string, any>)["message"] as SummaryMessageData
+      );
+      await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENDING",}, where: {id: notification.id}});
+  }
   const success = await alertChannel.sendMessage(
     "notification",
-    notification.target,
+    target,
     {
-      argumentData: message,
+      argumentData: messages,
       subject: "Security: Changes have been made to your social recovery setting",
     }
   );
   if (success){
-    await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENT",}, where: {id: notification.id}});
+    for (const notification of notifications){
+        await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENT",}, where: {id: notification.id}});
+    }
   }else{
-    await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "FAILED",}, where: {id: notification.id}});
+    for (const notification of notifications){
+        await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "FAILED",}, where: {id: notification.id}});
+    }
   }
 }
