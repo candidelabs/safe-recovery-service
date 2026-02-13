@@ -29,6 +29,29 @@ export const fetchByAddress = {
   }),
 };
 
+export const fetchAllByAddress = {
+  query: Joi.object().keys({
+    account: Joi.custom(ethereumAddress).required(),
+    chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    // nonce comparison operators
+    nonce: Joi.custom(hexBigInt),
+    nonce__lt: Joi.custom(hexBigInt),
+    nonce__gt: Joi.custom(hexBigInt),
+    nonce__lte: Joi.custom(hexBigInt),
+    nonce__gte: Joi.custom(hexBigInt),
+    // createdAt comparison operators (ISO date strings)
+    createdAt: Joi.date().iso(),
+    createdAt__lt: Joi.date().iso(),
+    createdAt__gt: Joi.date().iso(),
+    createdAt__lte: Joi.date().iso(),
+    createdAt__gte: Joi.date().iso(),
+    // equality filters
+    status: Joi.string().valid("PENDING", "EXECUTED", "FINALIZED", "EXECUTION-IN-PROGRESS", "FINALIZATION-IN-PROGRESS"),
+    executed: Joi.boolean(),
+    finalized: Joi.boolean(),
+  }),
+};
+
 export const fetchById = {
   query: Joi.object().keys({
     id: Joi.string().required(),

@@ -55,6 +55,16 @@ export const fetchByAddress = catchAsync(async (req, res) => {
   res.send(JsonBigIntParser(recoveryRequests));
 });
 
+export const fetchAllByAddress = catchAsync(async (req, res) => {
+  const { account, chainId, ...filters } = req.query as unknown as {
+    account: string;
+    chainId: number;
+    [key: string]: any;
+  };
+  const recoveries = await RecoveriesService.findAllByAccount(account, chainId, filters);
+  res.send(JsonBigIntParser(recoveries));
+});
+
 export const fetchById = catchAsync(async (req, res) => {
   const { id } = req.query as {
     id: string;

@@ -158,6 +158,45 @@ export const findByAccountAddress = async (account: string, chainId: number, non
   });
 };
 
+export const findAllByAccount = async (
+  account: string,
+  chainId: number,
+  filters: Record<string, any>,
+) => {
+  const where: Prisma.RecoveryRequestWhereInput = {
+    account: { equals: account.toLowerCase() },
+    chainId: { equals: chainId },
+    discoverable: { equals: true },
+  };
+
+  // Build nonce filter
+  const nonceFilter: Record<string, bigint> = {};
+  if (filters.nonce != null) nonceFilter.equals = BigInt(filters.nonce);
+  if (filters.nonce__lt != null) nonceFilter.lt = BigInt(filters.nonce__lt);
+  if (filters.nonce__gt != null) nonceFilter.gt = BigInt(filters.nonce__gt);
+  if (filters.nonce__lte != null) nonceFilter.lte = BigInt(filters.nonce__lte);
+  if (filters.nonce__gte != null) nonceFilter.gte = BigInt(filters.nonce__gte);
+  if (Object.keys(nonceFilter).length > 0) where.nonce = nonceFilter;
+
+  // Build createdAt filter
+  const createdAtFilter: Record<string, Date> = {};
+  if (filters.createdAt != null) createdAtFilter.equals = new Date(filters.createdAt);
+  if (filters.createdAt__lt != null) createdAtFilter.lt = new Date(filters.createdAt__lt);
+  if (filters.createdAt__gt != null) createdAtFilter.gt = new Date(filters.createdAt__gt);
+  if (filters.createdAt__lte != null) createdAtFilter.lte = new Date(filters.createdAt__lte);
+  if (filters.createdAt__gte != null) createdAtFilter.gte = new Date(filters.createdAt__gte);
+  if (Object.keys(createdAtFilter).length > 0) where.createdAt = createdAtFilter;
+
+  // Status filter
+  if (filters.status != null) where.status = { equals: filters.status };
+
+  // Executed/finalized boolean filters (JSON path query on sponsored field)
+  if (filters.executed != null) where.executeData = { path: ['sponsored'], equals: filters.executed };
+  if (filters.finalized != null) where.finalizeData = { path: ['sponsored'], equals: filters.finalized };
+
+  return prisma.recoveryRequest.findMany({ where });
+};
+
 export const findById = async (id: string) => {
   return prisma.recoveryRequest.findFirst({where:{id}});
 };
