@@ -158,10 +158,14 @@ export const findByAccountAddress = async (account: string, chainId: number, non
   });
 };
 
-export const findAllByAccount = async (
+export const findByAccount = async (
   account: string,
   chainId: number,
   filters: Record<string, any>,
+  orderBy?: "createdAt" | "nonce",
+  order: "asc" | "desc" = "desc",
+  limit: number = 20,
+  offset: number = 0,
 ) => {
   const where: Prisma.RecoveryRequestWhereInput = {
     account: { equals: account.toLowerCase() },
@@ -194,7 +198,12 @@ export const findAllByAccount = async (
   if (filters.executed != null) where.executeData = { path: ['sponsored'], equals: filters.executed };
   if (filters.finalized != null) where.finalizeData = { path: ['sponsored'], equals: filters.finalized };
 
-  return prisma.recoveryRequest.findMany({ where });
+  return prisma.recoveryRequest.findMany({
+    where,
+    orderBy: orderBy ? { [orderBy]: order } : undefined,
+    take: limit,
+    skip: offset,
+  });
 };
 
 export const findById = async (id: string) => {

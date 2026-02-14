@@ -18,8 +18,8 @@ router
   .get(validate(recoveriesValidation.fetchByAddress), recoveriesController.fetchByAddress);
 
 router
-  .route("/fetchAllByAddress")
-  .get(validate(recoveriesValidation.fetchAllByAddress), recoveriesController.fetchAllByAddress);
+  .route("/listByAddress")
+  .get(validate(recoveriesValidation.listByAddress), recoveriesController.listByAddress);
 
 router
   .route("/fetchById")
