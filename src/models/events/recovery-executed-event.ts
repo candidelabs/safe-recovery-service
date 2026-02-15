@@ -6,6 +6,7 @@ export class RecoveryExecutedEvent extends IndexedEvent {
   constructor(
     public readonly chainId: number,
     public readonly account: string,
+    public readonly newOwnersHash: string, // solidityKeccak256(newOwners)
     public readonly newThreshold: bigint,
     public readonly nonce: bigint,
     public readonly executeAfter: bigint,
@@ -21,6 +22,7 @@ export class RecoveryExecutedEvent extends IndexedEvent {
   getIndexedData(): Record<string, any> {
     return {
       account: this.account,
+      newOwnersHash: this.newOwnersHash,
       newThreshold: this.newThreshold,
       nonce: this.nonce,
       executeAfter: this.executeAfter,

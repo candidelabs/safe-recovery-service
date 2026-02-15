@@ -194,15 +194,67 @@ export const findByAccount = async (
   // Status filter
   if (filters.status != null) where.status = { equals: filters.status };
 
-  // Executed/finalized boolean filters (JSON path query on sponsored field)
-  if (filters.executed != null) where.executeData = { path: ['sponsored'], equals: filters.executed };
-  if (filters.finalized != null) where.finalizeData = { path: ['sponsored'], equals: filters.finalized };
-
-  return prisma.recoveryRequest.findMany({
+  const results = await prisma.recoveryRequest.findMany({
     where,
     orderBy: orderBy ? { [orderBy]: order } : undefined,
     take: limit,
     skip: offset,
+  });
+
+  // Return results as is if executed and finalized filters are not set.
+  if (filters.executed == null && filters.finalized == null) return results;
+
+  // Executed/finalized boolean filters
+  const nonces = [...new Set(results.map(r => r.nonce))];
+
+  const [executedEvents, finalizedEvents] = await Promise.all([
+    prisma.recoveryExecutedEvent.findMany({
+      where: {
+        account: account.toLowerCase(),
+        chainId,
+        nonce: { in: nonces },
+      },
+    }),
+    prisma.recoveryFinalizedEvent.findMany({
+      where: {
+        account: account.toLowerCase(),
+        chainId,
+        nonce: { in: nonces },
+      },
+    }),
+  ]);
+
+  const executedEventKeys = new Set(
+    executedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
+  );
+  const finalizedEventKeys = new Set(
+    finalizedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
+  );
+
+  const prohibitedIds = new Set<string>();
+  for (const request of results) {
+    const newOwnersHash = ethers.utils.solidityKeccak256(["address[]"], [request.newOwners]).toLowerCase();
+    const eventKey = `${newOwnersHash}:${request.newThreshold}:${request.nonce}`;
+    if (filters.executed != null){
+      if (filters.executed === true && !executedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+      if (filters.executed === false && executedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+    }
+    if (filters.finalized != null){
+      if (filters.finalized === true && !finalizedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+      if (filters.finalized === false && finalizedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+    }
+  }
+
+  return results.filter(r => {
+    return !prohibitedIds.has(r.id);
   });
 };
 
