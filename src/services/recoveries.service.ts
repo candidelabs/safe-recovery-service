@@ -233,8 +233,10 @@ export const findByAccount = async (
 
   const prohibitedIds = new Set<string>();
   for (const request of results) {
+    // We use solidityKeccak256 because Solidity dynamic indexed types are encoded this way, see https://docs.soliditylang.org/en/v0.8.33/abi-spec.html#encoding-of-indexed-event-parameters
     const newOwnersHash = ethers.utils.solidityKeccak256(["address[]"], [request.newOwners]).toLowerCase();
-    const eventKey = `${newOwnersHash}:${request.newThreshold}:${request.nonce}`;
+    // We explicitly cast request.newThreshold into a BigInt because FinalizedEvent.newThreshold and ExecutedEvent.newThreshold are both BigInt
+    const eventKey = `${newOwnersHash}:${BigInt(request.newThreshold)}:${request.nonce}`;
     if (filters.executed != null){
       if (filters.executed === true && !executedEventKeys.has(eventKey)) {
         prohibitedIds.add(request.id);
