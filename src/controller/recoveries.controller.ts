@@ -55,6 +55,20 @@ export const fetchByAddress = catchAsync(async (req, res) => {
   res.send(JsonBigIntParser(recoveryRequests));
 });
 
+export const listByAddress = catchAsync(async (req, res) => {
+  const { account, chainId, orderBy, order, limit, offset, ...filters } = req.query as unknown as {
+    account: string;
+    chainId: number;
+    orderBy?: "createdAt" | "nonce";
+    order?: "asc" | "desc";
+    limit: number;
+    offset: number;
+    [key: string]: any;
+  };
+  const recoveries = await RecoveriesService.findByAccount(account, chainId, filters, orderBy, order, limit, offset);
+  res.send(JsonBigIntParser(recoveries));
+});
+
 export const fetchById = catchAsync(async (req, res) => {
   const { id } = req.query as {
     id: string;

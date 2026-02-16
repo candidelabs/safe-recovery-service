@@ -43,7 +43,7 @@ export class Indexer {
   private latestFromBlock: number;
   private failedRanges: FailedRange[] = [];
   private maxRetries: number = 3;
-  private blockRangeSize: number = 5000;
+  private blockRangeSize: number = 9990;
   private storingBusy: boolean = false;
   private active: boolean;
   private indexerDataId!: string;
@@ -246,6 +246,7 @@ export class Indexer {
       const newThreshold = (data[0] as BigNumber).toBigInt();
       indexedEvent = new ChangedThresholdEvent(chainId, account, newThreshold, blockNumber, transactionIndex, logIndex, transactionHash);
     }else if (eventType == EventType.RecoveryExecuted){
+      const newOwnersHash = log.topics[2].toLowerCase();
       const data = ethers.utils.defaultAbiCoder.decode(
         ["uint256", "uint256", "uint64", "uint256"],
         log.data
@@ -257,6 +258,7 @@ export class Indexer {
       indexedEvent = new RecoveryExecutedEvent(
         chainId,
         account,
+        newOwnersHash,
         newThreshold,
         nonce,
         executeAfter,
@@ -271,13 +273,14 @@ export class Indexer {
       const nonce = (data[0] as BigNumber).toBigInt();
       indexedEvent = new RecoveryCanceledEvent(chainId, account, nonce, blockNumber, transactionIndex, logIndex, transactionHash);
     }else if (eventType == EventType.RecoveryFinalized){
+      const newOwnersHash = log.topics[2].toLowerCase();
       const data = ethers.utils.defaultAbiCoder.decode(
         ["uint256", "uint256"],
         log.data
       );
       const newThreshold = (data[0] as BigNumber).toBigInt();
       const nonce = (data[1] as BigNumber).toBigInt();
-      indexedEvent = new RecoveryFinalizedEvent(chainId, account, newThreshold, nonce, blockNumber, transactionIndex, logIndex, transactionHash);
+      indexedEvent = new RecoveryFinalizedEvent(chainId, account, newOwnersHash, newThreshold, nonce, blockNumber, transactionIndex, logIndex, transactionHash);
     }else{
       return;
     }
@@ -385,6 +388,7 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        newOwnersHash: event.newOwnersHash,
         newThreshold: event.newThreshold,
         nonce: event.nonce,
         executeAfter: event.executeAfter,
@@ -402,6 +406,7 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        newOwnersHash: event.newOwnersHash,
         newThreshold: event.newThreshold,
         nonce: event.nonce,
         transactionHash: event.transactionHash,

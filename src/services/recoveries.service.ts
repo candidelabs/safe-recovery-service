@@ -158,6 +158,108 @@ export const findByAccountAddress = async (account: string, chainId: number, non
   });
 };
 
+export const findByAccount = async (
+  account: string,
+  chainId: number,
+  filters: Record<string, any>,
+  orderBy?: "createdAt" | "nonce",
+  order: "asc" | "desc" = "desc",
+  limit: number = 20,
+  offset: number = 0,
+) => {
+  const where: Prisma.RecoveryRequestWhereInput = {
+    account: { equals: account.toLowerCase() },
+    chainId: { equals: chainId },
+    discoverable: { equals: true },
+  };
+
+  // Build nonce filter
+  const nonceFilter: Record<string, bigint> = {};
+  if (filters.nonce != null) nonceFilter.equals = BigInt(filters.nonce);
+  if (filters.nonce__lt != null) nonceFilter.lt = BigInt(filters.nonce__lt);
+  if (filters.nonce__gt != null) nonceFilter.gt = BigInt(filters.nonce__gt);
+  if (filters.nonce__lte != null) nonceFilter.lte = BigInt(filters.nonce__lte);
+  if (filters.nonce__gte != null) nonceFilter.gte = BigInt(filters.nonce__gte);
+  if (Object.keys(nonceFilter).length > 0) where.nonce = nonceFilter;
+
+  // Build createdAt filter
+  const createdAtFilter: Record<string, Date> = {};
+  if (filters.createdAt != null) createdAtFilter.equals = new Date(filters.createdAt);
+  if (filters.createdAt__lt != null) createdAtFilter.lt = new Date(filters.createdAt__lt);
+  if (filters.createdAt__gt != null) createdAtFilter.gt = new Date(filters.createdAt__gt);
+  if (filters.createdAt__lte != null) createdAtFilter.lte = new Date(filters.createdAt__lte);
+  if (filters.createdAt__gte != null) createdAtFilter.gte = new Date(filters.createdAt__gte);
+  if (Object.keys(createdAtFilter).length > 0) where.createdAt = createdAtFilter;
+
+  // Status filter
+  if (filters.status != null) where.status = { equals: filters.status };
+
+  const results = await prisma.recoveryRequest.findMany({
+    where,
+    orderBy: orderBy ? { [orderBy]: order } : undefined,
+    take: limit,
+    skip: offset,
+  });
+
+  // Return results as is if executed and finalized filters are not set.
+  if (filters.executed == null && filters.finalized == null) return results;
+
+  // Executed/finalized boolean filters
+  const nonces = [...new Set(results.map(r => r.nonce))];
+
+  const [executedEvents, finalizedEvents] = await Promise.all([
+    prisma.recoveryExecutedEvent.findMany({
+      where: {
+        account: account.toLowerCase(),
+        chainId,
+        nonce: { in: nonces },
+      },
+    }),
+    prisma.recoveryFinalizedEvent.findMany({
+      where: {
+        account: account.toLowerCase(),
+        chainId,
+        nonce: { in: nonces },
+      },
+    }),
+  ]);
+
+  const executedEventKeys = new Set(
+    executedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
+  );
+  const finalizedEventKeys = new Set(
+    finalizedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
+  );
+
+  const prohibitedIds = new Set<string>();
+  for (const request of results) {
+    // We use solidityKeccak256 because Solidity dynamic indexed types are encoded this way, see https://docs.soliditylang.org/en/v0.8.33/abi-spec.html#encoding-of-indexed-event-parameters
+    const newOwnersHash = ethers.utils.solidityKeccak256(["address[]"], [request.newOwners]).toLowerCase();
+    // We explicitly cast request.newThreshold into a BigInt because FinalizedEvent.newThreshold and ExecutedEvent.newThreshold are both BigInt
+    const eventKey = `${newOwnersHash}:${BigInt(request.newThreshold)}:${request.nonce}`;
+    if (filters.executed != null){
+      if (filters.executed === true && !executedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+      if (filters.executed === false && executedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+    }
+    if (filters.finalized != null){
+      if (filters.finalized === true && !finalizedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+      if (filters.finalized === false && finalizedEventKeys.has(eventKey)) {
+        prohibitedIds.add(request.id);
+      }
+    }
+  }
+
+  return results.filter(r => {
+    return !prohibitedIds.has(r.id);
+  });
+};
+
 export const findById = async (id: string) => {
   return prisma.recoveryRequest.findFirst({where:{id}});
 };

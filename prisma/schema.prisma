@@ -194,6 +194,7 @@ model RecoveryExecutedEvent {
   id                     String   @id @default(uuid())
   account                String
   chainId                Int
+  newOwnersHash          String
   newThreshold           BigInt
   nonce                  BigInt
   executeAfter           BigInt
@@ -210,6 +211,7 @@ model RecoveryFinalizedEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  newOwnersHash    String
   newThreshold     BigInt
   nonce            BigInt
   transactionHash  String
