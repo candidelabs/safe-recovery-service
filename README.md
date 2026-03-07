@@ -50,6 +50,7 @@ This configuration file is used to set up and customize the service. It consists
 * `port`: The port number where the server will run. (required)
 * `indexerAlert`: Specifies the alert id to use for the alert system. (required)
 * `trustProxy`: Specifies whether the app is sitting behind a proxy and trusts this proxy. (optional, default: true)
+* `skipFirstAccountSetupAlert`: When set to `true`, suppresses the first alert for `GuardianAdded` or `ChangedThreshold` events if the account has no previously indexed events on the current chain. This avoids noisy alerts during initial account setup. (optional, default: `false`)
 * `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes. (optional)
 
 #### Signers
@@ -66,8 +67,6 @@ This configuration file is used to set up and customize the service. It consists
 #### Alerts
 
 * A list of alert objects, each with a unique `id`.
-* Each alert can have the following settings:
-	+ `skipFirstAccountSetupAlert`: When set to `true`, suppresses the first alert for `GuardianAdded` or `ChangedThreshold` events if the account has no previously indexed events on the current chain. This avoids noisy alerts during initial account setup. (optional, default: `false`)
 * Each alert can have one or multiple channels configured:
 	+ `email`: Can be configured using either:
 		- `smtp`: With `from`, `host`, `port`, `secure`, and `auth`.

@@ -12,7 +12,6 @@ import {RecoveryExecutedEvent} from "../models/events/recovery-executed-event";
 import {RecoveryCanceledEvent} from "../models/events/recovery-canceled-event";
 import {RecoveryFinalizedEvent} from "../models/events/recovery-finalized-event";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
-import {Alerts} from "../models/alert/alerts";
 import {Configuration} from "../config/config-manager";
 import {prisma} from "../config/prisma-client";
 
@@ -301,8 +300,7 @@ export class Indexer {
         const message = await accountEventTracker.getEventSummary(account, this.network.chainId);
         if (message){
           let shouldSkipAlert = false;
-          const indexerAlertId = Configuration.instance().indexerAlert;
-          if (Alerts.instance().getSkipFirstAccountSetupAlert(indexerAlertId)){
+          if (Configuration.instance().skipFirstAccountSetupAlert){
             const allSetupEvents = events.every(e =>
               e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
             );

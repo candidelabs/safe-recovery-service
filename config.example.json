@@ -3,6 +3,7 @@
     "env": "development",
     "port": "4337",
     "indexerAlert": "alert-1",
+    "skipFirstAccountSetupAlert": false,
     "trustProxy": true,
     "sentryDSN": "...",
     "rateLimit": 50
@@ -31,7 +32,6 @@
   "alerts": [
     {
       "id": "alert-1",
-      "skipFirstAccountSetupAlert": true,
       "channels": {
         "email": {
           "smtp": {
@@ -57,7 +57,6 @@
     },
     {
       "id": "alert-2",
-      "skipFirstAccountSetupAlert": false,
       "channels": {
         "email": {
           "webhook": {

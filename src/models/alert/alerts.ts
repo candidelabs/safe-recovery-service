@@ -2,7 +2,6 @@ import {AlertChannel} from "./alert-channel";
 
 export class Alerts {
   private alertConfig: Map<string, Map<string, AlertChannel>> = new Map();
-  private skipFirstSetupAlert: Map<string, boolean> = new Map();
   //
   private static _instance?: Alerts;
 
@@ -30,14 +29,6 @@ export class Alerts {
     if (id === "") return;
     if (!this.alertConfig.has(id)) return undefined;
     return Array.from(this.alertConfig.get(id)!.values());
-  }
-
-  public setSkipFirstAccountSetupAlert(id: string, value: boolean){
-    this.skipFirstSetupAlert.set(id, value);
-  }
-
-  public getSkipFirstAccountSetupAlert(id: string): boolean {
-    return this.skipFirstSetupAlert.get(id) ?? false;
   }
 
   public addAlertChannel(id: string, alertChannel: AlertChannel){

@@ -17,6 +17,7 @@ type Config = {
     env: string;
     port: number | string;
     indexerAlert: string;
+    skipFirstAccountSetupAlert?: boolean;
     sentryDSN?: string;
     trustProxy: boolean | string;
     rateLimit: number | string;
@@ -33,7 +34,6 @@ type Config = {
   }>;
   alerts: Array<{
     id: string;
-    skipFirstAccountSetupAlert?: boolean;
     channels: {
       email?: {
         smtp?: SmtpConfig;
@@ -78,6 +78,7 @@ export class Configuration {
   public indexerAlert!: string;
   public trustProxy!: boolean;
   public rateLimit!: number;
+  public skipFirstAccountSetupAlert!: boolean;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -154,6 +155,7 @@ export class Configuration {
     this.environment = options.env;
     this.port = port;
     this.indexerAlert = options.indexerAlert;
+    this.skipFirstAccountSetupAlert = options.skipFirstAccountSetupAlert ?? false;
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
     this.rateLimit = rateLimit;
   }
@@ -296,7 +298,6 @@ export class Configuration {
         }
         Alerts.instance().addAlertChannel(alert.id, smsAlertChannel!);
       }
-      Alerts.instance().setSkipFirstAccountSetupAlert(alert.id, alert.skipFirstAccountSetupAlert ?? false);
     });
     if (!Alerts.instance().alertIdExists(this.indexerAlert)){
       throw new Error(`options.indexerAlert '${this.indexerAlert}' is not found in declared alerts.`);
