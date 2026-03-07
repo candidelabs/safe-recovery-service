@@ -33,6 +33,7 @@ type Config = {
   }>;
   alerts: Array<{
     id: string;
+    skipFirstAccountSetupAlert?: boolean;
     channels: {
       email?: {
         smtp?: SmtpConfig;
@@ -295,6 +296,7 @@ export class Configuration {
         }
         Alerts.instance().addAlertChannel(alert.id, smsAlertChannel!);
       }
+      Alerts.instance().setSkipFirstAccountSetupAlert(alert.id, alert.skipFirstAccountSetupAlert ?? false);
     });
     if (!Alerts.instance().alertIdExists(this.indexerAlert)){
       throw new Error(`options.indexerAlert '${this.indexerAlert}' is not found in declared alerts.`);

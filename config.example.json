@@ -31,6 +31,7 @@
   "alerts": [
     {
       "id": "alert-1",
+      "skipFirstAccountSetupAlert": true,
       "channels": {
         "email": {
           "smtp": {
@@ -56,6 +57,7 @@
     },
     {
       "id": "alert-2",
+      "skipFirstAccountSetupAlert": false,
       "channels": {
         "email": {
           "webhook": {
