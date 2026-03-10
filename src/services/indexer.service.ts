@@ -12,6 +12,7 @@ import {RecoveryExecutedEvent} from "../models/events/recovery-executed-event";
 import {RecoveryCanceledEvent} from "../models/events/recovery-canceled-event";
 import {RecoveryFinalizedEvent} from "../models/events/recovery-finalized-event";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
+import {Configuration} from "../config/config-manager";
 import {prisma} from "../config/prisma-client";
 
 interface FailedRange {
@@ -294,6 +295,36 @@ export class Indexer {
     const promises = [];
     for (const account of accounts){
       const events = accountEventTracker.getEventsForAccount(account, this.network.chainId);
+      const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
+      if (accountSubscriptions && accountSubscriptions.length > 0){
+        const message = await accountEventTracker.getEventSummary(account, this.network.chainId);
+        if (message){
+          let shouldSkipAlert = false;
+          if (Configuration.instance().skipFirstAccountSetupAlert){
+            const allSetupEvents = events.every(e =>
+              e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
+            );
+            if (allSetupEvents){
+              const hasExisting = await this.hasExistingEventsForAccount(account, this.network.chainId);
+              shouldSkipAlert = !hasExisting;
+            }
+          }
+          if (!shouldSkipAlert){
+            for (const subscription of accountSubscriptions){
+              const promise = prisma.alertSubscriptionNotification.create({
+                data: {
+                  account: account,
+                  channel: subscription.channel,
+                  target: subscription.target,
+                  data: {message: {...message}},
+                  deliveryStatus: "PENDING"
+                }
+              });
+              promises.push(promise);
+            }
+          }
+        }
+      }
       for (const event of events){
         let promise;
         if (event.eventType == EventType.GuardianAdded){
@@ -310,24 +341,6 @@ export class Indexer {
           promise = this.storeRecoveryCanceledEvent(event as RecoveryCanceledEvent);
         }
         promises.push(promise);
-      }
-      const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
-      if (accountSubscriptions && accountSubscriptions.length > 0){
-        const message = await accountEventTracker.getEventSummary(account, this.network.chainId);
-        if (message){
-          for (const subscription of accountSubscriptions){
-            const promise = prisma.alertSubscriptionNotification.create({
-              data: {
-                account: account,
-                channel: subscription.channel,
-                target: subscription.target,
-                data: {message: {...message}},
-                deliveryStatus: "PENDING"
-              }
-            });
-            promises.push(promise);
-          }
-        }
       }
       accountEventTracker.clearEventsForAccount(account, this.network.chainId);
     }
@@ -429,6 +442,11 @@ export class Indexer {
         logIndex: event.logIndex,
       }
     });
+  }
+
+  private async hasExistingEventsForAccount(account: string, chainId: number): Promise<boolean> {
+    const counts = await prisma.guardianAddedEvent.count({where: {account, chainId}});
+    return counts > 0;
   }
 
 }

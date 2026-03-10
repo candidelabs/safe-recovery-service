@@ -3,6 +3,7 @@
     "env": "development",
     "port": "4337",
     "indexerAlert": "alert-1",
+    "skipFirstAccountSetupAlert": false,
     "trustProxy": true,
     "sentryDSN": "...",
     "rateLimit": 50

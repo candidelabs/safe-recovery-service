@@ -17,6 +17,7 @@ type Config = {
     env: string;
     port: number | string;
     indexerAlert: string;
+    skipFirstAccountSetupAlert?: boolean;
     sentryDSN?: string;
     trustProxy: boolean | string;
     rateLimit: number | string;
@@ -77,6 +78,7 @@ export class Configuration {
   public indexerAlert!: string;
   public trustProxy!: boolean;
   public rateLimit!: number;
+  public skipFirstAccountSetupAlert!: boolean;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -153,6 +155,7 @@ export class Configuration {
     this.environment = options.env;
     this.port = port;
     this.indexerAlert = options.indexerAlert;
+    this.skipFirstAccountSetupAlert = options.skipFirstAccountSetupAlert ?? false;
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
     this.rateLimit = rateLimit;
   }
