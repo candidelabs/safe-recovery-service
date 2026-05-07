@@ -18,7 +18,9 @@ export class ChainExecutor {
   private static _instance: ChainExecutor;
   private queues: Map<number, Map<string, TransactionData[]>>; // chainId -> signerId -> transaction queue
   private processing: Map<number, Map<string, boolean>>; // Tracks processing status for each signer on each chain
-  private static readonly MAX_RETRIES = 3;
+  private static readonly MAX_RETRIES = 30;
+  private static readonly BASE_RETRY_DELAY_MS = 5 * 1_000;
+  private static readonly MAX_RETRY_DELAY_MS = 15 * 60 * 1_000;
 
   private constructor() {
     this.queues = new Map();
@@ -82,7 +84,14 @@ export class ChainExecutor {
       transactionData.retries = transactionData.retries ?? 0;
       if (transactionData.retries < ChainExecutor.MAX_RETRIES) {
         transactionData.retries++;
-        queue.push(transactionData);
+        const delayMs = Math.min(
+          ChainExecutor.BASE_RETRY_DELAY_MS * Math.pow(2, transactionData.retries - 1),
+          ChainExecutor.MAX_RETRY_DELAY_MS
+        );
+        setTimeout(() => {
+          this.queues.get(chainId)!.get(signerId)!.push(transactionData);
+          this.processNext(chainId, signerId);
+        }, delayMs);
       } else {
         if (transactionData.callback) {
           transactionData.callback(false, '');
