@@ -109,13 +109,14 @@ export class Indexer {
     try {
       await this.processFailedRanges();
       const _latestOnchainBlock = await this.network.jsonRPCProvider.send("eth_blockNumber", []);
-      const latestOnchainBlock = parseInt(_latestOnchainBlock, 16);
+      const latestOnchainBlock = parseInt(_latestOnchainBlock, 16) - 2;
       let fromBlock = this.latestFromBlock + 1;
       fromBlock = Math.min(fromBlock, latestOnchainBlock);
       let toBlock = fromBlock + this.blockRangeSize;
       toBlock = Math.min(toBlock, latestOnchainBlock);
       const promises = [];
       while (true){
+        if (fromBlock > toBlock) break;
         if (fromBlock == toBlock && toBlock < this.latestFromBlock) break;
         if (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
           await delay(350);
