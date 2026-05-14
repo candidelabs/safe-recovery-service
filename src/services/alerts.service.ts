@@ -207,6 +207,15 @@ async function _sendNotification(target: string, notifications: AlertSubscriptio
     });
     return;
   }
+  if (Configuration.instance().suppressAlerts) {
+    for (const notification of notifications) {
+      await prisma.alertSubscriptionNotification.update({
+        data: {deliveryStatus: "SENT"},
+        where: {id: notification.id}
+      });
+    }
+    return;
+  }
   let messages:SummaryMessageData[] = [];
   for (const notification of notifications){
       messages.push(

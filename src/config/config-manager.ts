@@ -18,6 +18,7 @@ type Config = {
     port: number | string;
     indexerAlert: string;
     skipFirstAccountSetupAlert?: boolean;
+    suppressAlerts?: boolean | string;
     sentryDSN?: string;
     trustProxy: boolean | string;
     rateLimit: number | string;
@@ -79,6 +80,7 @@ export class Configuration {
   public trustProxy!: boolean;
   public rateLimit!: number;
   public skipFirstAccountSetupAlert!: boolean;
+  public suppressAlerts!: boolean;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -156,6 +158,10 @@ export class Configuration {
     this.port = port;
     this.indexerAlert = options.indexerAlert;
     this.skipFirstAccountSetupAlert = options.skipFirstAccountSetupAlert ?? false;
+    this.suppressAlerts = (options.suppressAlerts ?? false).toString().toLowerCase() === "true";
+    if (this.suppressAlerts) {
+      console.warn("[safe-recovery-service] options.suppressAlerts=true — event-notification alerts will not be delivered (OTPs unaffected).");
+    }
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
     this.rateLimit = rateLimit;
   }
