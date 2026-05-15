@@ -14,6 +14,18 @@ interface TransactionData {
   retries?: number;
 }
 
+export interface FailedTransaction {
+  to: string;
+  callData: string;
+  value: bigint;
+  chainId: number;
+  signerId: string;
+  retries: number;
+  lastError: unknown;
+}
+
+export type ChainExecutorFailureListener = (failure: FailedTransaction) => void;
+
 export class ChainExecutor {
   private static _instance: ChainExecutor;
   private queues: Map<number, Map<string, TransactionData[]>>; // chainId -> signerId -> transaction queue
@@ -21,6 +33,7 @@ export class ChainExecutor {
   private static readonly MAX_RETRIES = 30;
   private static readonly BASE_RETRY_DELAY_MS = 5 * 1_000;
   private static readonly MAX_RETRY_DELAY_MS = 15 * 60 * 1_000;
+  private static failureListeners: ChainExecutorFailureListener[] = [];
 
   private constructor() {
     this.queues = new Map();
@@ -32,6 +45,11 @@ export class ChainExecutor {
       ChainExecutor._instance = new ChainExecutor();
     }
     return ChainExecutor._instance;
+  }
+
+  // Fires once per transaction, after MAX_RETRIES attempts have all failed.
+  public static addFailureListener(listener: ChainExecutorFailureListener): void {
+    ChainExecutor.failureListeners.push(listener);
   }
 
   public addTransaction(transaction: TransactionData): void {
@@ -93,6 +111,21 @@ export class ChainExecutor {
           this.processNext(chainId, signerId);
         }, delayMs);
       } else {
+        for (const listener of ChainExecutor.failureListeners) {
+          try {
+            listener({
+              to: transactionData.to,
+              callData: transactionData.callData,
+              value: transactionData.value,
+              chainId: transactionData.chainId,
+              signerId: transactionData.signerId,
+              retries: transactionData.retries,
+              lastError: error,
+            });
+          } catch (listenerError) {
+            Logger.error(`Chain executor failure listener threw : ${listenerError}`);
+          }
+        }
         if (transactionData.callback) {
           transactionData.callback(false, '');
         }
