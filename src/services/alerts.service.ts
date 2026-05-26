@@ -31,7 +31,12 @@ export const createSubscription = async (account: string, owner: string, chainId
   //
   const safeAccount = new SafeAccount(account);
   const network = Network.instances.get(chainId.toString())!;
-  let owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+  let owners: string[];
+  try {
+    owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+  } catch (e) {
+    throw new ApiError(httpStatus.BAD_REQUEST, `Unable to fetch owners for account '${account}' on chain ${chainId}. The account may not be deployed.`);
+  }
   owners = owners.map(e => e.toLowerCase());
   if (!owners.includes(owner.toLowerCase())){
     throw new ApiError(httpStatus.FORBIDDEN, `Owner must be a valid owner for the account provided`);
