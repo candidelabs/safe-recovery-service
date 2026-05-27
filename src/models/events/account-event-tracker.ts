@@ -155,7 +155,7 @@ export class AccountEventTracker {
           details = `RECOVERY EXECUTED
 New Threshold: ${data.newThreshold}
 Nonce: ${data.nonce}
-Execute After: ${new Date(Number(data.executeAfter)).toISOString()}
+Execute After: ${new Date(Number(data.executeAfter * 1000)).toISOString()}
 Guardian Approvals: ${data.guardiansApprovalCount}
 Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
           break;

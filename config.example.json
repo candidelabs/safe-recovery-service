@@ -7,7 +7,8 @@
     "suppressAlerts": false,
     "trustProxy": true,
     "sentryDSN": "...",
-    "rateLimit": 50
+    "rateLimit": 50,
+    "supportEmail": "support@example.com"
   },
 
   "signers": [

@@ -22,6 +22,7 @@ type Config = {
     sentryDSN?: string;
     trustProxy: boolean | string;
     rateLimit: number | string;
+    supportEmail?: string;
   };
   signers: Array<{
     id: string;
@@ -81,6 +82,7 @@ export class Configuration {
   public rateLimit!: number;
   public skipFirstAccountSetupAlert!: boolean;
   public suppressAlerts!: boolean;
+  public supportEmail?: string;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -164,6 +166,13 @@ export class Configuration {
     }
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
     this.rateLimit = rateLimit;
+
+    if (options.supportEmail !== undefined) {
+      if (typeof options.supportEmail !== "string" || options.supportEmail.trim() === "") {
+        throw new Error("Options.supportEmail must be a non-empty string when provided.");
+      }
+      this.supportEmail = options.supportEmail.trim();
+    }
   }
 
   private initializeSigners(signers: Config["signers"]) {

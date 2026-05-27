@@ -1,5 +1,6 @@
 import {SummaryMessageData} from "../../utils/interfaces";
 import {escapeHtml} from "../../utils";
+import {Configuration} from "../../config/config-manager";
 
 export type MessageTemplates = "otpVerification" | "notification";
 const emailTemplates: Record<MessageTemplates, any> = {
@@ -39,6 +40,10 @@ export function getTemplate(channel: string, template: MessageTemplates): Record
 function generateEventSummaryEmail(summaries: SummaryMessageData[]): string {
     const contents:string[] = summaries.map(summary => generateSingleEventSummaryEmail(summary));
     const compinedContent = contents.reduce((compinedContent, content) => compinedContent + content);
+    const supportEmail = Configuration.instance().supportEmail;
+    const supportLine = supportEmail
+      ? `<p style="margin: 5px 0;">For support, contact our team at ${escapeHtml(supportEmail)}</p>`
+      : "";
   return `
 <!DOCTYPE html>
 <html lang="en">
@@ -63,7 +68,7 @@ function generateEventSummaryEmail(summaries: SummaryMessageData[]): string {
     ${compinedContent} 
     <div style="text-align: center; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px;">
       <p style="margin: 0;">This is an automated security notification</p>
-      <p style="margin: 5px 0;">For support, contact our team at support@example.com</p>
+      ${supportLine}
     </div>
   </div>
 </body>
