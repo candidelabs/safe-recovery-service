@@ -87,16 +87,11 @@ export class Indexer {
     //
     if (!this.active) return;
     Logger.debug(`Started Indexer (${this.network.name})!`);
-    let counter = 0;
-    this.cronJob = cron.schedule('*/30 * * * * *', async () => {
-      if (counter % 2 == 0){
-        const storeEvents = !this.storingBusy && !this.indexingBusy;
-        if (storeEvents){
-          await this.storeEvents(this.latestFromBlock);
-        }
+    this.cronJob = cron.schedule('*/15 * * * * *', async () => {
+      if (!this.storingBusy && !this.indexingBusy){
+        await this.storeEvents(this.latestFromBlock);
       }
-      const indexNewBlocks = !this.indexingBusy && !this.storingBusy;
-      if (indexNewBlocks){
+      if (!this.indexingBusy && !this.storingBusy){
         this.indexNewBlocks();
       }
     });
@@ -118,15 +113,16 @@ export class Indexer {
       while (true){
         if (fromBlock > toBlock) break;
         if (fromBlock == toBlock && toBlock < this.latestFromBlock) break;
-        if (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
+        while (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
           await delay(350);
-          continue;
         }
         concurrentRequests++;
-        const promise = this.processBlockRange(fromBlock, toBlock, (success) => {
+        const rangeFrom = fromBlock;
+        const rangeTo = toBlock;
+        const promise = this.processBlockRange(rangeFrom, rangeTo, (success) => {
           concurrentRequests--;
           if (!success){
-            this.addFailedRange(fromBlock, toBlock);
+            this.addFailedRange(rangeFrom, rangeTo);
           }
         });
         this.latestFromBlock = toBlock;
@@ -141,8 +137,9 @@ export class Indexer {
       await Promise.all(promises);
     } catch (error) {
       Logger.error(`Error in indexNewBlocks: ${error}`);
+    } finally {
+      this.indexingBusy = false;
     }
-    this.indexingBusy = false;
   }
 
   private async processBlockRange(fromBlock: number, toBlock: number, callback?: (success: boolean) => any): Promise<void> {
@@ -174,42 +171,26 @@ export class Indexer {
 
     const rangesToRetry = [...this.failedRanges];
     this.failedRanges = [];
-    const deleteRanges = new Set<string>();
 
     for (const range of rangesToRetry) {
-      if (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
-        await delay(350);
+      if (range.retryCount >= this.maxRetries) {
+        Logger.error(`Max retries reached for range ${range.fromBlock}-${range.toBlock}, dropping`);
         continue;
       }
-      if (range.retryCount >= this.maxRetries) {
-        Logger.error(`Max retries reached for range ${range.fromBlock}-${range.toBlock}`);
-        // continue;
+      while (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
+        await delay(350);
       }
       range.retryCount++;
       concurrentRequests++;
       this.processBlockRange(range.fromBlock, range.toBlock, (success) => {
         concurrentRequests--;
-        if (success){
-          deleteRanges.add(`${range.fromBlock}:${range.toBlock}`);
+        if (!success){
+          this.failedRanges.push(range);
         }
       });
     }
-    while (true){
-      if (concurrentRequests > 0){
-        await delay(100);
-        continue;
-      }
-      break;
-    }
-    const removeIndexes: number[] = [];
-    for (let i = 0; i < this.failedRanges.length; i++){
-      const range = this.failedRanges[i];
-      if (deleteRanges.has(`${range.fromBlock}:${range.toBlock}`)){
-        removeIndexes.push(i);
-      }
-    }
-    for (const index of removeIndexes) {
-      this.failedRanges.splice(index, 1);
+    while (concurrentRequests > 0){
+      await delay(100);
     }
   }
 
@@ -291,68 +272,79 @@ export class Indexer {
 
   public async storeEvents(latestIndexedBlock: number){
     this.storingBusy = true;
-    const accountEventTracker = AccountEventTracker.instance();
-    const accounts = accountEventTracker.getAllAccounts(this.network.chainId);
-    const promises = [];
-    for (const account of accounts){
-      const events = accountEventTracker.getEventsForAccount(account, this.network.chainId);
-      const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
-      if (accountSubscriptions && accountSubscriptions.length > 0){
-        const message = await accountEventTracker.getEventSummary(account, this.network.chainId);
-        if (message){
-          let shouldSkipAlert = false;
-          if (Configuration.instance().skipFirstAccountSetupAlert){
-            const allSetupEvents = events.every(e =>
-              e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
-            );
-            if (allSetupEvents){
-              const hasExisting = await this.hasExistingEventsForAccount(account, this.network.chainId);
-              shouldSkipAlert = !hasExisting;
-            }
+    try {
+      const accountEventTracker = AccountEventTracker.instance();
+      const accounts = accountEventTracker.getAllAccounts(this.network.chainId);
+      const promises = [];
+      for (const account of accounts){
+        const events = accountEventTracker.getEventsForAccount(account, this.network.chainId);
+        const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
+        if (accountSubscriptions && accountSubscriptions.length > 0){
+          let message;
+          try {
+            message = await accountEventTracker.getEventSummary(account, this.network.chainId);
+          } catch (error) {
+            Logger.error(`getEventSummary failed for account ${account} on chain ${this.network.chainId}: ${error}`);
+            message = undefined;
           }
-          if (!shouldSkipAlert){
-            for (const subscription of accountSubscriptions){
-              const promise = prisma.alertSubscriptionNotification.create({
-                data: {
-                  account: account,
-                  channel: subscription.channel,
-                  target: subscription.target,
-                  data: {message: {...message}},
-                  deliveryStatus: "PENDING"
-                }
-              });
-              promises.push(promise);
+          if (message){
+            let shouldSkipAlert = false;
+            if (Configuration.instance().skipFirstAccountSetupAlert){
+              const allSetupEvents = events.every(e =>
+                e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
+              );
+              if (allSetupEvents){
+                const hasExisting = await this.hasExistingEventsForAccount(account, this.network.chainId);
+                shouldSkipAlert = !hasExisting;
+              }
+            }
+            if (!shouldSkipAlert){
+              for (const subscription of accountSubscriptions){
+                const promise = prisma.alertSubscriptionNotification.create({
+                  data: {
+                    account: account,
+                    channel: subscription.channel,
+                    target: subscription.target,
+                    data: {message: {...message}},
+                    deliveryStatus: "PENDING"
+                  }
+                });
+                promises.push(promise);
+              }
             }
           }
         }
-      }
-      for (const event of events){
-        let promise;
-        if (event.eventType == EventType.GuardianAdded){
-          promise = this.storeGuardianAddedEvent(event as GuardianAddedEvent);
-        }else if (event.eventType == EventType.GuardianRevoked){
-          promise = this.storeGuardianRevokedEvent(event as GuardianRevokedEvent);
-        }else if (event.eventType == EventType.ChangedThreshold){
-          promise = this.storeChangedThresholdEvent(event as ChangedThresholdEvent);
-        }else if (event.eventType == EventType.RecoveryExecuted){
-          promise = this.storeRecoveryExecutedEvent(event as RecoveryExecutedEvent);
-        }else if (event.eventType == EventType.RecoveryFinalized){
-          promise = this.storeRecoveryFinalizedEvent(event as RecoveryFinalizedEvent);
-        }else if (event.eventType == EventType.RecoveryCanceled){
-          promise = this.storeRecoveryCanceledEvent(event as RecoveryCanceledEvent);
+        for (const event of events){
+          let promise;
+          if (event.eventType == EventType.GuardianAdded){
+            promise = this.storeGuardianAddedEvent(event as GuardianAddedEvent);
+          }else if (event.eventType == EventType.GuardianRevoked){
+            promise = this.storeGuardianRevokedEvent(event as GuardianRevokedEvent);
+          }else if (event.eventType == EventType.ChangedThreshold){
+            promise = this.storeChangedThresholdEvent(event as ChangedThresholdEvent);
+          }else if (event.eventType == EventType.RecoveryExecuted){
+            promise = this.storeRecoveryExecutedEvent(event as RecoveryExecutedEvent);
+          }else if (event.eventType == EventType.RecoveryFinalized){
+            promise = this.storeRecoveryFinalizedEvent(event as RecoveryFinalizedEvent);
+          }else if (event.eventType == EventType.RecoveryCanceled){
+            promise = this.storeRecoveryCanceledEvent(event as RecoveryCanceledEvent);
+          }
+          promises.push(promise);
         }
-        promises.push(promise);
+        accountEventTracker.clearEventsForAccount(account, this.network.chainId);
       }
-      accountEventTracker.clearEventsForAccount(account, this.network.chainId);
+      await Promise.all(promises);
+      if (this.failedRanges.length == 0){
+        await prisma.indexerData.update({
+          data: {latestIndexedBlock: latestIndexedBlock},
+          where: {id: this.indexerDataId}
+        });
+      }
+    } catch (error) {
+      Logger.error(`Error in storeEvents: ${error}`);
+    } finally {
+      this.storingBusy = false;
     }
-    await Promise.all(promises);
-    if (this.failedRanges.length == 0){
-      await prisma.indexerData.update({
-        data: {latestIndexedBlock: latestIndexedBlock},
-        where: {id: this.indexerDataId}
-      });
-    }
-    this.storingBusy = false;
   }
 
   private async storeGuardianAddedEvent(event: GuardianAddedEvent){
