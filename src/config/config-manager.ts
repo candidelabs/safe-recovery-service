@@ -102,16 +102,16 @@ export class Configuration {
   }
 
   private resolveEnvVariables(config: Config): Config {
+    const ENV_INTERP_REGEX = /\$\{ENV::([A-Za-z_][A-Za-z0-9_]*)\}/g;
     const resolveValue = (value: unknown): unknown => {
-      if (typeof value === "string" && value.startsWith("ENV::")) {
-        const envVar = value.replace("ENV::", "");
+      if (typeof value !== "string") return value;
+      return value.replace(ENV_INTERP_REGEX, (_, envVar: string) => {
         const resolved = process.env[envVar];
         if (!resolved) {
           throw new Error(`Environment variable '${envVar}' is not set.`);
         }
         return resolved;
-      }
-      return value;
+      });
     };
 
     const deepResolve = (obj: any): any => {

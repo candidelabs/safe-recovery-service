@@ -106,7 +106,7 @@ This configuration file is used to set up and customize the service. It consists
       * `startBlock`: A number that specifies from which block should the indexer start indexing (should be the block at which the recovery module was deployed), Note: this value will be ignored after the first time the indexer starts as it'll rely on its recorded last indexed block
 
 > [!TIP]
-The config file supports loading values from `.env`. Prefix the value with `ENV::` followed by the name of the env variable. Example: `privateKey: ENV::PRIVATE_KEY` loads the value of the `PRIVATE_KEY` .env variable into the `privateKey` field
+The config file supports loading values from `.env`. Use `${ENV::VAR_NAME}` anywhere inside a string value and the named environment variable will be substituted in at boot. Examples: `"privateKey": "${ENV::PRIVATE_KEY}"` loads the whole field from the env variable, while `"jsonRpcEndpoint": "https://rpc.example.com/${ENV::RPC_API_KEY}"` only substitutes the key segment. Multiple substitutions in one string are supported. Missing env variables throw at boot.
 > 
 
 ## Running
