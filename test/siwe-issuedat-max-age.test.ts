@@ -23,6 +23,18 @@ function buildMessage(args: {
 }
 
 describe('verifySiweMessageData issuedAt freshness', () => {
+  it('rejects issuedAt more than 30 seconds in the future', () => {
+    const issuedAt = new Date(Date.now() + 60 * 1000).toISOString();
+    const [ok, err] = verifySiweMessageData(
+      buildMessage({ issuedAt }),
+      account,
+      chainId,
+      statement,
+    );
+    expect(ok).toBe(false);
+    expect(err).toMatch(/issuedAt is in the future/);
+  });
+
   it('rejects stale issuedAt even when expirationTime is far in the future', () => {
     const issuedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const expirationTime = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
