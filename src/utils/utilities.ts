@@ -188,6 +188,16 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     return [false, `issuedAt could not be parsed in signed message, please make sure it is correctly formatted`];
   }
   const currentTimestamp = Date.now();
+  const siweMaxAgeMs = 60 * 5 * 1000;
+  // Reject far-future issuedAt (small clock skew allowed).
+  if (messageTimestamp > currentTimestamp + 30_000) {
+    return [false, `issuedAt is in the future`];
+  }
+  // Always enforce issuedAt freshness. Previously skipped when expirationTime was
+  // set, so a SIWE with years-long Expiration Time stayed valid for recovery auth.
+  if ((currentTimestamp - messageTimestamp) > siweMaxAgeMs) {
+    return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
+  }
   if (message.notBefore){
     const notBeforeTimestamp = Date.parse(message.notBefore);
     if (Number.isNaN(notBeforeTimestamp)){
@@ -205,9 +215,8 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     if (expirationTimestamp < currentTimestamp) {
       return [false, `expirationTimestamp has passed and signature has expired`];
     }
-  }else{
-    if ((currentTimestamp - messageTimestamp) > (60*5*1000)) {
-      return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
+    if ((expirationTimestamp - messageTimestamp) > siweMaxAgeMs) {
+      return [false, `expirationTime exceeds the 5 minute maximum lifetime`];
     }
   }
   nonceTracker.add(messageIdentifier);
