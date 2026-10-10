@@ -22,8 +22,17 @@ export function JsonBigIntParser(object: Record<string, any> | Record<string, an
   }
 }
 
-export async function populateTxGasPricesAndLimits(network: Network, sender: string, to: string, value: bigint, callData: string){
-  const nonce = await network.jsonRPCProvider.getTransactionCount(sender, "pending");
+export async function populateTxGasPricesAndLimits(
+  network: Network,
+  sender: string,
+  to: string,
+  value: bigint,
+  callData: string,
+  nonceOverride?: number,
+  minFees?: { maxFeePerGas: BigNumber; maxPriorityFeePerGas: BigNumber },
+){
+  // Reuse the original nonce on a replacement; otherwise take the pending nonce.
+  const nonce = nonceOverride ?? await network.jsonRPCProvider.getTransactionCount(sender, "pending");
   const tx: UnsignedTransaction = {
     type: 2,
     to,
@@ -37,13 +46,24 @@ export async function populateTxGasPricesAndLimits(network: Network, sender: str
   const gasLimit = await network.jsonRPCProvider.estimateGas({to: tx.to, data: tx.data, value: value});
   tx.gasLimit = hexValue(scaleBigNumber(gasLimit, 1.25));
   const [_, maxFeePerGas, maxPriorityFeePerGas] = await GasPriceEstimator.instance().estimate(network.chainId, 1.50);
+  let finalMaxFeePerGas: BigNumber;
+  let finalMaxPriorityFeePerGas: BigNumber;
   if (network.chainId == 100) { // gnosis has some fixed gas prices
-    tx.maxFeePerGas = hexValue(BigNumber.from("1000000000").mul(3));
-    tx.maxPriorityFeePerGas = hexValue(BigNumber.from("1000000000").mul(2));
+    finalMaxFeePerGas = BigNumber.from("1000000000").mul(3);
+    finalMaxPriorityFeePerGas = BigNumber.from("1000000000").mul(2);
   }else{
-    tx.maxFeePerGas = hexValue(maxFeePerGas);
-    tx.maxPriorityFeePerGas = hexValue(maxPriorityFeePerGas);
+    finalMaxFeePerGas = maxFeePerGas;
+    finalMaxPriorityFeePerGas = maxPriorityFeePerGas;
   }
+  // Floor a replacement's fees at +12.5% over the prior attempt (mempool minimum).
+  if (minFees) {
+    const flooredMaxFeePerGas = scaleBigNumber(minFees.maxFeePerGas, 1.125);
+    const flooredMaxPriorityFeePerGas = scaleBigNumber(minFees.maxPriorityFeePerGas, 1.125);
+    if (flooredMaxFeePerGas.gt(finalMaxFeePerGas)) finalMaxFeePerGas = flooredMaxFeePerGas;
+    if (flooredMaxPriorityFeePerGas.gt(finalMaxPriorityFeePerGas)) finalMaxPriorityFeePerGas = flooredMaxPriorityFeePerGas;
+  }
+  tx.maxFeePerGas = hexValue(finalMaxFeePerGas);
+  tx.maxPriorityFeePerGas = hexValue(finalMaxPriorityFeePerGas);
   return tx;
 }
 
