@@ -264,7 +264,6 @@ export const findById = async (id: string) => {
   return prisma.recoveryRequest.findFirst({where:{id}});
 };
 
-const executionMutex = new Set<string>()
 export const sponsorExecution = async (request: RecoveryRequest) => {
   const network = Network.instances.get(request.chainId.toString())!;
   if (!network.executeRecoveryRequestConfig.enabled){
@@ -322,13 +321,18 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       );
     }
   }
-  if (executionMutex.has(request.id) || request.status === "EXECUTION-IN-PROGRESS"){
+  // Claim the request atomically so concurrent calls cannot enqueue it twice;
+  // the executor queue is in-memory and has no idempotency key of its own.
+  const claimed = await prisma.recoveryRequest.updateMany({
+    where: {id: request.id, status: "PENDING"},
+    data: {status: "EXECUTION-IN-PROGRESS"}
+  });
+  if (claimed.count === 0){
     throw new ApiError(
       httpStatus.FORBIDDEN,
       `Execution already pending`
     );
   }
-  executionMutex.add(request.id);
   const callData = socialRecoveryModule.interface.encodeFunctionData(
     "multiConfirmRecovery",
     [
@@ -344,27 +348,27 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
     value: 0n,
     callData,
     chainId: network.chainId,
-    signerId: network.finalizeRecoveryRequestConfig.signer!,
+    signerId: network.executeRecoveryRequestConfig.signer!,
     callback: async (success, transactionHash) => {
+      // Conditional on the claim still being ours, so a late or duplicate
+      // outcome can never overwrite a status another path has since set.
       if (success){
         executeData["sponsored"] = true;
         executeData["transactionHash"] = transactionHash;
-        await prisma.recoveryRequest.update({
+        await prisma.recoveryRequest.updateMany({
           data: {executeData, status: "EXECUTED"},
-          where: {id: request.id}
+          where: {id: request.id, status: "EXECUTION-IN-PROGRESS"}
         });
       }else{
-        await prisma.recoveryRequest.update({
+        await prisma.recoveryRequest.updateMany({
           data: {status: "PENDING"},
-          where: {id: request.id}
+          where: {id: request.id, status: "EXECUTION-IN-PROGRESS"}
         });
       }
     }
   });
-  executionMutex.delete(request.id);
 };
 
-const finalizationMutex = new Set<string>()
 export const sponsorFinalization = async (request: RecoveryRequest) => {
   const network = Network.instances.get(request.chainId.toString())!;
   if (!network.finalizeRecoveryRequestConfig.enabled){
@@ -413,13 +417,18 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
       `Recovery request is not yet ready for finalization`
     );
   }
-  if (finalizationMutex.has(request.id) || request.status === "FINALIZATION-IN-PROGRESS"){
+  // Claim atomically (see sponsorExecution). Any status short of finalized may
+  // be claimed because the recovery may have been executed outside this service.
+  const claimed = await prisma.recoveryRequest.updateMany({
+    where: {id: request.id, status: {notIn: ["FINALIZATION-IN-PROGRESS", "FINALIZED"]}},
+    data: {status: "FINALIZATION-IN-PROGRESS"}
+  });
+  if (claimed.count === 0){
     throw new ApiError(
       httpStatus.FORBIDDEN,
       `Finalization already pending`
     );
   }
-  finalizationMutex.add(request.id);
   const callData = socialRecoveryModule.interface.encodeFunctionData("finalizeRecovery", [request.account]);
   ChainExecutor.instance().addTransaction({
     to: network.recoveryModuleAddress,
@@ -428,20 +437,36 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
     chainId: network.chainId,
     signerId: network.finalizeRecoveryRequestConfig.signer!,
     callback: async (success, transactionHash) => {
+      // See sponsorExecution: conditional on the claim still being ours.
       if (success){
         finalizeData["sponsored"] = true;
         finalizeData["transactionHash"] = transactionHash;
-        await prisma.recoveryRequest.update({
+        await prisma.recoveryRequest.updateMany({
           data: {finalizeData, status: "FINALIZED"},
-          where: {id: request.id}
+          where: {id: request.id, status: "FINALIZATION-IN-PROGRESS"}
         });
       }else{
-        await prisma.recoveryRequest.update({
+        await prisma.recoveryRequest.updateMany({
           data: {status: "EXECUTED"},
-          where: {id: request.id}
+          where: {id: request.id, status: "FINALIZATION-IN-PROGRESS"}
         });
       }
     }
   });
-  finalizationMutex.delete(request.id);
+};
+
+// Claims live in the DB but the executor queue lives in memory, so any
+// *-IN-PROGRESS row at boot was orphaned by a previous process. Release it so
+// the request can be sponsored again; the on-chain checks in sponsorExecution
+// and sponsorFinalization prevent a double execution if the old tx did land.
+export const releaseOrphanedSponsorships = async (): Promise<number> => {
+  const executions = await prisma.recoveryRequest.updateMany({
+    where: {status: "EXECUTION-IN-PROGRESS"},
+    data: {status: "PENDING"}
+  });
+  const finalizations = await prisma.recoveryRequest.updateMany({
+    where: {status: "FINALIZATION-IN-PROGRESS"},
+    data: {status: "EXECUTED"}
+  });
+  return executions.count + finalizations.count;
 };

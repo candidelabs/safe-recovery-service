@@ -15,6 +15,7 @@ import Logger from "./utils/logger";
 import {errorConverter, errorHandler} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
+import {releaseOrphanedSponsorships} from "./services/recoveries.service";
 
 export const app: Express = express();
 const configuration = Configuration.instance();
@@ -71,6 +72,11 @@ app.use(errorHandler);
 app.listen(configuration.port, () => {
   Logger.info(`Listening to port ${configuration.port}`);
   //
+  releaseOrphanedSponsorships()
+    .then((count) => {
+      if (count > 0) Logger.warn(`Released ${count} orphaned sponsorship claim(s) left by a previous run`);
+    })
+    .catch((error) => Logger.error(`Failed to release orphaned sponsorship claims : ${error}`));
   delay(2500).then(async () => {
     await AccountEventTracker.instance().loadSubscriptions();
     startSendNotificationsCronJob();
