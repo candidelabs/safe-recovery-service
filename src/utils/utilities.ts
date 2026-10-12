@@ -30,6 +30,7 @@ export async function populateTxGasPricesAndLimits(
   callData: string,
   nonceOverride?: number,
   minFees?: { maxFeePerGas: BigNumber; maxPriorityFeePerGas: BigNumber },
+  gasLimitOverride?: string,
 ){
   // Reuse the original nonce on a replacement; otherwise take the pending nonce.
   const nonce = nonceOverride ?? await network.jsonRPCProvider.getTransactionCount(sender, "pending");
@@ -43,8 +44,15 @@ export async function populateTxGasPricesAndLimits(
     value: hexValue(value)
   }
   //
-  const gasLimit = await network.jsonRPCProvider.estimateGas({to: tx.to, data: tx.data, value: value});
-  tx.gasLimit = hexValue(scaleBigNumber(gasLimit, 1.25));
+  if (gasLimitOverride !== undefined) {
+    // Replacement: reuse the limit from the original broadcast. Re-estimating would turn
+    // a state change into a pre-send failure while the nonce stays occupied; mining the
+    // replacement as a revert instead is terminal and frees the nonce.
+    tx.gasLimit = gasLimitOverride;
+  } else {
+    const gasLimit = await network.jsonRPCProvider.estimateGas({to: tx.to, data: tx.data, value: value});
+    tx.gasLimit = hexValue(scaleBigNumber(gasLimit, 1.25));
+  }
   const [_, maxFeePerGas, maxPriorityFeePerGas] = await GasPriceEstimator.instance().estimate(network.chainId, 1.50);
   let finalMaxFeePerGas: BigNumber;
   let finalMaxPriorityFeePerGas: BigNumber;
