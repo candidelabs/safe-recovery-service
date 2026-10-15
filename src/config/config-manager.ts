@@ -75,6 +75,7 @@ type Config = {
 
 export class Configuration {
   public environment!: string;
+  public indexerPaused!: boolean;
   public port!: number;
   public sentryDSN?: string;
   public indexerAlert!: string;
@@ -140,8 +141,8 @@ export class Configuration {
       throw new Error("Options configuration is invalid. 'env', 'port' and 'indexerAlert' are required.");
     }
     options.env = options.env.toLowerCase();
-    if (options.env !== "development" && options.env !== "production") {
-      throw new Error("Options.env must be either 'development' or 'production'");
+    if (options.env !== "development" && options.env !== "development:indexer" && options.env !== "production") {
+      throw new Error("Options.env must be either 'development', 'development:indexer' or 'production'");
     }
     const port = Number(options.port);
     if (isNaN(port) || port <= 0) {
@@ -156,7 +157,12 @@ export class Configuration {
     if (options.sentryDSN){
       this.sentryDSN = options.sentryDSN;
     }
-    this.environment = options.env;
+    // 'development:indexer' behaves as 'development' everywhere, except that it keeps the indexer running
+    this.environment = options.env === "production" ? "production" : "development";
+    this.indexerPaused = options.env !== "production" && options.env !== "development:indexer";
+    if (this.indexerPaused) {
+      console.warn(`[safe-recovery-service] options.env='${options.env}' - indexer paused on all networks (use 'production' or 'development:indexer' to run it).`);
+    }
     this.port = port;
     this.indexerAlert = options.indexerAlert;
     this.skipFirstAccountSetupAlert = options.skipFirstAccountSetupAlert ?? false;

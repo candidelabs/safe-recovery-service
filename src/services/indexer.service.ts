@@ -59,6 +59,11 @@ export class Indexer {
   }
 
   public async start() {
+    // Paused outside 'production' / 'development:indexer': no cron, no RPC calls, no IndexerData reads or writes
+    if (Configuration.instance().indexerPaused){
+      Logger.debug(`Indexer (${this.network.name}) paused by options.env`);
+      return;
+    }
     if (this.indexerReady){
       Logger.debug(`Indexer (${this.network.name}) already running!`);
       return;
