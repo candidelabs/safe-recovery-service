@@ -46,7 +46,7 @@ This configuration file is used to set up and customize the service. It consists
 
 #### Options
 
-* `env`: The environment in which the service is running. Can be either `"development"` or `"production"`. (required)
+* `env`: The environment in which the service is running. Can be `"production"`, `"development"` or `"development:indexer"`. The indexer only runs in `"production"` and `"development:indexer"`; in any other environment it is paused on every network (no RPC polling, no event storage, no `IndexerData` writes). `"development:indexer"` otherwise behaves exactly like `"development"`. (required)
 * `port`: The port number where the server will run. (required)
 * `indexerAlert`: Specifies the alert id to use for the alert system. (required)
 * `trustProxy`: Specifies whether the app is sitting behind a proxy and trusts this proxy. (optional, default: true)
