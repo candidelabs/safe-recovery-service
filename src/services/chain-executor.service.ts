@@ -59,7 +59,9 @@ export type ChainExecutorFailureReason =
   // MAX_RETRIES transient failures.
   | "retries-exhausted"
   // MAX_TX_LIFETIME_MS elapsed since the first attempt.
-  | "expired";
+  | "expired"
+  // Mined but reverted on chain. The nonce is spent.
+  | "reverted";
 
 export interface FailedTransaction {
   to: string;
@@ -191,9 +193,11 @@ export class ChainExecutor {
         const receipt = outcome.receipt;
         if (receipt.status === 0) {
           // Mined but reverted: terminal (nonce is spent), report failure.
-          Logger.error(`Chain executor transaction mined but reverted : ${receipt.transactionHash}`);
+          const revertError = new Error(`transaction mined but reverted : ${receipt.transactionHash}`);
+          this.reportFailure(transactionData, "reverted", revertError, true, receipt.transactionHash);
+        } else {
+          this.safeCallback(transactionData, true, receipt.transactionHash);
         }
-        this.safeCallback(transactionData, receipt.status === 1, receipt.transactionHash);
       }
     } catch (error) {
       const decision = this.classifyFailure(transactionData, error);
@@ -435,12 +439,14 @@ export class ChainExecutor {
       : { kind: "mined", receipt };
   }
 
-  // Terminal failure: log, notify listeners, and report success=false to the caller.
+  // Terminal failure: log, notify listeners, and report success=false to the caller
+  // (with the mined hash for a revert, empty otherwise).
   private reportFailure(
     transactionData: TransactionData,
     reason: ChainExecutorFailureReason,
     error: unknown,
-    nonceResolved: boolean
+    nonceResolved: boolean,
+    transactionHash = ''
   ): void {
     const nonceNote = transactionData.nonce === undefined
       ? ""
@@ -467,7 +473,7 @@ export class ChainExecutor {
         Logger.error(`Chain executor failure listener threw : ${listenerError}`);
       }
     }
-    this.safeCallback(transactionData, false, '');
+    this.safeCallback(transactionData, false, transactionHash);
   }
 
   // Invokes the callback, swallowing any throw/rejection so the lock isn't left dangling.
