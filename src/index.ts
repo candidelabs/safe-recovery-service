@@ -1,4 +1,6 @@
 require('dotenv').config();
+import logger from "./utils/logger";
+import {installProcessLogging} from "./logging";
 import {Configuration} from "./config/config-manager";
 import "./utils/extensions/string.extensions"
 import "./instrument";
@@ -11,19 +13,19 @@ import rateLimit from "express-rate-limit";
 import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
 import {ApiError, delay} from "./utils";
-import Logger from "./utils/logger";
-import {errorConverter, errorHandler} from "./middlewares";
+import {errorConverter, errorHandler, requestLogger} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
 import {releaseOrphanedSponsorships} from "./services/recoveries.service";
 
+// Console output of dependencies, Node warnings and crashes go through the same JSON logger.
+installProcessLogging(logger);
+
 export const app: Express = express();
 const configuration = Configuration.instance();
 
-// HTTP request logger
-app.use(Logger.httpRequestSuccessLogger());
-// @ts-ignore
-app.use(Logger.httpRequestErrorLogger());
+// HTTP request logger (one line per request)
+app.use(requestLogger);
 
 // set security HTTP headers
 app.use(helmet());
@@ -70,13 +72,13 @@ app.use(errorConverter);
 app.use(errorHandler);
 
 app.listen(configuration.port, () => {
-  Logger.info(`Listening to port ${configuration.port}`);
+  logger.info({ port: configuration.port }, "server listening");
   //
   releaseOrphanedSponsorships()
     .then((count) => {
-      if (count > 0) Logger.warn(`Released ${count} orphaned sponsorship claim(s) left by a previous run`);
+      if (count > 0) logger.warn({ count }, "released orphaned sponsorship claims left by a previous run");
     })
-    .catch((error) => Logger.error(`Failed to release orphaned sponsorship claims : ${error}`));
+    .catch((error) => logger.error({ err: error }, "orphaned sponsorship release failed"));
   delay(2500).then(async () => {
     await AccountEventTracker.instance().loadSubscriptions();
     startSendNotificationsCronJob();

@@ -11,6 +11,10 @@ import {KMSSigner} from "../models/signer/kms-signer";
 import {e164Regex, periodToSeconds} from "../utils";
 import {SmtpConfig, TwilioConfig, WebhookConfig} from "../utils/interfaces";
 import isURL from "validator/lib/isURL";
+import {registerSecret} from "../logging";
+import logger from "../utils/logger";
+
+const log = logger.child({ component: "config" });
 
 type Config = {
   options: {
@@ -89,6 +93,33 @@ export class Configuration {
 
   private constructor(config: Config) {
     this.config = this.resolveEnvVariables(config);
+    this.registerSecrets(this.config);
+  }
+
+  // Config values that must never appear in a log line. Once registered, any
+  // occurrence of a value anywhere in a line is replaced by [REDACTED:<label>]; identifiers (signer
+  // and alert ids, SMTP hosts and users, Twilio SIDs, chain ids) stay loggable.
+  private registerSecrets(config: Config) {
+    registerSecret(config.options?.sentryDSN, "options.sentryDSN");
+    for (const signer of Array.isArray(config.signers) ? config.signers : []) {
+      registerSecret(signer?.privateKey, `signers.${signer?.id}.privateKey`);
+      registerSecret(signer?.awsKMS?.accessKeyId, `signers.${signer?.id}.awsKMS.accessKeyId`);
+      registerSecret(signer?.awsKMS?.secretAccessKeyId, `signers.${signer?.id}.awsKMS.secretAccessKeyId`);
+    }
+    for (const alert of Array.isArray(config.alerts) ? config.alerts : []) {
+      const email = alert?.channels?.email;
+      const sms = alert?.channels?.sms;
+      registerSecret(email?.smtp?.auth?.pass, `alerts.${alert?.id}.email.smtp.pass`);
+      registerSecret(email?.smtp?.auth?.accessToken, `alerts.${alert?.id}.email.smtp.accessToken`);
+      registerSecret(email?.webhook?.endpoint, `alerts.${alert?.id}.email.webhook.endpoint`);
+      registerSecret(email?.webhook?.authorizationHeader, `alerts.${alert?.id}.email.webhook.authorizationHeader`);
+      registerSecret(sms?.twilio?.authToken, `alerts.${alert?.id}.sms.twilio.authToken`);
+      registerSecret(sms?.webhook?.endpoint, `alerts.${alert?.id}.sms.webhook.endpoint`);
+      registerSecret(sms?.webhook?.authorizationHeader, `alerts.${alert?.id}.sms.webhook.authorizationHeader`);
+    }
+    for (const [name, network] of Object.entries(config.networks ?? {})) {
+      registerSecret(network?.jsonRpcEndpoint, `networks.${name}.jsonRpcEndpoint`);
+    }
   }
 
   public static instance(config?: Config): Configuration {
@@ -109,7 +140,8 @@ export class Configuration {
       return value.replace(ENV_INTERP_REGEX, (_, envVar: string) => {
         const resolved = process.env[envVar];
         if (!resolved) {
-          throw new Error(`Environment variable '${envVar}' is not set.`);
+          // the name is logged as `missingEnv`; the value, by construction, never exists
+          throw Object.assign(new Error(`Environment variable '${envVar}' is not set.`), { missingEnv: [envVar] });
         }
         return resolved;
       });
@@ -161,14 +193,17 @@ export class Configuration {
     this.environment = options.env === "production" ? "production" : "development";
     this.indexerPaused = options.env !== "production" && options.env !== "development:indexer";
     if (this.indexerPaused) {
-      console.warn(`[safe-recovery-service] options.env='${options.env}' - indexer paused on all networks (use 'production' or 'development:indexer' to run it).`);
+      log.warn(
+        { optionsEnv: options.env, hint: "set options.env to 'production' or 'development:indexer' to run it" },
+        "indexer paused on all networks"
+      );
     }
     this.port = port;
     this.indexerAlert = options.indexerAlert;
     this.skipFirstAccountSetupAlert = options.skipFirstAccountSetupAlert ?? false;
     this.suppressAlerts = (options.suppressAlerts ?? false).toString().toLowerCase() === "true";
     if (this.suppressAlerts) {
-      console.warn("[safe-recovery-service] options.suppressAlerts=true — event-notification alerts will not be delivered (OTPs unaffected).");
+      log.warn({ hint: "options.suppressAlerts=true; OTPs are unaffected" }, "event notification alerts suppressed");
     }
     this.trustProxy = (options.trustProxy ?? "true").toString().toLowerCase() === "true";
     this.rateLimit = rateLimit;

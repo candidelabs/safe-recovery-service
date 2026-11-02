@@ -44,7 +44,7 @@ export const siweMessage: Joi.CustomValidator = (value, helpers) => {
   try {
     new SiweMessage(value);
   } catch (e) {
-    console.log(e);
+    // not logged: a malformed SIWE message is the client's problem and the text may carry the message itself
     return helpers.message({
       custom: `{{#label}} must be a valid SIWE (EIP-4361) message: ${e}`,
     });

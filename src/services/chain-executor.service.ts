@@ -1,4 +1,5 @@
-import Logger from "utils/logger";
+import type {Logger} from "../logging";
+import logger from "../utils/logger";
 import {Network} from "../models/network";
 import {Signers} from "../models/signer/signers";
 import {populateTxGasPricesAndLimits, scaleBigNumber} from "../utils";
@@ -20,6 +21,8 @@ const MAX_TX_LIFETIME_MS = 2 * 60 * 60 * 1_000;
 const CANCEL_LIFETIME_MS = 30 * 60 * 1_000;
 // Applied to the fee floor when a node rejects a replacement as underpriced.
 const UNDERPRICED_FLOOR_BUMP = 1.125;
+
+const log = logger.child({ component: "chain-executor" });
 
 type Fees = { maxFeePerGas: ethers.BigNumber; maxPriorityFeePerGas: ethers.BigNumber };
 
@@ -202,7 +205,20 @@ export class ChainExecutor {
     } catch (error) {
       const decision = this.classifyFailure(transactionData, error);
       if (decision.kind === "retry") {
-        Logger.error(`Chain executor ${transactionData.phase} attempt failed (${decision.why}), retrying in ${decision.delayMs}ms : ${error}`);
+        log.warn(
+          {
+            err: error,
+            chainId,
+            signerId,
+            phase: transactionData.phase,
+            nonce: transactionData.nonce,
+            reason: decision.why,
+            attempt: transactionData.retries ?? 0,
+            maxAttempts: MAX_RETRIES,
+            delayMs: decision.delayMs,
+          },
+          "chain executor attempt failed, retrying"
+        );
         retryDelayMs = decision.delayMs;
       } else {
         queue.shift();
@@ -272,7 +288,7 @@ export class ChainExecutor {
     return {
       kind: "retry",
       delayMs: Math.min(BASE_RETRY_DELAY_MS * Math.pow(2, retries - 1), MAX_RETRY_DELAY_MS),
-      why: `transient, retry ${retries}/${MAX_RETRIES}`,
+      why: "transient",
     };
   }
 
@@ -288,7 +304,18 @@ export class ChainExecutor {
     if (!broadcast) {
       return { kind: "fail", reason, error, nonceResolved: true };
     }
-    Logger.error(`Chain executor giving up on transaction (${reason}), cancelling nonce ${transactionData.nonce} : ${error}`);
+    log.error(
+      {
+        err: error,
+        chainId: transactionData.chainId,
+        signerId: transactionData.signerId,
+        reason,
+        nonce: transactionData.nonce,
+        hashes: transactionData.hashes,
+        attempt: transactionData.retries ?? 0,
+      },
+      "chain executor cancelling nonce"
+    );
     transactionData.phase = "cancel";
     transactionData.phaseStartedAt = Date.now();
     transactionData.terminalReason = reason;
@@ -317,6 +344,7 @@ export class ChainExecutor {
     const signerAddress = await signer.signer();
     const provider = network.jsonRPCProvider;
     const phase = transactionData.phase ?? "execute";
+    const txLog = log.child({ chainId, signerId, phase });
 
     // On a retry, settle the previous attempt before broadcasting a replacement.
     if (transactionData.nonce !== undefined && transactionData.hashes?.length) {
@@ -351,7 +379,7 @@ export class ChainExecutor {
       return this.waitFor(provider, transactionData.hashes![transactionData.hashes!.length - 1], transactionData);
     }
 
-    const nonce = replacing ? transactionData.nonce! : await this.nextNonce(provider, signerAddress);
+    const nonce = replacing ? transactionData.nonce! : await this.nextNonce(provider, signerAddress, txLog);
     const transaction = phase === "cancel"
       // 0-value self-transfer; gas is estimated since the intrinsic cost differs across chains.
       ? await populateTxGasPricesAndLimits(network, signerAddress, signerAddress, 0n, "0x", nonce, transactionData.lastFees)
@@ -373,7 +401,7 @@ export class ChainExecutor {
     const unsignedTxHash = ethers.utils.keccak256(serializedUnsignedTx);
     const signature = await signer.sign(unsignedTxHash);
     const serializedSignedTransaction = ethers.utils.serializeTransaction(transaction, signature);
-    const hash = await this.broadcast(provider, serializedSignedTransaction);
+    const hash = await this.broadcast(provider, serializedSignedTransaction, txLog);
 
     // Commit bookkeeping only once the node holds the transaction.
     transactionData.nonce = nonce;
@@ -396,13 +424,16 @@ export class ChainExecutor {
   // Anything still pending (a previous process life, or a nonce we gave up on without a
   // cancel landing) is stale: build on "latest" so this transaction replaces it instead
   // of queueing behind it. "pending" is fetched only to log the gap.
-  private async nextNonce(provider: ethers.providers.JsonRpcProvider, signerAddress: string): Promise<number> {
+  private async nextNonce(provider: ethers.providers.JsonRpcProvider, signerAddress: string, txLog: Logger): Promise<number> {
     const [latest, pending] = await Promise.all([
       provider.getTransactionCount(signerAddress, "latest"),
       provider.getTransactionCount(signerAddress, "pending"),
     ]);
     if (pending > latest) {
-      Logger.warn(`Chain executor found ${pending - latest} stale pending transaction(s) for ${signerAddress} from nonce ${latest}, replacing`);
+      txLog.warn(
+        { signerAddress, nonce: latest, stalePendingCount: pending - latest },
+        "chain executor replacing stale pending transactions"
+      );
     }
     return latest;
   }
@@ -410,13 +441,13 @@ export class ChainExecutor {
   // Sends a signed transaction and returns its hash. A node that already holds this exact
   // transaction (e.g. the previous send's response was lost) answers "already known"; that
   // is a successful broadcast as far as we're concerned.
-  private async broadcast(provider: ethers.providers.JsonRpcProvider, serializedSignedTransaction: string): Promise<string> {
+  private async broadcast(provider: ethers.providers.JsonRpcProvider, serializedSignedTransaction: string, txLog: Logger): Promise<string> {
     const hash = ethers.utils.keccak256(serializedSignedTransaction);
     try {
       await provider.sendTransaction(serializedSignedTransaction);
     } catch (error) {
       if (!isAlreadyKnown(error)) throw error;
-      Logger.warn(`Chain executor transaction already known to the node, treating as broadcast : ${hash}`);
+      txLog.warn({ txHash: hash }, "chain executor transaction already known, treating as broadcast");
     }
     return hash;
   }
@@ -448,12 +479,21 @@ export class ChainExecutor {
     nonceResolved: boolean,
     transactionHash = ''
   ): void {
-    const nonceNote = transactionData.nonce === undefined
-      ? ""
-      : nonceResolved
-        ? ` nonce ${transactionData.nonce} resolved`
-        : ` nonce ${transactionData.nonce} may still be pending (${transactionData.hashes!.join(", ")})`;
-    Logger.error(`Chain executor transaction failed permanently (${reason})${nonceNote} : ${error}`);
+    // nonceResolved=false with a nonce means it may still be pending and the payload may still land
+    log.error(
+      {
+        err: error,
+        chainId: transactionData.chainId,
+        signerId: transactionData.signerId,
+        reason,
+        nonce: transactionData.nonce,
+        nonceResolved,
+        hashes: transactionData.hashes,
+        txHash: transactionHash || undefined,
+        attempt: transactionData.terminalRetries ?? transactionData.retries ?? 0,
+      },
+      "chain executor giving up"
+    );
     for (const listener of ChainExecutor.failureListeners) {
       try {
         listener({
@@ -470,7 +510,10 @@ export class ChainExecutor {
           lastError: error,
         });
       } catch (listenerError) {
-        Logger.error(`Chain executor failure listener threw : ${listenerError}`);
+        log.error(
+          { err: listenerError, chainId: transactionData.chainId, signerId: transactionData.signerId },
+          "chain executor failure listener threw"
+        );
       }
     }
     this.safeCallback(transactionData, false, transactionHash);
@@ -479,12 +522,13 @@ export class ChainExecutor {
   // Invokes the callback, swallowing any throw/rejection so the lock isn't left dangling.
   private safeCallback(transactionData: TransactionData, success: boolean, transactionHash: string): void {
     if (transactionData.callback === undefined) return;
+    const context = { chainId: transactionData.chainId, signerId: transactionData.signerId, success };
     try {
       void Promise.resolve(transactionData.callback(success, transactionHash)).catch(
-        (callbackError) => Logger.error(`Chain executor callback threw : ${callbackError}`)
+        (callbackError) => log.error({ err: callbackError, ...context }, "chain executor callback threw")
       );
     } catch (callbackError) {
-      Logger.error(`Chain executor callback threw : ${callbackError}`);
+      log.error({ err: callbackError, ...context }, "chain executor callback threw");
     }
   }
 

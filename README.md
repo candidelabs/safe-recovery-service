@@ -121,3 +121,7 @@ Start the production server:
 ```bash
 bun run start
 ```
+
+## Logging
+
+The service writes one JSON line per event to stdout (pino), ready for Loki / Grafana. Every line carries `time`, `level`, `service`, `env` and a static `msg`, with identifiers (never secrets) as fields. `LOG_LEVEL` (default `info`), `LOG_PRETTY=true` (local, human-readable output) and `ENVIRONMENT` (the `env` field) configure it; `bun run logging:selftest` checks the redaction rules.

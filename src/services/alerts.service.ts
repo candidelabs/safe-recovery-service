@@ -10,7 +10,9 @@ import {SummaryMessageData} from "../utils/interfaces";
 import {MessageStatements} from "../utils/constants";
 import {SafeAccountV0_3_0 as SafeAccount} from "abstractionkit";
 import {Network} from "../models/network";
+import logger from "../utils/logger";
 
+const log = logger.child({ component: "alerts" });
 
 export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
@@ -77,6 +79,8 @@ export const createSubscription = async (account: string, owner: string, chainId
       }
     }
   );
+  // the target (email / phone number) and the OTP are never logged
+  log.info({ subscriptionId: alertSubscription.id, account: account.toLowerCase(), chainId, channel }, "alert subscription created");
   return alertSubscription.id;
 };
 
@@ -122,6 +126,10 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
     alertSubscription.channel,
     alertSubscription.target,
   );
+  log.info(
+    { subscriptionId: alertSubscription.id, account: alertSubscription.account, channel: alertSubscription.channel },
+    "alert subscription activated"
+  );
   //
   return true;
 };
@@ -157,6 +165,10 @@ export const unsubscribe = async (subscriptionId: string, chainId: number, owner
     where: {id: subscriptionId}
   });
   AccountEventTracker.instance().removeSubscription(alertSubscription.account, alertSubscription.id);
+  log.info(
+    { subscriptionId: alertSubscription.id, account: alertSubscription.account, channel: alertSubscription.channel },
+    "alert subscription removed"
+  );
   return true;
 };
 
@@ -205,6 +217,10 @@ async function _sendNotification(target: string, notifications: AlertSubscriptio
   //using the alert from the first notification for now
   const alertChannel = Alerts.instance().getAlertChannel(indexerAlertId, notifications[0].channel);
   if (!alertChannel){
+    log.error(
+      { alertId: indexerAlertId, channel: notifications[0].channel, notificationId: notifications[0].id },
+      "alert channel not configured"
+    );
     const data = {...notifications[0].data as Prisma.JsonObject, failedReason: `Alert channel ${notifications[0].channel} not found on ${indexerAlertId}`};
     await prisma.alertSubscriptionNotification.update({
       data: {data: data, deliveryStatus: "FAILED",},
@@ -236,11 +252,15 @@ async function _sendNotification(target: string, notifications: AlertSubscriptio
       subject: "Security: Changes have been made to your social recovery setting",
     }
   );
+  const delivery = { alertId: indexerAlertId, channel: alertChannel.channelName, count: notifications.length };
   if (success){
+    log.info(delivery, "alert notifications sent");
     for (const notification of notifications){
         await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "SENT",}, where: {id: notification.id}});
     }
   }else{
+    // the channel logged the send error; the notifications are marked FAILED
+    log.warn(delivery, "alert notifications failed");
     for (const notification of notifications){
         await prisma.alertSubscriptionNotification.update({data: {deliveryStatus: "FAILED",}, where: {id: notification.id}});
     }
