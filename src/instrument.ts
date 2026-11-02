@@ -3,18 +3,33 @@ import { PrismaInstrumentation } from "@prisma/instrumentation";
 import isURL from "validator/lib/isURL";
 import {Configuration} from "./config/config-manager";
 import { readFile } from "./utils/file";
+import logger from "./utils/logger";
+import { sanitizeSentryEvent } from "./utils/sentry";
 
-const rawConfig = readFile("config.json") as any;
-const configuration = Configuration.instance(rawConfig);
+// First thing to run: loads config.json and builds the Configuration singleton. A config that
+// cannot be loaded ends the process with one fatal JSON line instead of a raw stack trace.
+let configuration: Configuration;
+try {
+  const rawConfig = readFile("config.json") as any;
+  configuration = Configuration.instance(rawConfig);
+} catch (error) {
+  const missingEnv = (error as { missingEnv?: string[] } | null)?.missingEnv;
+  logger.fatal({ err: error, missingEnv }, "configuration failed to load");
+  logger.flush();
+  process.exit(1);
+}
 
 if (isURL(configuration.sentryDSN ?? "")) {
   Sentry.init({
-    dsn: Configuration.instance().sentryDSN,
+    dsn: configuration.sentryDSN,
     integrations: [
       Sentry.prismaIntegration({
         prismaInstrumentation: new PrismaInstrumentation(),
       }),
     ],
     tracesSampleRate: 1.0,
+    // everything sent to Sentry passes through the same redaction as the logs
+    beforeSend: (event) => sanitizeSentryEvent(event),
+    beforeSendTransaction: (event) => sanitizeSentryEvent(event),
   });
 }

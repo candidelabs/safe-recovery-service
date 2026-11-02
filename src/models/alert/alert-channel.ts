@@ -1,12 +1,17 @@
 import {MessageTemplates} from "./message-templates";
+import type {Logger} from "../../logging";
+import logger from "../../utils/logger";
 
 export abstract class AlertChannel {
   public alertId: string;
   public channelName: string;
+  // Bound to this channel: every line carries component, channel and alertId.
+  protected readonly log: Logger;
 
   protected constructor(alertId: string, channelName: string) {
     this.alertId = alertId;
     this.channelName = channelName;
+    this.log = logger.child({ component: "alerts", channel: channelName, alertId });
   }
 
   /**

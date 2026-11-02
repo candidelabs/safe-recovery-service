@@ -1,7 +1,8 @@
 import {BigNumber, ethers} from 'ethers';
 import * as cron from "node-cron";
 import {Network} from "../models/network";
-import Logger from "../utils/logger";
+import type {Logger} from "../logging";
+import logger from "../utils/logger";
 import {delay} from "../utils";
 import {EventType} from "../utils/constants";
 import {IndexedEvent} from "../models/events/indexed-event";
@@ -51,21 +52,24 @@ export class Indexer {
   private indexingBusy: boolean = false;
   private indexerReady: boolean = false;
   private cronJob: cron.ScheduledTask | undefined;
+  // Every line of this indexer carries its chainId and network name.
+  private readonly log: Logger;
 
   constructor(network: Network, startingBlock: number, active: boolean) {
     this.network = network;
     this.latestFromBlock = startingBlock;
     this.active = active;
+    this.log = logger.child({ component: "indexer", chainId: network.chainId, network: network.name });
   }
 
   public async start() {
     // Paused outside 'production' / 'development:indexer': no cron, no RPC calls, no IndexerData reads or writes
     if (Configuration.instance().indexerPaused){
-      Logger.debug(`Indexer (${this.network.name}) paused by options.env`);
+      this.log.info("indexer paused");
       return;
     }
     if (this.indexerReady){
-      Logger.debug(`Indexer (${this.network.name}) already running!`);
+      this.log.debug("indexer already running");
       return;
     }
     //
@@ -91,7 +95,7 @@ export class Indexer {
     }
     //
     if (!this.active) return;
-    Logger.debug(`Started Indexer (${this.network.name})!`);
+    this.log.info({ fromBlock: this.latestFromBlock }, "indexer started");
     this.cronJob = cron.schedule('*/15 * * * * *', async () => {
       if (!this.storingBusy && !this.indexingBusy){
         await this.storeEvents(this.latestFromBlock);
@@ -110,6 +114,10 @@ export class Indexer {
       await this.processFailedRanges();
       const _latestOnchainBlock = await this.network.jsonRPCProvider.send("eth_blockNumber", []);
       const latestOnchainBlock = parseInt(_latestOnchainBlock, 16) - 2;
+      this.log.debug(
+        { headBlock: latestOnchainBlock, fromBlock: this.latestFromBlock + 1, lagBlocks: latestOnchainBlock - this.latestFromBlock },
+        "indexer cycle"
+      );
       let fromBlock = this.latestFromBlock + 1;
       fromBlock = Math.min(fromBlock, latestOnchainBlock);
       let toBlock = fromBlock + this.blockRangeSize;
@@ -141,7 +149,7 @@ export class Indexer {
       }
       await Promise.all(promises);
     } catch (error) {
-      Logger.error(`Error in indexNewBlocks: ${error}`);
+      this.log.error({ err: error, fn: "indexNewBlocks" }, "indexer cycle failed");
     } finally {
       this.indexingBusy = false;
     }
@@ -163,7 +171,8 @@ export class Indexer {
         callback(true);
       }
     } catch (error) {
-      Logger.error(`Failed to process blocks ${fromBlock} to ${toBlock}: ${error}`);
+      // retried from failedRanges; "indexer range dropped" is the terminal line
+      this.log.warn({ err: error, fromBlock, toBlock }, "indexer range failed");
       if (callback){
         callback(false);
       }
@@ -179,7 +188,10 @@ export class Indexer {
 
     for (const range of rangesToRetry) {
       if (range.retryCount >= this.maxRetries) {
-        Logger.error(`Max retries reached for range ${range.fromBlock}-${range.toBlock}, dropping`);
+        this.log.error(
+          { fromBlock: range.fromBlock, toBlock: range.toBlock, attempt: range.retryCount, maxAttempts: this.maxRetries },
+          "indexer range dropped"
+        );
         continue;
       }
       while (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
@@ -289,7 +301,7 @@ export class Indexer {
           try {
             message = await accountEventTracker.getEventSummary(account, this.network.chainId);
           } catch (error) {
-            Logger.error(`getEventSummary failed for account ${account} on chain ${this.network.chainId}: ${error}`);
+            this.log.error({ err: error, account }, "event summary failed");
             message = undefined;
           }
           if (message){
@@ -346,7 +358,7 @@ export class Indexer {
         });
       }
     } catch (error) {
-      Logger.error(`Error in storeEvents: ${error}`);
+      this.log.error({ err: error, fn: "storeEvents" }, "indexer store failed");
     } finally {
       this.storingBusy = false;
     }

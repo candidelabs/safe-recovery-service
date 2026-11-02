@@ -12,6 +12,9 @@ import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import {Prisma, RecoveryRequest} from "@prisma/client";
 import {ChainExecutor} from "./chain-executor.service";
+import logger from "../utils/logger";
+
+const log = logger.child({ component: "recoveries" });
 
 export const create = async (account: string, newOwners: string[], newThreshold: number, chainId: number, signer: string, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
@@ -63,6 +66,10 @@ export const create = async (account: string, newOwners: string[], newThreshold:
       data: {discoverable: true},
       where: {id: recoveryRequest.id}
     });
+    log.info(
+      { recoveryRequestId: recoveryRequest.id, account: recoveryRequest.account, chainId, nonce: recoveryRequest.nonce },
+      "recovery request created"
+    );
   } catch (e) {
     await prisma.recoveryRequest.delete({
       where: {id: recoveryRequest.id}
@@ -134,6 +141,10 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
       id: recoveryRequest.id
     }
   });
+  log.info(
+    { recoveryRequestId: recoveryRequest.id, chainId: recoveryRequest.chainId, signer, signatureCount: signatures.length },
+    "recovery request signed"
+  );
   //
   return true;
 };
@@ -343,6 +354,14 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       true,
     ]
   );
+  const context = {
+    recoveryRequestId: request.id,
+    account: request.account,
+    chainId: network.chainId,
+    signerId: network.executeRecoveryRequestConfig.signer!,
+    phase: "execute",
+  };
+  log.info(context, "recovery execution sponsored");
   ChainExecutor.instance().addTransaction({
     to: network.recoveryModuleAddress,
     value: 0n,
@@ -353,6 +372,7 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       // Conditional on the claim still being ours, so a late or duplicate
       // outcome can never overwrite a status another path has since set.
       if (success){
+        log.info({ ...context, txHash: transactionHash }, "recovery executed");
         executeData["sponsored"] = true;
         executeData["transactionHash"] = transactionHash;
         await prisma.recoveryRequest.updateMany({
@@ -360,6 +380,8 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
           where: {id: request.id, status: "EXECUTION-IN-PROGRESS"}
         });
       }else{
+        // the chain executor logged why; the request goes back to PENDING and can be sponsored again
+        log.warn(context, "recovery execution failed, request released");
         await prisma.recoveryRequest.updateMany({
           data: {status: "PENDING"},
           where: {id: request.id, status: "EXECUTION-IN-PROGRESS"}
@@ -430,6 +452,14 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
     );
   }
   const callData = socialRecoveryModule.interface.encodeFunctionData("finalizeRecovery", [request.account]);
+  const context = {
+    recoveryRequestId: request.id,
+    account: request.account,
+    chainId: network.chainId,
+    signerId: network.finalizeRecoveryRequestConfig.signer!,
+    phase: "finalize",
+  };
+  log.info(context, "recovery finalization sponsored");
   ChainExecutor.instance().addTransaction({
     to: network.recoveryModuleAddress,
     value: 0n,
@@ -439,6 +469,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
     callback: async (success, transactionHash) => {
       // See sponsorExecution: conditional on the claim still being ours.
       if (success){
+        log.info({ ...context, txHash: transactionHash }, "recovery finalized");
         finalizeData["sponsored"] = true;
         finalizeData["transactionHash"] = transactionHash;
         await prisma.recoveryRequest.updateMany({
@@ -446,6 +477,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
           where: {id: request.id, status: "FINALIZATION-IN-PROGRESS"}
         });
       }else{
+        log.warn(context, "recovery finalization failed, request released");
         await prisma.recoveryRequest.updateMany({
           data: {status: "EXECUTED"},
           where: {id: request.id, status: "FINALIZATION-IN-PROGRESS"}

@@ -2,7 +2,6 @@ import { AlertChannel } from "./alert-channel";
 import nodemailer, {Transporter} from "nodemailer";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
-import Logger from "../../utils/logger";
 import ky from "ky";
 import {SmtpConfig, WebhookConfig} from "../../utils/interfaces";
 
@@ -63,7 +62,7 @@ export class EmailAlertChannel extends AlertChannel {
     try {
       const template = getTemplate("email", templateId);
       if (!template) {
-        Logger.error(`Email Channel (${this.alertId}): Message Template "${templateId}" not found.`);
+        this.log.error({ templateId }, "message template not found");
         return false;
       }
       let subject: string;
@@ -109,14 +108,12 @@ export class EmailAlertChannel extends AlertChannel {
         if (response.status >= 200 && response.status < 300) {
           return true;
         } else {
-          Logger.error(
-            `Email Channel (${this.alertId}): Webhook failed with status ${response.status}`
-          );
+          this.log.error({ templateId, statusCode: response.status }, "alert webhook rejected message");
           return false;
         }
       }
     } catch (error) {
-      Logger.error(`Email Channel (${this.alertId}): Error sending email, ${error}`);
+      this.log.error({ err: error, templateId }, "email send failed");
       return false;
     }
   }
@@ -138,7 +135,7 @@ export class EmailAlertChannel extends AlertChannel {
       }
       return true;
     } catch (error) {
-      Logger.error(`Email Channel (${this.alertId}): health check failed, ${error}`);
+      this.log.error({ err: error }, "email channel health check failed");
       return false;
     }
   }

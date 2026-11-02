@@ -2,7 +2,6 @@ import { AlertChannel } from "./alert-channel";
 import twilio, { Twilio } from "twilio";
 import {ethers} from "ethers";
 import {getTemplate, MessageTemplates} from "./message-templates";
-import Logger from "../../utils/logger";
 import {TwilioConfig, WebhookConfig} from "../../utils/interfaces";
 import ky from "ky";
 
@@ -96,7 +95,7 @@ export class SMSAlertChannel extends AlertChannel {
     try {
       const template = getTemplate("sms", templateId);
       if (!template) {
-        Logger.error(`SMS Channel (${this.alertId}): Message Template "${templateId}" not found.`);
+        this.log.error({ templateId }, "message template not found");
         return false;
       }
       let body: string;
@@ -122,7 +121,10 @@ export class SMSAlertChannel extends AlertChannel {
           to: target,
         });
         if (message.errorCode !== null){
-          Logger.error(`SMS Channel (${this.alertId}): Twilio client failed to send message, ${message.errorCode}, ${message.errorMessage}`);
+          this.log.error(
+            { templateId, errorCode: message.errorCode, errorMessage: message.errorMessage },
+            "sms send rejected by twilio"
+          );
           return false;
         }
         return true;
@@ -140,14 +142,12 @@ export class SMSAlertChannel extends AlertChannel {
         if (response.status >= 200 && response.status < 300) {
           return true;
         } else {
-          Logger.error(
-            `SMS Channel (${this.alertId}): Webhook failed with status ${response.status}`
-          );
+          this.log.error({ templateId, statusCode: response.status }, "alert webhook rejected message");
           return false;
         }
       }
     } catch (error) {
-      Logger.error(`SMS Channel (${this.alertId}): failed to send message, ${error}`);
+      this.log.error({ err: error, templateId }, "sms send failed");
       return false;
     }
   }
@@ -169,7 +169,7 @@ export class SMSAlertChannel extends AlertChannel {
       }
       return true;
     } catch (error) {
-      Logger.error(`SMS Channel (${this.alertId}): health check failed, ${error}`);
+      this.log.error({ err: error }, "sms channel health check failed");
       return false;
     }
   }

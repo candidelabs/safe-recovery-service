@@ -3,6 +3,7 @@ build/
 config.json
 storage/
 test/data/
+docs/
 
 ### Linux ###
 *~
