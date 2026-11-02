@@ -19,7 +19,7 @@ export const createRegistration = async (account: string, chainId: number, chann
   //
   const sanitizedTarget = await alertChannel.sanitizeTarget(target);
   if (!sanitizedTarget) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Target '${target}' is not compatible with '${channel}' channel`);
+    throw new ApiError(httpStatus.FORBIDDEN, `Target is not compatible with the '${channel}' channel`);
   }
   //
   let statement = MessageStatements["auth-register"];
@@ -37,7 +37,7 @@ export const createRegistration = async (account: string, chainId: number, chann
     }
   });
   if (existingRegistration){
-    throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} using ${target} as ${channel}`);
+    throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} on the '${channel}' channel`);
   }
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase());

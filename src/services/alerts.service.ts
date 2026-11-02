@@ -22,7 +22,7 @@ export const createSubscription = async (account: string, owner: string, chainId
   //
   const sanitizedTarget = await alertChannel.sanitizeTarget(target);
   if (!sanitizedTarget) {
-    throw new ApiError(httpStatus.FORBIDDEN, `Target '${target}' is not compatible with '${channel}' channel`);
+    throw new ApiError(httpStatus.FORBIDDEN, `Target is not compatible with the '${channel}' channel`);
   }
   //
   let statement = MessageStatements["alerts-subscribe"];
@@ -55,7 +55,7 @@ export const createSubscription = async (account: string, owner: string, chainId
     }
   });
   if (existingSubscription){
-    throw new ApiError(httpStatus.CONFLICT, `An active subscription already exists for ${owner} in ${account} using ${target} as ${channel}`);
+    throw new ApiError(httpStatus.CONFLICT, `An active subscription already exists for ${owner} in ${account} on the '${channel}' channel`);
   }
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase()+owner.toLowerCase());
