@@ -24,6 +24,9 @@ export interface RecoveryModuleIndexerConfig {
 export interface RecoveryModuleConfig {
   address: string;
   fallback: boolean;
+  // Set on the module of a legacy 'recoveryModuleAddress' config: rows indexed before modules were
+  // tracked came from it.
+  legacy?: boolean;
   indexer: RecoveryModuleIndexerConfig;
 }
 

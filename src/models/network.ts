@@ -23,6 +23,9 @@ export class Network {
   public modules: RecoveryModule[];
   // The module used when a request does not name one; undefined on a chain without a v0.1.0 fallback.
   public fallbackModule?: RecoveryModule;
+  // Rows indexed before modules were tracked (no moduleAddress) came from this module: the one a legacy
+  // 'recoveryModuleAddress' config names. Undefined with 'recoveryModules' (see assignLegacyRows).
+  public legacyModule?: RecoveryModule;
   public jsonRPCEndpoint: string;
   public jsonRPCProvider: ethers.providers.JsonRpcProvider;
   public executeRecoveryRequestConfig: ExecuteRecoveryRequestConfig;
@@ -49,6 +52,8 @@ export class Network {
     this.chainId = chainId;
     this.modules = modules.map((module) => createRecoveryModule(module, jsonRPCProvider));
     this.fallbackModule = this.modules.find((module) => module.fallback);
+    const legacyModule = modules.find((module) => module.legacy);
+    this.legacyModule = legacyModule ? this.getModule(legacyModule.address) : undefined;
     this.jsonRPCEndpoint = jsonRPCEndpoint;
     this.jsonRPCProvider = jsonRPCProvider;
     this.executeRecoveryRequestConfig = executeRecoveryRequestConfig;

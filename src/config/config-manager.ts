@@ -536,6 +536,7 @@ export const parseRecoveryModules = (networkName: string, networkConfig: Config[
     modules.push({
       address: variant.address,
       fallback,
+      ...(legacy ? {legacy: true} : {}),
       indexer: {enabled: entry.indexer.enabled.toString().toLowerCase() === "true", startBlock},
     });
   });

@@ -16,6 +16,7 @@ import {RecoveryFinalizedEvent} from "../models/events/recovery-finalized-event"
 import {AccountEventTracker} from "../models/events/account-event-tracker";
 import {Configuration} from "../config/config-manager";
 import {prisma} from "../config/prisma-client";
+import {assignLegacyRows} from "./recovery-modules.service";
 
 interface FailedRange {
   modules: RecoveryModule[];
@@ -67,6 +68,14 @@ export class Indexer {
       return;
     }
     //
+    try {
+      await assignLegacyRows(this.network);
+    } catch (error) {
+      // Indexing on a guessed assignment would mislabel events and reuse another module's cursor.
+      this.log.fatal({ err: error }, "legacy indexed rows cannot be assigned to a recovery module");
+      logger.flush();
+      process.exit(1);
+    }
     for (const module of this.network.modules){
       const indexerData = await this.loadIndexerData(module);
       if (!module.indexer.enabled) continue;
@@ -94,24 +103,15 @@ export class Indexer {
     this.cronJob.start();
   }
 
-  // The row created before modules were tracked has no moduleAddress: it is the fallback module's cursor.
-  // Any other module without a row starts at its configured start block.
+  // A module without a row (assignLegacyRows has given the legacy cursor its module) starts at its
+  // configured start block.
   private async loadIndexerData(module: RecoveryModule) {
     const chainId = this.network.chainId;
     const active = module.indexer.enabled;
-    let indexerData = await prisma.indexerData.findFirst({where: {chainId, moduleAddress: module.address}});
-    if (!indexerData && module.fallback){
-      indexerData = await prisma.indexerData.findFirst({where: {chainId, moduleAddress: null}});
-      if (indexerData){
-        this.log.info(
-          { moduleAddress: module.address, module: module.label, latestIndexedBlock: indexerData.latestIndexedBlock },
-          "legacy indexer cursor assigned to the fallback module"
-        );
-      }
-    }
+    const indexerData = await prisma.indexerData.findFirst({where: {chainId, moduleAddress: module.address}});
     if (indexerData){
       return prisma.indexerData.update({
-        data: {active, moduleAddress: module.address},
+        data: {active},
         where: {id: indexerData.id}
       });
     }

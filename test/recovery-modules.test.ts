@@ -9,9 +9,30 @@ import {ChangedThresholdEvent} from "../src/models/events/changed-threshold-even
 import {RecoveryExecutedEvent} from "../src/models/events/recovery-executed-event";
 import {RecoveryFinalizedEvent} from "../src/models/events/recovery-finalized-event";
 import {RecoveryCanceledEvent} from "../src/models/events/recovery-canceled-event";
+import {assignLegacyRows} from "../src/services/recovery-modules.service";
+import {Network} from "../src/models/network";
 
 jest.setTimeout(120000);
 dotenv.config()
+
+// In-memory stand-in for the tables assignLegacyRows touches, so this suite needs no database.
+type MockRow = {id: string, chainId: number, moduleAddress: string | null, latestIndexedBlock?: number};
+const mockTables: Record<string, MockRow[]> = {};
+jest.mock('../src/config/prisma-client', () => {
+    const matches = (row: any, where: Record<string, unknown>) => Object.entries(where).every(([k, v]) => row[k] === v);
+    const rows = (name: string) => mockTables[name] ?? [];
+    const table = (name: string) => ({
+        count: async ({where}: any) => rows(name).filter(r => matches(r, where)).length,
+        findFirst: async ({where}: any) => rows(name).find(r => matches(r, where)) ?? null,
+        update: async ({where, data}: any) => Object.assign(rows(name).find(r => r.id === where.id)!, data),
+        updateMany: async ({where, data}: any) => {
+            const matched = rows(name).filter(r => matches(r, where));
+            matched.forEach(r => Object.assign(r, data));
+            return {count: matched.length};
+        },
+    });
+    return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
+});
 
 // Decoders, registry and config shapes; no database or chain needed, except for the code hash check.
 const provider = new ethers.providers.StaticJsonRpcProvider("http://127.0.0.1:1", {chainId: 1, name: "test"});
@@ -190,7 +211,7 @@ describe('recoveryModules config', () => {
             recoveryModuleAddress: V0_1_0_3_MINUTES,
             indexer: {enabled: "true", startBlock: "4337"},
         }));
-        expect(modules).toEqual([{address: V0_1_0_3_MINUTES.toLowerCase(), fallback: true, indexer: {enabled: true, startBlock: 4337}}]);
+        expect(modules).toEqual([{address: V0_1_0_3_MINUTES.toLowerCase(), fallback: true, legacy: true, indexer: {enabled: true, startBlock: 4337}}]);
     });
 
     test('reads recoveryModules', () => {
@@ -204,6 +225,7 @@ describe('recoveryModules config', () => {
             [V0_1_0_3_MINUTES.toLowerCase(), true, true],
             [V0_2_0_3_MINUTES.toLowerCase(), false, false],
         ]);
+        expect(modules.some(m => m.legacy)).toBe(false);
     });
 
     test.each([
@@ -218,5 +240,39 @@ describe('recoveryModules config', () => {
         ["a module without indexer", {recoveryModules: [{address: V0_2_0_3_MINUTES}]}, "must have an 'indexer'"],
     ])('rejects %s', (_name, fields, message) => {
         expect(() => parseRecoveryModules("test", network(fields))).toThrow(message);
+    });
+});
+
+describe('rows indexed before modules were tracked', () => {
+    // Only the fields assignLegacyRows reads.
+    const network = (legacyModule?: RecoveryModule) => ({chainId: 10, name: "test", legacyModule}) as unknown as Network;
+    const seed = () => {
+        mockTables.indexerData = [
+            {id: "cursor", chainId: 10, moduleAddress: null, latestIndexedBlock: 500},
+            {id: "other-chain", chainId: 1, moduleAddress: null, latestIndexedBlock: 9},
+        ];
+        mockTables.guardianAddedEvent = [{id: "a", chainId: 10, moduleAddress: null}, {id: "b", chainId: 1, moduleAddress: null}];
+        mockTables.recoveryExecutedEvent = [{id: "c", chainId: 10, moduleAddress: null}];
+    };
+
+    test('go to the module of a legacy recoveryModuleAddress config', async () => {
+        seed();
+        await assignLegacyRows(network(v0_1_0));
+        expect(mockTables.indexerData.map(r => r.moduleAddress)).toEqual([v0_1_0.address, null]);
+        expect(mockTables.guardianAddedEvent.map(r => r.moduleAddress)).toEqual([v0_1_0.address, null]);
+        expect(mockTables.recoveryExecutedEvent[0].moduleAddress).toBe(v0_1_0.address);
+    });
+
+    test('block recoveryModules, which cannot say which module they came from', async () => {
+        seed();
+        await expect(assignLegacyRows(network(undefined))).rejects.toThrow("3 rows indexed before recovery modules were tracked");
+        expect(mockTables.indexerData[0].moduleAddress).toBeNull();
+        expect(mockTables.guardianAddedEvent[0].moduleAddress).toBeNull();
+    });
+
+    test('no longer block recoveryModules once assigned', async () => {
+        seed();
+        await assignLegacyRows(network(v0_1_0));
+        await expect(assignLegacyRows(network(undefined))).resolves.toBeUndefined();
     });
 });
