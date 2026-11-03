@@ -1,6 +1,7 @@
 import {IndexedEvent} from "./indexed-event";
 import {EventType} from "../../utils/constants";
-import {getSocialModuleInstance, toNormalCase} from "../../utils";
+import {toNormalCase} from "../../utils";
+import {formatRecoveryPeriod} from "../../utils/recovery-modules";
 import {Network} from "../network";
 import {GuardianAddedEvent} from "./guardian-added-event";
 import {GuardianRevokedEvent} from "./guardian-revoked-event";
@@ -17,7 +18,8 @@ interface SubscriptionData {
 export class AccountEventTracker {
   private static _instance: AccountEventTracker;
   private subscriptions = new Map<string, SubscriptionData[]>();
-  private eventsByAccount: Map<string, Map<number, IndexedEvent[]>>;
+  // account -> chainId -> module address -> buffered events
+  private eventsByAccount: Map<string, Map<number, Map<string, IndexedEvent[]>>>;
 
   private constructor() {
     this.eventsByAccount = new Map();
@@ -77,16 +79,18 @@ export class AccountEventTracker {
     }
     const chainsMap = this.eventsByAccount.get(event.account)!;
     if (!chainsMap.has(event.chainId)){
-      chainsMap.set(event.chainId, []);
+      chainsMap.set(event.chainId, new Map());
     }
-    const accountEvents = this.eventsByAccount.get(event.account)!.get(event.chainId)!;
-    accountEvents.push(event);
+    const modulesMap = chainsMap.get(event.chainId)!;
+    if (!modulesMap.has(event.moduleAddress)){
+      modulesMap.set(event.moduleAddress, []);
+    }
+    modulesMap.get(event.moduleAddress)!.push(event);
   }
 
-  public getEventsForAccount(account: string, chainId: number): IndexedEvent[] {
-    if (!this.eventsByAccount.has(account)) return [];
-    if (!this.eventsByAccount.get(account)!.has(chainId)) return [];
-    const accountEvents = this.eventsByAccount.get(account)!.get(chainId)!;
+  public getEventsForAccount(account: string, chainId: number, moduleAddress: string): IndexedEvent[] {
+    const accountEvents = this.eventsByAccount.get(account)?.get(chainId)?.get(moduleAddress);
+    if (!accountEvents) return [];
     accountEvents.sort((a, b) => {
       if (a.blockNumber !== b.blockNumber) {
         return a.blockNumber - b.blockNumber;
@@ -99,14 +103,18 @@ export class AccountEventTracker {
     return accountEvents;
   }
 
-  public getEventsByType<T extends IndexedEvent>(account: string, chainId: number, eventType: EventType): T[] {
-    const accountEvents = this.eventsByAccount.get(account)?.get(chainId) || [];
+  public getEventsByType<T extends IndexedEvent>(account: string, chainId: number, moduleAddress: string, eventType: EventType): T[] {
+    const accountEvents = this.eventsByAccount.get(account)?.get(chainId)?.get(moduleAddress) || [];
     return accountEvents.filter(event => event.eventType === eventType) as T[];
   }
 
-  public clearEventsForAccount(account: string, chainId: number): void {
-    if (!this.eventsByAccount.has(account)) return;
-    this.eventsByAccount.get(account)!.set(chainId, []);
+  public clearEventsForAccount(account: string, chainId: number, moduleAddress: string): void {
+    const chainsMap = this.eventsByAccount.get(account);
+    const modulesMap = chainsMap?.get(chainId);
+    if (!modulesMap) return;
+    modulesMap.delete(moduleAddress);
+    if (modulesMap.size === 0) chainsMap!.delete(chainId);
+    if (chainsMap!.size === 0) this.eventsByAccount.delete(account);
   }
 
   public getAllAccounts(chainId: number): string[] {
@@ -119,14 +127,22 @@ export class AccountEventTracker {
     return chainAccounts;
   }
 
-  public async getEventSummary(account: string, chainId: number): Promise<SummaryMessageData | undefined> {
-    const events = this.getEventsForAccount(account, chainId);
+  public getModulesForAccount(account: string, chainId: number): string[] {
+    return [...(this.eventsByAccount.get(account)?.get(chainId)?.keys() ?? [])];
+  }
+
+  // One summary per (account, chainId, module): guardians and recoveries are per module.
+  public async getEventSummary(account: string, chainId: number, moduleAddress: string): Promise<SummaryMessageData | undefined> {
+    const events = this.getEventsForAccount(account, chainId, moduleAddress);
     if (events.length === 0) {
       return undefined;
     }
 
     const network = Network.instances.get(chainId.toString())!;
-    const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
+    const module = network.getModule(moduleAddress);
+    if (!module) {
+      throw new Error(`Recovery module ${moduleAddress} is not configured on chainId ${chainId}`);
+    }
 
     let latestRecoveryEvent: IndexedEvent | undefined;
     for (const event of events) {
@@ -143,17 +159,19 @@ export class AccountEventTracker {
     );
 
     const result: SummaryMessageData = {
-      header: `Security: Changes have been made to your social recovery settings for account ${account} on ${toNormalCase(network.name)} (chainId: ${network.chainId})`
+      header: `Security: Changes have been made to your social recovery settings for account ${account} on ${toNormalCase(network.name)} (chainId: ${network.chainId}), Social Recovery Module v${module.version} (recovery period: ${formatRecoveryPeriod(module.recoveryPeriod)})`
     };
 
     // Handle critical events
     if (latestRecoveryEvent) {
       const data = latestRecoveryEvent.getIndexedData();
+      // v0.2.0 logs carry the proposed owners; v0.1.0 logs only their hash
+      const newOwners = data.newOwners ? `New Owners:\n${(data.newOwners as string[]).join("\n")}\n` : "";
       let details: string;
       switch (latestRecoveryEvent.eventType) {
         case EventType.RecoveryExecuted:
           details = `RECOVERY EXECUTED
-New Threshold: ${data.newThreshold}
+${newOwners}New Threshold: ${data.newThreshold}
 Nonce: ${data.nonce}
 Execute After: ${new Date(Number(data.executeAfter)*1000).toISOString()}
 Guardian Approvals: ${data.guardiansApprovalCount}
@@ -161,7 +179,7 @@ Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transa
           break;
         case EventType.RecoveryFinalized:
           details = `RECOVERY FINALIZED
-New Threshold: ${data.newThreshold}
+${newOwners}New Threshold: ${data.newThreshold}
 Nonce: ${data.nonce}
 Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transactionHash}`;
           break;
@@ -212,7 +230,7 @@ Block: ${latestRecoveryEvent.blockNumber}, Tx Hash: ${latestRecoveryEvent.transa
       }
     }
 
-    const currentGuardians = await socialRecoveryModule.getGuardians(account) as string[];
+    const currentGuardians = await module.contract.getGuardians(account) as string[];
     const summaryParts: string[] = [];
     if (guardianAddCount > 0 || guardianRevokeCount > 0) {
       const netGuardians = guardianAddCount - guardianRevokeCount;

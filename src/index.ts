@@ -17,6 +17,7 @@ import {errorConverter, errorHandler, requestLogger} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
 import {releaseOrphanedSponsorships} from "./services/recoveries.service";
+import {assignLegacyEventsToFallbackModules, verifyRecoveryModuleCode} from "./services/recovery-modules.service";
 
 // Console output of dependencies, Node warnings and crashes go through the same JSON logger.
 installProcessLogging(logger);
@@ -79,6 +80,12 @@ app.listen(configuration.port, () => {
       if (count > 0) logger.warn({ count }, "released orphaned sponsorship claims left by a previous run");
     })
     .catch((error) => logger.error({ err: error }, "orphaned sponsorship release failed"));
+  assignLegacyEventsToFallbackModules()
+    .then((count) => {
+      if (count > 0) logger.info({ count }, "assigned legacy indexed events to fallback modules");
+    })
+    .catch((error) => logger.error({ err: error }, "legacy indexed event assignment failed"));
+  void verifyRecoveryModuleCode();
   delay(2500).then(async () => {
     await AccountEventTracker.instance().loadSubscriptions();
     startSendNotificationsCronJob();

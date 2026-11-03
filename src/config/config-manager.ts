@@ -13,6 +13,8 @@ import {SmtpConfig, TwilioConfig, WebhookConfig} from "../utils/interfaces";
 import isURL from "validator/lib/isURL";
 import {registerSecret} from "../logging";
 import logger from "../utils/logger";
+import {findRecoveryModuleVariant} from "../utils/recovery-modules";
+import {RecoveryModuleConfig} from "../models/recovery-module";
 
 const log = logger.child({ component: "config" });
 
@@ -56,7 +58,13 @@ type Config = {
       enabled: boolean;
       chainId: string | number;
       jsonRpcEndpoint: string;
-      recoveryModuleAddress: string;
+      recoveryModules?: Array<{
+        address: string;
+        fallback?: boolean | string;
+        indexer: IndexerConfig;
+      }>;
+      // Legacy shape: a single module, the fallback, indexed with the network's 'indexer' block.
+      recoveryModuleAddress?: string;
       executeRecoveryRequests?: {
         enabled: boolean;
         signer?: string;
@@ -69,12 +77,14 @@ type Config = {
       } | string;
       guardian?: string | '~';
       alerts?: string | '~';
-      indexer: {
-        enabled: boolean,
-        startBlock: number
-      };
+      indexer?: IndexerConfig;
     };
   };
+};
+
+type IndexerConfig = {
+  enabled: boolean | string,
+  startBlock: number | string
 };
 
 export class Configuration {
@@ -373,12 +383,7 @@ export class Configuration {
       if (!networkConfig.jsonRpcEndpoint) {
         throw new Error(`Network '${networkName}' must have a 'jsonRpcEndpoint'.`);
       }
-      if (!networkConfig.recoveryModuleAddress) {
-        throw new Error(`Network '${networkName}' must have a 'recoveryModuleAddress'.`);
-      }
-      if (Joi.required().custom(ethereumAddress).validate(networkConfig.recoveryModuleAddress).error) {
-        throw new Error(`Network '${networkName}' must have a valid ethereum address for 'recoveryModuleAddress'.`);
-      }
+      const recoveryModules = parseRecoveryModules(networkName, networkConfig);
       //
       if (typeof networkConfig.executeRecoveryRequests == "string" && networkConfig.executeRecoveryRequests !== "~") throw new Error(`Network '${networkName}' cannot have 'executeRecoveryRequests' field as a string.`);
       if (!networkConfig.executeRecoveryRequests || typeof networkConfig.executeRecoveryRequests == "string"){
@@ -459,29 +464,16 @@ export class Configuration {
         }
       }
       //
-      if (!networkConfig.indexer) {
-        throw new Error(`Network '${networkName}' must have an 'indexer' configuration object.`);
-      }
-      if (networkConfig.indexer.enabled === undefined) {
-        throw new Error(`Network '${networkName}' 'indexer.enabled' must be a valid boolean value.`);
-      }
-      networkConfig.indexer.enabled = networkConfig.indexer.enabled.toString().toLowerCase() === "true";
-      const indexerStartBlock = Number(networkConfig.indexer.startBlock);
-      if (isNaN(indexerStartBlock)) {
-        throw new Error(`Network '${networkName}' 'indexer.startBlock' must be a valid number.`);
-      }
-      networkConfig.indexer.startBlock = indexerStartBlock;
       new Network(
         networkName,
         chainId,
-        networkConfig.recoveryModuleAddress,
+        recoveryModules,
         networkConfig.jsonRpcEndpoint,
         new ethers.providers.JsonRpcProvider(networkConfig.jsonRpcEndpoint),
         {...networkConfig.executeRecoveryRequests, rateLimit: executionSponsorshipRateLimiting},
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
         networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts,
-        networkConfig.indexer
       );
     });
     if (Network.instances.instances.length === 0) {
@@ -489,3 +481,66 @@ export class Configuration {
     }
   }
 }
+
+// 'recoveryModules' lists every module the network serves and indexes, each with its own 'indexer'
+// block; version and recovery period come from the pinned registry. The legacy 'recoveryModuleAddress'
+// reads as a one-entry list: that module, as the fallback, indexed with the network's 'indexer' block.
+export const parseRecoveryModules = (networkName: string, networkConfig: Config["networks"][string]): RecoveryModuleConfig[] => {
+  if (networkConfig.recoveryModules !== undefined && networkConfig.recoveryModuleAddress !== undefined) {
+    throw new Error(`Network '${networkName}' cannot have both 'recoveryModules' and 'recoveryModuleAddress'.`);
+  }
+  const legacy = networkConfig.recoveryModules === undefined;
+  let entries: NonNullable<Config["networks"][string]["recoveryModules"]>;
+  if (legacy) {
+    if (!networkConfig.recoveryModuleAddress) {
+      throw new Error(`Network '${networkName}' must have 'recoveryModules' (or the legacy 'recoveryModuleAddress').`);
+    }
+    entries = [{address: networkConfig.recoveryModuleAddress, fallback: true, indexer: networkConfig.indexer!}];
+  } else {
+    if (!Array.isArray(networkConfig.recoveryModules) || networkConfig.recoveryModules.length === 0) {
+      throw new Error(`Network '${networkName}' 'recoveryModules' must be a non-empty list.`);
+    }
+    if (networkConfig.indexer !== undefined) {
+      throw new Error(`Network '${networkName}' cannot have an 'indexer' block with 'recoveryModules': each module has its own.`);
+    }
+    entries = networkConfig.recoveryModules;
+  }
+  const modules: RecoveryModuleConfig[] = [];
+  entries.forEach((entry, index) => {
+    const field = legacy ? `Network '${networkName}'` : `Network '${networkName}' recoveryModules[${index}]`;
+    const addressField = legacy ? "recoveryModuleAddress" : "address";
+    if (!entry?.address || Joi.required().custom(ethereumAddress).validate(entry.address).error) {
+      throw new Error(`${field} must have a valid ethereum address for '${addressField}'.`);
+    }
+    const variant = findRecoveryModuleVariant(entry.address);
+    if (!variant) {
+      throw new Error(`${field} '${entry.address}' is not a known SocialRecoveryModule deployment (see src/utils/recovery-modules.ts).`);
+    }
+    if (modules.some((module) => module.address === variant.address)) {
+      throw new Error(`${field} '${entry.address}' is listed more than once.`);
+    }
+    const fallback = (entry.fallback ?? false).toString().toLowerCase() === "true";
+    if (fallback && variant.version !== "0.1.0") {
+      throw new Error(`${field} '${entry.address}' is a v${variant.version} module; only a v0.1.0 module can be the fallback.`);
+    }
+    if (!entry.indexer) {
+      throw new Error(`${field} must have an 'indexer' configuration object.`);
+    }
+    if (entry.indexer.enabled === undefined) {
+      throw new Error(`${field} 'indexer.enabled' must be a valid boolean value.`);
+    }
+    const startBlock = Number(entry.indexer.startBlock);
+    if (isNaN(startBlock)) {
+      throw new Error(`${field} 'indexer.startBlock' must be a valid number.`);
+    }
+    modules.push({
+      address: variant.address,
+      fallback,
+      indexer: {enabled: entry.indexer.enabled.toString().toLowerCase() === "true", startBlock},
+    });
+  });
+  if (modules.filter((module) => module.fallback).length > 1) {
+    throw new Error(`Network '${networkName}' can have only one fallback module.`);
+  }
+  return modules;
+};

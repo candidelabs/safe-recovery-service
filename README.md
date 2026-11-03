@@ -91,7 +91,13 @@ This configuration file is used to set up and customize the service. It consists
 	+ `enabled`: A boolean indicating whether the network is enabled.
 	+ `chainId`: Number of chain ID of the network.
 	+ `jsonRpcEndpoint`: The JSON-RPC endpoint of the network.
-	+ `recoveryModuleAddress`: The address of the recovery module.
+	+ `recoveryModules`: The Social Recovery Module deployments this network serves and indexes. Each entry has:
+	  * `address`: The module address. It must be one of the [supported recovery modules](#supported-recovery-modules); any other address fails at boot.
+	  * `fallback`: Optional, `true` on at most one v0.1.0 module. Recovery requests, custodial guardian signatures and `/v1/config/getNetworkConfig` use this module; every listed module is indexed and alerted on.
+	  * `indexer`: Specifies whether the indexer covers this module, and the first indexing block for its first run
+	    - `enabled`: A boolean indicating whether this module is indexed.
+	    - `startBlock`: A number that specifies from which block the indexer starts indexing this module (should be the block at which the module was deployed). Note: this value is ignored once the module has a recorded last indexed block. A module added to a running service is indexed from this block, and alerts are sent for the events found on the way.
+	+ `recoveryModuleAddress` (legacy): A network with a single module can set this field and a network-level `indexer` block (same fields as above) instead of `recoveryModules`. The module is then the network's fallback. A network uses one shape or the other, not both.
 	+ `executeRecoveryRequests`: Controls whether the service will execute the recovery after all required signatures are collected. It has a `enabled` boolean field, and requires the `id` of a `signer` to be specified if enabled.
       + `rateLimit`: Controls the rate limiting for recovery executions by the service (omitted or `~` if no rate limit)
         * `maxPerAccount`: The maximum number of recovery executions allowed per account within the specified period.
@@ -101,9 +107,24 @@ This configuration file is used to set up and customize the service. It consists
         * `maxPerAccount`: The maximum number of recovery finalizations allowed per account within the specified period.
         * `period`: The time period for which the rate limit is applied.
 	+ `alerts`: Optionally specifies the alert to use for this network with with an alert `id`.
-    + `indexer`: Specifies whether the indexer is enabled, and the first indexing block for first time run
-      * `enabled`: A boolean indicating whether the indexer is enabled.
-      * `startBlock`: A number that specifies from which block should the indexer start indexing (should be the block at which the recovery module was deployed), Note: this value will be ignored after the first time the indexer starts as it'll rely on its recorded last indexed block
+
+##### Supported recovery modules
+
+Each variant has the same address on every network. The service takes a module's version and recovery period from this list, and after startup compares the code deployed at each configured address with its pinned code hash, logging an error on a mismatch. The v0.1.0 modules return `"0.0.1"` from `VERSION()`.
+
+| Version | Recovery period | Address |
+| --- | --- | --- |
+| v0.1.0 | 3 minutes | `0x949d01d424bE050D09C16025dd007CB59b3A8c66` |
+| v0.1.0 | 3 days | `0x38275826E1933303E508433dD5f289315Da2541c` |
+| v0.1.0 | 7 days | `0x088f6cfD8BB1dDb1BB069CCb3fc1A98927D233f2` |
+| v0.1.0 | 14 days | `0x9BacD92F4687Db306D7ded5d4513a51EA05df25b` |
+| v0.2.0 | 3 minutes | `0x4dF6081A82E07A7cD99aEf91C72d12a5138e468B` |
+| v0.2.0 | 3 days | `0x00480F5ecC008995469fA7e12c70Ef3DC9FEe7fD` |
+| v0.2.0 | 7 days | `0xEaC444E2F28469E641215F129874Aff8294cAfE0` |
+| v0.2.0 | 14 days | `0x4d92D03a47468d9FC62495d85E3F205b4616FC5c` |
+
+> [!WARNING]
+> The 3-minute variants are for testnets only. The service cannot tell a testnet from a mainnet, so never list them on a mainnet network.
 
 > [!TIP]
 The config file supports loading values from `.env`. Use `${ENV::VAR_NAME}` anywhere inside a string value and the named environment variable will be substituted in at boot. Examples: `"privateKey": "${ENV::PRIVATE_KEY}"` loads the whole field from the env variable, while `"jsonRpcEndpoint": "https://rpc.example.com/${ENV::RPC_API_KEY}"` only substitutes the key segment. Multiple substitutions in one string are supported. Missing env variables throw at boot.

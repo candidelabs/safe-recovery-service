@@ -1,6 +1,7 @@
-import {BigNumber, ethers} from 'ethers';
+import {ethers} from 'ethers';
 import * as cron from "node-cron";
 import {Network} from "../models/network";
+import {RecoveryModule} from "../models/recovery-module";
 import type {Logger} from "../logging";
 import logger from "../utils/logger";
 import {delay} from "../utils";
@@ -17,48 +18,41 @@ import {Configuration} from "../config/config-manager";
 import {prisma} from "../config/prisma-client";
 
 interface FailedRange {
+  modules: RecoveryModule[];
   fromBlock: number;
   toBlock: number;
   retryCount: number;
 }
 
-const MAX_CONCURRENT_REQUESTS = 30;
-const INDEXER_EVENT_TOPICS: Record<string, EventType> = {
-  "0xbc3292102fa77e083913064b282926717cdfaede4d35f553d66366c0a3da755a": EventType.GuardianAdded,
-  "0x548f10dcba266544123ad8cf8284f25c4baa659cba25dbdf16a06ea11235de9b": EventType.GuardianRevoked,
-  "0xde3e32a86d32ca955594af26f515d3dc60003ab279776b14b4012fe99d96f8f6": EventType.ChangedThreshold,
-  "0x1fa74635dcccfa96011b50295a26dd08b8c3c6ca7d66ede450288192674ebf01": EventType.RecoveryExecuted,
-  "0x8f02bbdd0d302f6cdd4a448157ae4156c07384b648beae077292ba804d60ad5a": EventType.RecoveryFinalized,
-  "0x81da66c7aac3ee4365918a5d70f73e846a59e8a8af01ef155e86518190490519": EventType.RecoveryCanceled
-}
-const INDEXER_EVENT_TYPES: Record<EventType, string> = {
-  [EventType.GuardianAdded]: "0xbc3292102fa77e083913064b282926717cdfaede4d35f553d66366c0a3da755a",
-  [EventType.GuardianRevoked]: "0x548f10dcba266544123ad8cf8284f25c4baa659cba25dbdf16a06ea11235de9b",
-  [EventType.ChangedThreshold]: "0xde3e32a86d32ca955594af26f515d3dc60003ab279776b14b4012fe99d96f8f6",
-  [EventType.RecoveryExecuted]: "0x1fa74635dcccfa96011b50295a26dd08b8c3c6ca7d66ede450288192674ebf01",
-  [EventType.RecoveryFinalized]: "0x8f02bbdd0d302f6cdd4a448157ae4156c07384b648beae077292ba804d60ad5a",
-  [EventType.RecoveryCanceled]: "0x81da66c7aac3ee4365918a5d70f73e846a59e8a8af01ef155e86518190490519"
+// One IndexerData row per module: the last block fetched for it, and the last value written to the DB.
+interface ModuleCursor {
+  module: RecoveryModule;
+  indexerDataId: string;
+  latestFromBlock: number;
+  storedBlock: number;
 }
 
+const MAX_CONCURRENT_REQUESTS = 30;
+
+// One Indexer per Network, covering every module of the network whose indexer is enabled. Modules at
+// the same cursor share each eth_getLogs call (its 'address' takes a list). A module whose cursor is
+// behind (a module configured later, backfilling from its start block) is fetched on its own until it
+// reaches the others: every module ends a cycle at the same head block, so they merge on the next one.
 export class Indexer {
   private network: Network;
-  private latestFromBlock: number;
+  private cursors: ModuleCursor[] = [];
   private failedRanges: FailedRange[] = [];
   private maxRetries: number = 3;
   private blockRangeSize: number = 9990;
   private storingBusy: boolean = false;
-  private active: boolean;
-  private indexerDataId!: string;
   private indexingBusy: boolean = false;
   private indexerReady: boolean = false;
   private cronJob: cron.ScheduledTask | undefined;
   // Every line of this indexer carries its chainId and network name.
   private readonly log: Logger;
 
-  constructor(network: Network, startingBlock: number, active: boolean) {
+  constructor(network: Network) {
     this.network = network;
-    this.latestFromBlock = startingBlock;
-    this.active = active;
     this.log = logger.child({ component: "indexer", chainId: network.chainId, network: network.name });
   }
 
@@ -73,32 +67,25 @@ export class Indexer {
       return;
     }
     //
-    const indexerData = await prisma.indexerData.findFirst({where: {chainId: this.network.chainId}});
-    if (indexerData){
-      this.latestFromBlock = indexerData.latestIndexedBlock;
-      await prisma.indexerData.update({
-        data: {
-          active: this.active,
-        },
-        where: {id: indexerData.id}
+    for (const module of this.network.modules){
+      const indexerData = await this.loadIndexerData(module);
+      if (!module.indexer.enabled) continue;
+      this.cursors.push({
+        module,
+        indexerDataId: indexerData.id,
+        latestFromBlock: indexerData.latestIndexedBlock,
+        storedBlock: indexerData.latestIndexedBlock,
       });
-      this.indexerDataId = indexerData.id;
-    } else {
-      const indexerData = await prisma.indexerData.create({
-        data: {
-          chainId: this.network.chainId,
-          latestIndexedBlock: this.latestFromBlock,
-          active: this.active,
-        }
-      });
-      this.indexerDataId = indexerData.id;
     }
     //
-    if (!this.active) return;
-    this.log.info({ fromBlock: this.latestFromBlock }, "indexer started");
+    if (this.cursors.length === 0) return;
+    this.log.info(
+      { modules: this.cursors.map(c => ({ moduleAddress: c.module.address, module: c.module.label, fromBlock: c.latestFromBlock })) },
+      "indexer started"
+    );
     this.cronJob = cron.schedule('*/15 * * * * *', async () => {
       if (!this.storingBusy && !this.indexingBusy){
-        await this.storeEvents(this.latestFromBlock);
+        await this.storeEvents();
       }
       if (!this.indexingBusy && !this.storingBusy){
         this.indexNewBlocks();
@@ -107,47 +94,56 @@ export class Indexer {
     this.cronJob.start();
   }
 
+  // The row created before modules were tracked has no moduleAddress: it is the fallback module's cursor.
+  // Any other module without a row starts at its configured start block.
+  private async loadIndexerData(module: RecoveryModule) {
+    const chainId = this.network.chainId;
+    const active = module.indexer.enabled;
+    let indexerData = await prisma.indexerData.findFirst({where: {chainId, moduleAddress: module.address}});
+    if (!indexerData && module.fallback){
+      indexerData = await prisma.indexerData.findFirst({where: {chainId, moduleAddress: null}});
+      if (indexerData){
+        this.log.info(
+          { moduleAddress: module.address, module: module.label, latestIndexedBlock: indexerData.latestIndexedBlock },
+          "legacy indexer cursor assigned to the fallback module"
+        );
+      }
+    }
+    if (indexerData){
+      return prisma.indexerData.update({
+        data: {active, moduleAddress: module.address},
+        where: {id: indexerData.id}
+      });
+    }
+    return prisma.indexerData.create({
+      data: {
+        chainId,
+        moduleAddress: module.address,
+        latestIndexedBlock: module.indexer.startBlock,
+        active,
+      }
+    });
+  }
+
   private async indexNewBlocks(): Promise<void> {
     this.indexingBusy = true;
-    let concurrentRequests = 0;
     try {
       await this.processFailedRanges();
       const _latestOnchainBlock = await this.network.jsonRPCProvider.send("eth_blockNumber", []);
       const latestOnchainBlock = parseInt(_latestOnchainBlock, 16) - 2;
-      this.log.debug(
-        { headBlock: latestOnchainBlock, fromBlock: this.latestFromBlock + 1, lagBlocks: latestOnchainBlock - this.latestFromBlock },
-        "indexer cycle"
-      );
-      let fromBlock = this.latestFromBlock + 1;
-      fromBlock = Math.min(fromBlock, latestOnchainBlock);
-      let toBlock = fromBlock + this.blockRangeSize;
-      toBlock = Math.min(toBlock, latestOnchainBlock);
-      const promises = [];
-      while (true){
-        if (fromBlock > toBlock) break;
-        if (fromBlock == toBlock && toBlock < this.latestFromBlock) break;
-        while (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
-          await delay(350);
-        }
-        concurrentRequests++;
-        const rangeFrom = fromBlock;
-        const rangeTo = toBlock;
-        const promise = this.processBlockRange(rangeFrom, rangeTo, (success) => {
-          concurrentRequests--;
-          if (!success){
-            this.addFailedRange(rangeFrom, rangeTo);
-          }
-        });
-        this.latestFromBlock = toBlock;
-        promises.push(promise);
-        fromBlock = toBlock + 1;
-        if (fromBlock > latestOnchainBlock){
-          break;
-        }
-        toBlock = fromBlock + this.blockRangeSize;
-        toBlock = Math.min(toBlock, latestOnchainBlock);
+      for (const cursors of this.cursorGroups()){
+        const latestFromBlock = cursors[0].latestFromBlock;
+        this.log.debug(
+          {
+            moduleAddresses: cursors.map(c => c.module.address),
+            headBlock: latestOnchainBlock,
+            fromBlock: latestFromBlock + 1,
+            lagBlocks: latestOnchainBlock - latestFromBlock,
+          },
+          "indexer cycle"
+        );
+        await this.indexBlocks(cursors, latestOnchainBlock);
       }
-      await Promise.all(promises);
     } catch (error) {
       this.log.error({ err: error, fn: "indexNewBlocks" }, "indexer cycle failed");
     } finally {
@@ -155,10 +151,54 @@ export class Indexer {
     }
   }
 
-  private async processBlockRange(fromBlock: number, toBlock: number, callback?: (success: boolean) => any): Promise<void> {
+  // Cursors grouped by block, the most advanced group first so live events are fetched before a backfill.
+  private cursorGroups(): ModuleCursor[][] {
+    const groups = new Map<number, ModuleCursor[]>();
+    for (const cursor of this.cursors){
+      if (!groups.has(cursor.latestFromBlock)) groups.set(cursor.latestFromBlock, []);
+      groups.get(cursor.latestFromBlock)!.push(cursor);
+    }
+    return [...groups.entries()].sort((a, b) => b[0] - a[0]).map(([, cursors]) => cursors);
+  }
+
+  // Fetches (latestFromBlock, latestOnchainBlock] for modules that share the same cursor.
+  private async indexBlocks(cursors: ModuleCursor[], latestOnchainBlock: number): Promise<void> {
+    const modules = cursors.map(c => c.module);
+    let concurrentRequests = 0;
+    let fromBlock = cursors[0].latestFromBlock + 1;
+    const promises = [];
+    while (fromBlock <= latestOnchainBlock){
+      const toBlock = Math.min(fromBlock + this.blockRangeSize, latestOnchainBlock);
+      while (concurrentRequests >= MAX_CONCURRENT_REQUESTS){
+        await delay(350);
+      }
+      concurrentRequests++;
+      const rangeFrom = fromBlock;
+      const promise = this.processBlockRange(modules, rangeFrom, toBlock, (success) => {
+        concurrentRequests--;
+        if (!success){
+          this.addFailedRange(modules, rangeFrom, toBlock);
+        }
+      });
+      for (const cursor of cursors){
+        cursor.latestFromBlock = toBlock;
+      }
+      promises.push(promise);
+      fromBlock = toBlock + 1;
+    }
+    await Promise.all(promises);
+  }
+
+  private async processBlockRange(
+    modules: RecoveryModule[],
+    fromBlock: number,
+    toBlock: number,
+    callback?: (success: boolean) => any
+  ): Promise<void> {
     const logFilter = {
-      "address": this.network.recoveryModuleAddress,
-      "topics": [Object.keys(INDEXER_EVENT_TOPICS)],
+      "address": modules.map(module => module.address),
+      // Guardian event topics are shared between versions; recovery event topics differ per version.
+      "topics": [[...new Set(modules.flatMap(module => Object.keys(module.topics)))]],
       "fromBlock": ethers.utils.hexValue(fromBlock),
       "toBlock": ethers.utils.hexValue(toBlock)
     };
@@ -166,13 +206,13 @@ export class Indexer {
       const logs = await this.network.jsonRPCProvider.send("eth_getLogs", [
         logFilter
       ]);
-      await this.processEvents(logs);
+      this.processEvents(logs);
       if (callback){
         callback(true);
       }
     } catch (error) {
       // retried from failedRanges; "indexer range dropped" is the terminal line
-      this.log.warn({ err: error, fromBlock, toBlock }, "indexer range failed");
+      this.log.warn({ err: error, fromBlock, toBlock, moduleAddresses: logFilter.address }, "indexer range failed");
       if (callback){
         callback(false);
       }
@@ -189,7 +229,13 @@ export class Indexer {
     for (const range of rangesToRetry) {
       if (range.retryCount >= this.maxRetries) {
         this.log.error(
-          { fromBlock: range.fromBlock, toBlock: range.toBlock, attempt: range.retryCount, maxAttempts: this.maxRetries },
+          {
+            fromBlock: range.fromBlock,
+            toBlock: range.toBlock,
+            moduleAddresses: range.modules.map(module => module.address),
+            attempt: range.retryCount,
+            maxAttempts: this.maxRetries,
+          },
           "indexer range dropped"
         );
         continue;
@@ -199,7 +245,7 @@ export class Indexer {
       }
       range.retryCount++;
       concurrentRequests++;
-      this.processBlockRange(range.fromBlock, range.toBlock, (success) => {
+      this.processBlockRange(range.modules, range.fromBlock, range.toBlock, (success) => {
         concurrentRequests--;
         if (!success){
           this.failedRanges.push(range);
@@ -211,156 +257,121 @@ export class Indexer {
     }
   }
 
-  private addFailedRange(fromBlock: number, toBlock: number): void {
+  private addFailedRange(modules: RecoveryModule[], fromBlock: number, toBlock: number): void {
     this.failedRanges.push({
+      modules,
       fromBlock,
       toBlock,
       retryCount: 0
     });
   }
 
-  private async processEvents(logs: ethers.providers.Log[]): Promise<void> {
+  // Decodes the whole range before buffering anything, so a range that fails and is retried is never
+  // buffered twice.
+  private processEvents(logs: ethers.providers.Log[]): void {
+    const events: IndexedEvent[] = [];
     for (let i = 0; i < logs.length; i++){
       const log = this.network.jsonRPCProvider.formatter.receiptLog(logs[i]);
-      const eventType = INDEXER_EVENT_TOPICS[log.topics[0]];
-      this.trackEvents(eventType, log);
+      const event = this.network.getModule(log.address)?.decodeLog(log, this.network.chainId);
+      if (event) events.push(event);
+    }
+    for (const event of events){
+      AccountEventTracker.instance().addEvent(event);
     }
   }
 
-  private trackEvents(eventType: EventType, log: ethers.providers.Log) {
-    const account = log.topics[1]._0xRemove().slice(24)._0x().toLowerCase();
-    const blockNumber = log.blockNumber;
-    const transactionIndex = log.transactionIndex;
-    const logIndex = log.logIndex;
-    const transactionHash = log.transactionHash;
-    const chainId = this.network.chainId;
-    let indexedEvent: IndexedEvent;
-    if (eventType == EventType.GuardianAdded) {
-      const guardian = log.topics[2]._0xRemove().slice(24)._0x().toLowerCase();
-      indexedEvent = new GuardianAddedEvent(chainId, account, guardian, blockNumber, transactionIndex, logIndex, transactionHash);
-    }else if (eventType == EventType.GuardianRevoked) {
-      const guardian = log.topics[2]._0xRemove().slice(24)._0x().toLowerCase();
-      indexedEvent = new GuardianRevokedEvent(chainId, account, guardian, blockNumber, transactionIndex, logIndex, transactionHash);
-    }else if (eventType == EventType.ChangedThreshold){
-      const data = ethers.utils.defaultAbiCoder.decode(["uint256"], log.data);
-      const newThreshold = (data[0] as BigNumber).toBigInt();
-      indexedEvent = new ChangedThresholdEvent(chainId, account, newThreshold, blockNumber, transactionIndex, logIndex, transactionHash);
-    }else if (eventType == EventType.RecoveryExecuted){
-      const newOwnersHash = log.topics[2].toLowerCase();
-      const data = ethers.utils.defaultAbiCoder.decode(
-        ["uint256", "uint256", "uint64", "uint256"],
-        log.data
-      );
-      const newThreshold = (data[0] as BigNumber).toBigInt();
-      const nonce = (data[1] as BigNumber).toBigInt();
-      const executeAfter = (data[2] as BigNumber).toBigInt();
-      const guardiansApprovalCount = (data[3] as BigNumber).toBigInt();
-      indexedEvent = new RecoveryExecutedEvent(
-        chainId,
-        account,
-        newOwnersHash,
-        newThreshold,
-        nonce,
-        executeAfter,
-        guardiansApprovalCount,
-        blockNumber,
-        transactionIndex,
-        logIndex,
-        transactionHash
-      );
-    }else if (eventType == EventType.RecoveryCanceled){
-      const data = ethers.utils.defaultAbiCoder.decode(["uint256"], log.data);
-      const nonce = (data[0] as BigNumber).toBigInt();
-      indexedEvent = new RecoveryCanceledEvent(chainId, account, nonce, blockNumber, transactionIndex, logIndex, transactionHash);
-    }else if (eventType == EventType.RecoveryFinalized){
-      const newOwnersHash = log.topics[2].toLowerCase();
-      const data = ethers.utils.defaultAbiCoder.decode(
-        ["uint256", "uint256"],
-        log.data
-      );
-      const newThreshold = (data[0] as BigNumber).toBigInt();
-      const nonce = (data[1] as BigNumber).toBigInt();
-      indexedEvent = new RecoveryFinalizedEvent(chainId, account, newOwnersHash, newThreshold, nonce, blockNumber, transactionIndex, logIndex, transactionHash);
-    }else{
-      return;
-    }
-    AccountEventTracker.instance().addEvent(indexedEvent);
-  }
-
-  public async storeEvents(latestIndexedBlock: number){
+  // Alerts are built per (account, module); events are then stored and every module's cursor is saved,
+  // except for modules with a range still waiting to be retried.
+  public async storeEvents(){
     this.storingBusy = true;
     try {
       const accountEventTracker = AccountEventTracker.instance();
-      const accounts = accountEventTracker.getAllAccounts(this.network.chainId);
+      const chainId = this.network.chainId;
+      const accounts = accountEventTracker.getAllAccounts(chainId);
       const promises = [];
       for (const account of accounts){
-        const events = accountEventTracker.getEventsForAccount(account, this.network.chainId);
         const accountSubscriptions = accountEventTracker.getAccountSubscriptions(account);
-        if (accountSubscriptions && accountSubscriptions.length > 0){
-          let message;
-          try {
-            message = await accountEventTracker.getEventSummary(account, this.network.chainId);
-          } catch (error) {
-            this.log.error({ err: error, account }, "event summary failed");
-            message = undefined;
-          }
-          if (message){
-            let shouldSkipAlert = false;
-            if (Configuration.instance().skipFirstAccountSetupAlert){
-              const allSetupEvents = events.every(e =>
-                e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
-              );
-              if (allSetupEvents){
-                const hasExisting = await this.hasExistingEventsForAccount(account, this.network.chainId);
-                shouldSkipAlert = !hasExisting;
+        // Counted once per account, before this batch is stored: a first setup is per account, across modules.
+        let hasExistingEvents: boolean | undefined;
+        for (const moduleAddress of accountEventTracker.getModulesForAccount(account, chainId)){
+          const events = accountEventTracker.getEventsForAccount(account, chainId, moduleAddress);
+          if (accountSubscriptions && accountSubscriptions.length > 0){
+            let message;
+            try {
+              message = await accountEventTracker.getEventSummary(account, chainId, moduleAddress);
+            } catch (error) {
+              this.log.error({ err: error, account, moduleAddress }, "event summary failed");
+              message = undefined;
+            }
+            if (message){
+              let shouldSkipAlert = false;
+              if (Configuration.instance().skipFirstAccountSetupAlert){
+                const allSetupEvents = events.every(e =>
+                  e.eventType === EventType.GuardianAdded || e.eventType === EventType.ChangedThreshold
+                );
+                if (allSetupEvents){
+                  hasExistingEvents ??= await this.hasExistingEventsForAccount(account, chainId);
+                  shouldSkipAlert = !hasExistingEvents;
+                }
+              }
+              if (!shouldSkipAlert){
+                for (const subscription of accountSubscriptions){
+                  const promise = prisma.alertSubscriptionNotification.create({
+                    data: {
+                      account: account,
+                      channel: subscription.channel,
+                      target: subscription.target,
+                      data: {message: {...message}},
+                      deliveryStatus: "PENDING"
+                    }
+                  });
+                  promises.push(promise);
+                }
               }
             }
-            if (!shouldSkipAlert){
-              for (const subscription of accountSubscriptions){
-                const promise = prisma.alertSubscriptionNotification.create({
-                  data: {
-                    account: account,
-                    channel: subscription.channel,
-                    target: subscription.target,
-                    data: {message: {...message}},
-                    deliveryStatus: "PENDING"
-                  }
-                });
-                promises.push(promise);
-              }
-            }
           }
-        }
-        for (const event of events){
-          let promise;
-          if (event.eventType == EventType.GuardianAdded){
-            promise = this.storeGuardianAddedEvent(event as GuardianAddedEvent);
-          }else if (event.eventType == EventType.GuardianRevoked){
-            promise = this.storeGuardianRevokedEvent(event as GuardianRevokedEvent);
-          }else if (event.eventType == EventType.ChangedThreshold){
-            promise = this.storeChangedThresholdEvent(event as ChangedThresholdEvent);
-          }else if (event.eventType == EventType.RecoveryExecuted){
-            promise = this.storeRecoveryExecutedEvent(event as RecoveryExecutedEvent);
-          }else if (event.eventType == EventType.RecoveryFinalized){
-            promise = this.storeRecoveryFinalizedEvent(event as RecoveryFinalizedEvent);
-          }else if (event.eventType == EventType.RecoveryCanceled){
-            promise = this.storeRecoveryCanceledEvent(event as RecoveryCanceledEvent);
+          for (const event of events){
+            promises.push(this.storeEvent(event));
           }
-          promises.push(promise);
+          accountEventTracker.clearEventsForAccount(account, chainId, moduleAddress);
         }
-        accountEventTracker.clearEventsForAccount(account, this.network.chainId);
       }
       await Promise.all(promises);
-      if (this.failedRanges.length == 0){
-        await prisma.indexerData.update({
-          data: {latestIndexedBlock: latestIndexedBlock},
-          where: {id: this.indexerDataId}
-        });
-      }
+      await this.storeCursors();
     } catch (error) {
       this.log.error({ err: error, fn: "storeEvents" }, "indexer store failed");
     } finally {
       this.storingBusy = false;
+    }
+  }
+
+  private async storeCursors(){
+    const retrying = new Set(this.failedRanges.flatMap(range => range.modules.map(module => module.address)));
+    await Promise.all(this.cursors.map(async (cursor) => {
+      if (retrying.has(cursor.module.address) || cursor.storedBlock === cursor.latestFromBlock) return;
+      const latestIndexedBlock = cursor.latestFromBlock;
+      await prisma.indexerData.update({
+        data: {latestIndexedBlock},
+        where: {id: cursor.indexerDataId}
+      });
+      cursor.storedBlock = latestIndexedBlock;
+    }));
+  }
+
+  private storeEvent(event: IndexedEvent): Promise<void> | undefined {
+    switch (event.eventType){
+      case EventType.GuardianAdded:
+        return this.storeGuardianAddedEvent(event as GuardianAddedEvent);
+      case EventType.GuardianRevoked:
+        return this.storeGuardianRevokedEvent(event as GuardianRevokedEvent);
+      case EventType.ChangedThreshold:
+        return this.storeChangedThresholdEvent(event as ChangedThresholdEvent);
+      case EventType.RecoveryExecuted:
+        return this.storeRecoveryExecutedEvent(event as RecoveryExecutedEvent);
+      case EventType.RecoveryFinalized:
+        return this.storeRecoveryFinalizedEvent(event as RecoveryFinalizedEvent);
+      case EventType.RecoveryCanceled:
+        return this.storeRecoveryCanceledEvent(event as RecoveryCanceledEvent);
     }
   }
 
@@ -369,6 +380,7 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
         guardian: event.guardian,
         transactionHash: event.transactionHash,
         blockNumber: event.blockNumber,
@@ -383,6 +395,7 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
         guardian: event.guardian,
         transactionHash: event.transactionHash,
         blockNumber: event.blockNumber,
@@ -397,6 +410,7 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
         threshold: event.newThreshold,
         transactionHash: event.transactionHash,
         blockNumber: event.blockNumber,
@@ -411,6 +425,9 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
+        recoveryHash: event.recoveryHash,
+        newOwners: event.newOwners ?? [],
         newOwnersHash: event.newOwnersHash,
         newThreshold: event.newThreshold,
         nonce: event.nonce,
@@ -429,6 +446,9 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
+        recoveryHash: event.recoveryHash,
+        newOwners: event.newOwners ?? [],
         newOwnersHash: event.newOwnersHash,
         newThreshold: event.newThreshold,
         nonce: event.nonce,
@@ -445,7 +465,9 @@ export class Indexer {
       data: {
         account: event.account,
         chainId: event.chainId,
+        moduleAddress: event.moduleAddress,
         nonce: event.nonce,
+        recoveryHash: event.recoveryHash,
         transactionHash: event.transactionHash,
         blockNumber: event.blockNumber,
         transactionIndex: event.transactionIndex,
@@ -454,6 +476,7 @@ export class Indexer {
     });
   }
 
+  // Across all modules of the chain, so moving guardians to another module is alerted, not taken for a first setup.
   private async hasExistingEventsForAccount(account: string, chainId: number): Promise<boolean> {
     const counts = await prisma.guardianAddedEvent.count({where: {account, chainId}});
     return counts > 0;

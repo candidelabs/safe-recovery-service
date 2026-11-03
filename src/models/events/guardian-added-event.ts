@@ -5,6 +5,7 @@ export class GuardianAddedEvent extends IndexedEvent {
 
   constructor(
     public readonly chainId: number,
+    public readonly moduleAddress: string,
     public readonly account: string,
     public readonly guardian: string,
     public readonly blockNumber: number,
@@ -12,7 +13,7 @@ export class GuardianAddedEvent extends IndexedEvent {
     public readonly logIndex: number,
     public readonly transactionHash: string,
   ) {
-    super(chainId, account, EventType.GuardianAdded, blockNumber, transactionIndex, logIndex, transactionHash);
+    super(chainId, moduleAddress, account, EventType.GuardianAdded, blockNumber, transactionIndex, logIndex, transactionHash);
   }
 
   getIndexedData(): Record<string, any> {

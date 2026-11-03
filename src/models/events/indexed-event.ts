@@ -3,6 +3,7 @@ import {EventType} from "../../utils/constants";
 export abstract class IndexedEvent {
   protected constructor(
     public readonly chainId: number,
+    public readonly moduleAddress: string, // lowercase recovery module address
     public readonly account: string,
     public readonly eventType: EventType,
     public readonly blockNumber: number,

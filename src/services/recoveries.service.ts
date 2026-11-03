@@ -4,7 +4,6 @@ import {
   ApiError,
   createEmojiSet,
   getSafeInstance,
-  getSocialModuleInstance,
   isValidSignature,
   parseSeconds,
 } from "../utils";
@@ -41,8 +40,8 @@ export const create = async (account: string, newOwners: string[], newThreshold:
       `Account address is not a safe smart contract account`
     );
   }
-  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
-  const recoveryNonce: BigNumber = await socialRecoveryModule.nonce(account);
+  const recoveryModule = network.requireFallbackModule();
+  const recoveryNonce: BigNumber = await recoveryModule.contract.nonce(account);
   let recoveryRequest = await prisma.recoveryRequest.create(
     {
       data: {
@@ -98,8 +97,8 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
     recoveryRequest = id;
   }
   const network = Network.instances.get(recoveryRequest!.chainId.toString())!;
-  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
-  const isSignerAGuardian: boolean = await socialRecoveryModule.isGuardian(recoveryRequest!.account, signer);
+  const recoveryModule = network.requireFallbackModule();
+  const isSignerAGuardian: boolean = await recoveryModule.contract.isGuardian(recoveryRequest!.account, signer);
   if (!isSignerAGuardian) {
     throw new ApiError(
       httpStatus.BAD_REQUEST,
@@ -107,7 +106,7 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
     );
   }
   //
-  const recoveryHash = await getRecoveryRequestExecutionHash(socialRecoveryModule, recoveryRequest!);
+  const recoveryHash = await getRecoveryRequestExecutionHash(recoveryModule.contract, recoveryRequest!);
   let validSignature: boolean;
   try {
     validSignature = await isValidSignature(
@@ -215,7 +214,10 @@ export const findByAccount = async (
   // Return results as is if executed and finalized filters are not set.
   if (filters.executed == null && filters.finalized == null) return results;
 
-  // Executed/finalized boolean filters
+  // Executed/finalized boolean filters. Requests are made on the fallback module, so only its events
+  // can match: every module starts each account's nonce at 0.
+  const network = Network.instances.get(chainId.toString())!;
+  const moduleAddress = network.requireFallbackModule().address;
   const nonces = [...new Set(results.map(r => r.nonce))];
 
   const [executedEvents, finalizedEvents] = await Promise.all([
@@ -223,6 +225,7 @@ export const findByAccount = async (
       where: {
         account: account.toLowerCase(),
         chainId,
+        moduleAddress,
         nonce: { in: nonces },
       },
     }),
@@ -230,6 +233,7 @@ export const findByAccount = async (
       where: {
         account: account.toLowerCase(),
         chainId,
+        moduleAddress,
         nonce: { in: nonces },
       },
     }),
@@ -303,9 +307,9 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
     }
   }
   //
-  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
-  const guardianThreshold = await socialRecoveryModule.threshold(request.account) as BigNumber;
-  const accountNonce = await socialRecoveryModule.nonce(request.account) as BigNumber;
+  const recoveryModule = network.requireFallbackModule();
+  const guardianThreshold = await recoveryModule.contract.threshold(request.account) as BigNumber;
+  const accountNonce = await recoveryModule.contract.nonce(request.account) as BigNumber;
   if (!accountNonce.eq(request.nonce)){
     throw new ApiError(
       httpStatus.FORBIDDEN,
@@ -323,9 +327,9 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
   if (typeof executeData["transactionHash"] == "string" && executeData["transactionHash"]._0xRemove().length > 0) return executeData["transactionHash"];
   if (request.status === "EXECUTED") return executeData["transactionHash"];
   //
-  const onChainRequest = await socialRecoveryModule.getRecoveryRequest(request.account)
-  if (onChainRequest.executeAfter !== 0){
-    if ((onChainRequest.guardiansApprovalCount as BigNumber).gte((request.signatures as Prisma.JsonArray).length)){
+  const onChainRequest = await recoveryModule.readRecoveryRequest(request.account);
+  if (onChainRequest.executableAt !== 0n){
+    if (onChainRequest.approvalCount >= BigInt((request.signatures as Prisma.JsonArray).length)){
       throw new ApiError(
         httpStatus.NOT_FOUND,
         `This recovery request cannot replace the current active on-chain recovery request`
@@ -344,7 +348,7 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       `Execution already pending`
     );
   }
-  const callData = socialRecoveryModule.interface.encodeFunctionData(
+  const callData = recoveryModule.contract.interface.encodeFunctionData(
     "multiConfirmRecovery",
     [
       request.account,
@@ -363,7 +367,7 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
   };
   log.info(context, "recovery execution sponsored");
   ChainExecutor.instance().addTransaction({
-    to: network.recoveryModuleAddress,
+    to: recoveryModule.address,
     value: 0n,
     callData,
     chainId: network.chainId,
@@ -423,17 +427,17 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
   if (typeof finalizeData["transactionHash"] == "string" && finalizeData["transactionHash"]._0xRemove().length > 0) return finalizeData["transactionHash"];
   if (request.status === "FINALIZED") return finalizeData["transactionHash"];
   //
-  let socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
+  const recoveryModule = network.requireFallbackModule();
   //
-  const onChainRequest = await socialRecoveryModule.getRecoveryRequest(request.account)
-  if (onChainRequest.executeAfter == 0){
+  const onChainRequest = await recoveryModule.readRecoveryRequest(request.account);
+  if (onChainRequest.executableAt === 0n){
     throw new ApiError(
       httpStatus.NOT_FOUND,
       `No recovery request found on chain`
     );
   }
   const currentTimestamp = (await network.jsonRPCProvider.getBlock("latest")).timestamp;
-  if (onChainRequest.executeAfter > currentTimestamp){
+  if (onChainRequest.executableAt > BigInt(currentTimestamp)){
     throw new ApiError(
       httpStatus.FORBIDDEN,
       `Recovery request is not yet ready for finalization`
@@ -451,7 +455,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
       `Finalization already pending`
     );
   }
-  const callData = socialRecoveryModule.interface.encodeFunctionData("finalizeRecovery", [request.account]);
+  const callData = recoveryModule.contract.interface.encodeFunctionData("finalizeRecovery", [request.account]);
   const context = {
     recoveryRequestId: request.id,
     account: request.account,
@@ -461,7 +465,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
   };
   log.info(context, "recovery finalization sponsored");
   ChainExecutor.instance().addTransaction({
-    to: network.recoveryModuleAddress,
+    to: recoveryModule.address,
     value: 0n,
     callData,
     chainId: network.chainId,
