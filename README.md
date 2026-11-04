@@ -52,6 +52,8 @@ This configuration file is used to set up and customize the service. It consists
 * `trustProxy`: Specifies whether the app is sitting behind a proxy and trusts this proxy. (optional, default: true)
 * `skipFirstAccountSetupAlert`: When set to `true`, suppresses the first alert for `GuardianAdded` or `ChangedThreshold` events if the account has no previously indexed events on the current chain. This avoids noisy alerts during initial account setup. (optional, default: `false`)
 * `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes. (optional)
+* `moduleFallbackDeprecation`: ISO 8601 date (e.g. `"2026-11-15"`) since which a request that names no recovery module is deprecated. Once set, such requests are answered with a `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)). (optional)
+* `moduleFallbackSunset`: ISO 8601 date after which a request must name its recovery module. Once set, requests that name none are answered with a `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)). Must be later than `moduleFallbackDeprecation`. (optional)
 
 #### Signers
 
@@ -93,11 +95,11 @@ This configuration file is used to set up and customize the service. It consists
 	+ `jsonRpcEndpoint`: The JSON-RPC endpoint of the network.
 	+ `recoveryModules`: The Social Recovery Module deployments this network serves and indexes. Each entry has:
 	  * `address`: The module address. It must be one of the [supported recovery modules](#supported-recovery-modules); any other address fails at boot.
-	  * `fallback`: Optional, `true` on at most one v0.1.0 module. Recovery requests, custodial guardian signatures and `/v1/config/getNetworkConfig` use this module; every listed module is indexed and alerted on.
+	  * `fallback`: Optional, `true` on at most one v0.1.0 module. Requests that do not name a module (see [Recovery modules in requests](#recovery-modules-in-requests)) use it, and `/v1/config/getNetworkConfig` returns it as `moduleAddress`. Every listed module is indexed and alerted on. A network without a fallback requires `moduleAddress` on every request.
 	  * `indexer`: Specifies whether the indexer covers this module, and the first indexing block for its first run
 	    - `enabled`: A boolean indicating whether this module is indexed.
 	    - `startBlock`: A number that specifies from which block the indexer starts indexing this module (should be the block at which the module was deployed). Note: this value is ignored once the module has a recorded last indexed block. A module added to a running service is indexed from this block, and alerts are sent for the events found on the way.
-	+ `recoveryModuleAddress` (legacy): A network with a single module can set this field and a network-level `indexer` block (same fields as above) instead of `recoveryModules`. The module is then the network's fallback. A network uses one shape or the other, not both. A database indexed by a version without `recoveryModules` must be started once on this legacy field, set to the module indexed so far: only it says which module the existing indexed rows came from. Until then, a network configured with `recoveryModules` refuses to start indexing.
+	+ `recoveryModuleAddress` (legacy): A network with a single module can set this field and a network-level `indexer` block (same fields as above) instead of `recoveryModules`. The module is then the network's fallback. A network uses one shape or the other, not both. A database indexed by a version without `recoveryModules` must be started once on this legacy field, set to the module indexed so far: only it says which module the existing indexed rows came from. Until then, a network configured with `recoveryModules` refuses to start indexing. The same holds for recovery and custodial signature requests made before requests named their module: at boot they are assigned to the legacy field's module, and with `recoveryModules` the service exits while any of them is unassigned.
 	+ `executeRecoveryRequests`: Controls whether the service will execute the recovery after all required signatures are collected. It has a `enabled` boolean field, and requires the `id` of a `signer` to be specified if enabled.
       + `rateLimit`: Controls the rate limiting for recovery executions by the service (omitted or `~` if no rate limit)
         * `maxPerAccount`: The maximum number of recovery executions allowed per account within the specified period.
@@ -129,6 +131,29 @@ Each variant has the same address on every network. The service takes a module's
 > [!TIP]
 The config file supports loading values from `.env`. Use `${ENV::VAR_NAME}` anywhere inside a string value and the named environment variable will be substituted in at boot. Examples: `"privateKey": "${ENV::PRIVATE_KEY}"` loads the whole field from the env variable, while `"jsonRpcEndpoint": "https://rpc.example.com/${ENV::RPC_API_KEY}"` only substitutes the key segment. Multiple substitutions in one string are supported. Missing env variables throw at boot.
 > 
+
+## Recovery modules in requests
+
+A network can serve several recovery modules, and a Safe can have more than one enabled while it moves its guardians from v0.1.0 to v0.2.0. A recovery hash, and every guardian signature over it, is valid on one module only (its EIP-712 domain holds the module address), so each recovery flow is bound to one module.
+
+* The requests that start a flow take an optional `moduleAddress`: `POST /v1/recoveries/create` and `POST /v1/auth/signature/request`. It must be one of the network's configured modules (see `modules` in `GET /v1/config/getNetworkConfig`), else the request fails with a 400. The module is saved on the request.
+* The later steps use the module saved on the request and do not accept `moduleAddress`: `POST /v1/recoveries/sign`, `/execute`, `/finalize` and `POST /v1/auth/signature/submit`. `GET /v1/recoveries/fetchById` returns the request's `moduleAddress` and its `recoveryHash`.
+* The reads `GET /v1/recoveries/fetchByAddress` and `/listByAddress` take an optional `moduleAddress` and return the requests made on that module only. Every module starts each account's recovery nonce at 0, so requests made on different modules can share a nonce.
+* `GET /v1/config/getNetworkConfig` lists every configured module as `modules: [{address, version, recoveryPeriod}]` (`recoveryPeriod` in seconds). `moduleAddress` remains the network's fallback module.
+
+When `moduleAddress` is omitted, the network's fallback module is used, as before. This default is deprecated: such responses carry the `Deprecation` and `Sunset` headers once `options.moduleFallbackDeprecation` and `options.moduleFallbackSunset` are set (both exposed to browser clients), and each use is logged (`moduleFallback: true`). After the Sunset date `moduleAddress` becomes required. Reads without `moduleAddress` return the fallback module's requests only.
+
+`create` and `signature/request` check, for the module named or the fallback:
+
+* the module is enabled on the Safe and holds guardians for it; otherwise the response says to pass the `moduleAddress` of the module that holds them. A disabled module keeps its stored guardians, so both are checked;
+* the proposed owners can be set by the module: none is the zero address, `0x0000000000000000000000000000000000000001`, the Safe itself or one of its guardians on that module, and none is listed twice. v0.1.0 used to accept such proposals but could never finalize them; they are now rejected for both versions;
+* with no `moduleAddress`, a `create` signature that is not valid for the fallback but is valid for another configured module fails with an error naming that module.
+
+An empty signature (`0x`) is accepted on v0.2.0 modules only, where it is checked with EIP-1271 (a Safe guardian that approved the recovery hash). v0.1.0 cannot execute it, so it is rejected there.
+
+**Migrating clients:** read `modules` from `/v1/config/getNetworkConfig`, sign the recovery hash of the module the Safe uses (its `getRecoveryHash`, at that module's `nonce`), and send that module as `moduleAddress` to `create`, `signature/request`, `fetchByAddress` and `listByAddress`.
+
+**Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`). Requests made before this version have no module; at boot they are assigned to the module of a legacy `recoveryModuleAddress` config (see [Networks](#networks)).
 
 ## Running
 

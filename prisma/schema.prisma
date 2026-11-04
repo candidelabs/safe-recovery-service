@@ -10,20 +10,24 @@ datasource db {
 /////////////////////////////////////////////////////////////////////////
 
 model RecoveryRequest {
-  id           String   @id @default(uuid())
-  emoji        String
-  account      String
-  chainId      Int
-  newOwners    String[]
-  newThreshold Int
-  nonce        BigInt
-  signatures   Json
-  executeData  Json
-  finalizeData Json
-  status       String
-  discoverable Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(uuid())
+  emoji         String
+  account       String
+  chainId       Int
+  newOwners     String[]
+  newThreshold  Int
+  nonce         BigInt
+  signatures    Json
+  executeData   Json
+  finalizeData  Json
+  status        String
+  discoverable  Boolean  @default(true)
+  // The module the request was made on, and its recovery hash there (a hash is valid for one module
+  // only). Nullable for rows created before requests named their module; filled at boot.
+  moduleAddress String?
+  recoveryHash  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@index([account])
 }
@@ -82,6 +86,8 @@ model AuthSignatureRequest {
   requiredVerifications Int
   guardian              String?
   signature             String?
+  // The module the custodial guardian signs for; nullable for rows created before requests named it.
+  moduleAddress         String?
   createdAt             DateTime                       @default(now())
   updatedAt             DateTime                       @updatedAt
 

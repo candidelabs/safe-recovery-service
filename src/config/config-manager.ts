@@ -29,6 +29,9 @@ type Config = {
     trustProxy: boolean | string;
     rateLimit: number | string;
     supportEmail?: string;
+    // ISO dates announced with the Deprecation / Sunset headers on requests that name no recovery module
+    moduleFallbackDeprecation?: string;
+    moduleFallbackSunset?: string;
   };
   signers: Array<{
     id: string;
@@ -98,6 +101,8 @@ export class Configuration {
   public skipFirstAccountSetupAlert!: boolean;
   public suppressAlerts!: boolean;
   public supportEmail?: string;
+  public moduleFallbackDeprecation?: Date;
+  public moduleFallbackSunset?: Date;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -224,6 +229,10 @@ export class Configuration {
       }
       this.supportEmail = options.supportEmail.trim();
     }
+
+    const {deprecation, sunset} = parseModuleFallbackDates(options);
+    this.moduleFallbackDeprecation = deprecation;
+    this.moduleFallbackSunset = sunset;
   }
 
   private initializeSigners(signers: Config["signers"]) {
@@ -481,6 +490,26 @@ export class Configuration {
     }
   }
 }
+
+// The dates the module fallback (a request that names no recovery module) was deprecated and stops
+// working; each is announced in its header once set (see utils/module-fallback.ts).
+export const parseModuleFallbackDates = (options: Pick<Config["options"], "moduleFallbackDeprecation" | "moduleFallbackSunset">) => {
+  const parse = (field: "moduleFallbackDeprecation" | "moduleFallbackSunset"): Date | undefined => {
+    const value = options[field];
+    if (value === undefined || value === "" || value === "~") return undefined;
+    const date = typeof value === "string" && Joi.date().iso().validate(value).error === undefined ? new Date(value) : undefined;
+    if (!date) {
+      throw new Error(`Options.${field} must be an ISO 8601 date, e.g. 2027-02-01.`);
+    }
+    return date;
+  };
+  const deprecation = parse("moduleFallbackDeprecation");
+  const sunset = parse("moduleFallbackSunset");
+  if (deprecation && sunset && sunset <= deprecation) {
+    throw new Error("Options.moduleFallbackSunset must be later than options.moduleFallbackDeprecation.");
+  }
+  return {deprecation, sunset};
+};
 
 // 'recoveryModules' lists every module the network serves and indexes, each with its own 'indexer'
 // block; version and recovery period come from the pinned registry. The legacy 'recoveryModuleAddress'

@@ -9,7 +9,7 @@ import {ChangedThresholdEvent} from "../src/models/events/changed-threshold-even
 import {RecoveryExecutedEvent} from "../src/models/events/recovery-executed-event";
 import {RecoveryFinalizedEvent} from "../src/models/events/recovery-finalized-event";
 import {RecoveryCanceledEvent} from "../src/models/events/recovery-canceled-event";
-import {assignLegacyRows} from "../src/services/recovery-modules.service";
+import {assignLegacyRequestRows, assignLegacyRows} from "../src/services/recovery-modules.service";
 import {Network} from "../src/models/network";
 
 jest.setTimeout(120000);
@@ -146,6 +146,37 @@ describe('recovery module topics', () => {
     });
 });
 
+describe('recovery module execution', () => {
+    const signatures = [[guardian, "0x1234"]];
+    const request = {account, newOwners, newThreshold: 2, nonce: 7n, signatures};
+
+    test('v0.1.0 executes without the nonce', () => {
+        const callData = v0_1_0.encodeExecute(request);
+        expect(callData.slice(0, 10)).toBe("0x0728e1e7");
+        const args = v0_1_0.contract.interface.decodeFunctionData("multiConfirmRecovery", callData);
+        expect(args._wallet).toBe(account);
+        expect(args._newOwners).toEqual(newOwners);
+        expect(args._newThreshold.toNumber()).toBe(2);
+        expect(args._signatures.map((s: any) => [s.signer, s.signature])).toEqual(signatures);
+        expect(args._execute).toBe(true);
+    });
+
+    test('v0.2.0 binds the confirmations to the request nonce', () => {
+        const callData = v0_2_0.encodeExecute(request);
+        expect(callData.slice(0, 10)).toBe("0x9771fa44");
+        const args = v0_2_0.contract.interface.decodeFunctionData("multiConfirmRecovery", callData);
+        expect(args._nonce.toBigInt()).toBe(7n);
+        expect(args._newOwners).toEqual(newOwners);
+        expect(args._signatures.map((s: any) => [s.signer, s.signature])).toEqual(signatures);
+        expect(args._execute).toBe(true);
+    });
+
+    test('only v0.2.0 can relay an empty signature', () => {
+        expect(v0_1_0.acceptsRelayedEmptySignature).toBe(false);
+        expect(v0_2_0.acceptsRelayedEmptySignature).toBe(true);
+    });
+});
+
 describe('recovery module log decoding', () => {
     test('decodes guardian events on both versions', () => {
         for (const module of [v0_1_0, v0_2_0]) {
@@ -274,5 +305,37 @@ describe('rows indexed before modules were tracked', () => {
         seed();
         await assignLegacyRows(network(v0_1_0));
         await expect(assignLegacyRows(network(undefined))).resolves.toBeUndefined();
+    });
+});
+
+describe('requests made before requests named their module', () => {
+    const network = (legacyModule?: RecoveryModule) => ({chainId: 10, name: "test", legacyModule}) as unknown as Network;
+    const seed = () => {
+        mockTables.recoveryRequest = [
+            {id: "old", chainId: 10, moduleAddress: null},
+            {id: "bound", chainId: 10, moduleAddress: v0_2_0.address},
+            {id: "other-chain", chainId: 1, moduleAddress: null},
+        ];
+        mockTables.authSignatureRequest = [{id: "custodial", chainId: 10, moduleAddress: null}];
+    };
+
+    test('go to the module of a legacy recoveryModuleAddress config', async () => {
+        seed();
+        await assignLegacyRequestRows(network(v0_1_0));
+        expect(mockTables.recoveryRequest.map(r => r.moduleAddress)).toEqual([v0_1_0.address, v0_2_0.address, null]);
+        expect(mockTables.authSignatureRequest[0].moduleAddress).toBe(v0_1_0.address);
+    });
+
+    test('block recoveryModules, which cannot say which module they were made on', async () => {
+        seed();
+        await expect(assignLegacyRequestRows(network(undefined))).rejects.toThrow("2 recovery or signature requests made before");
+        expect(mockTables.recoveryRequest[0].moduleAddress).toBeNull();
+        expect(mockTables.authSignatureRequest[0].moduleAddress).toBeNull();
+    });
+
+    test('no longer block recoveryModules once assigned', async () => {
+        seed();
+        await assignLegacyRequestRows(network(v0_1_0));
+        await expect(assignLegacyRequestRows(network(undefined))).resolves.toBeUndefined();
     });
 });

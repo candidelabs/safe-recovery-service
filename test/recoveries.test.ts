@@ -141,7 +141,9 @@ describe('recoveries', ()=>{
         });
 
 
-        it('should return a 400 if signer is not a guardian', async ()=>{
+        // The Safe has neither the fallback module enabled nor guardians on it, so the module check answers
+        // before the signer check.
+        it('should return a 400 if the recovery module is not enabled on the account', async ()=>{
             await supertest(app).post('/v1/recoveries/create/')
             .send({
                 "account": "0x874B11D3A2E44C161F83eD2fb4bBA1fbE277446a",
@@ -152,8 +154,8 @@ describe('recoveries', ()=>{
                 "signature": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             })
             .expect(400).then((response) => {
-                expect(response.body.message).toBe(
-                    "Signer not a guardian"
+                expect(response.body.message).toContain(
+                    "is not enabled on this account; pass moduleAddress"
                 )
             });
         });

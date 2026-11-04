@@ -3,19 +3,28 @@ import {BigNumber, ethers} from "ethers";
 import {
   ApiError,
   createEmojiSet,
-  getSafeInstance,
   isValidSignature,
   parseSeconds,
 } from "../utils";
 import {prisma} from "../config/prisma-client";
-import {Network} from "../models/network";
+import {ModuleSelection, Network} from "../models/network";
+import {RecoveryModule} from "../models/recovery-module";
 import {Prisma, RecoveryRequest} from "@prisma/client";
 import {ChainExecutor} from "./chain-executor.service";
+import {checkRecoveryModule} from "./recovery-modules.service";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "recoveries" });
 
-export const create = async (account: string, newOwners: string[], newThreshold: number, chainId: number, signer: string, signature: string) => {
+export const create = async (
+  account: string,
+  newOwners: string[],
+  newThreshold: number,
+  chainId: number,
+  signer: string,
+  signature: string,
+  {module: recoveryModule, fallback}: ModuleSelection,
+) => {
   const network = Network.instances.get(chainId.toString())!;
   const last5Minutes = new Date(Date.now() - (5*60*1000));
   const lastRecoveryRequest = await prisma.recoveryRequest.findFirst({
@@ -31,23 +40,16 @@ export const create = async (account: string, newOwners: string[], newThreshold:
       `You can only create 1 recovery request every 5 minutes`
     );
   }
-  try {
-    const safeWallet = getSafeInstance(account, network.jsonRPCProvider);
-    await safeWallet.nonce();
-  } catch (e) {
-    throw new ApiError(
-      httpStatus.BAD_REQUEST,
-      `Account address is not a safe smart contract account`
-    );
-  }
-  const recoveryModule = network.requireFallbackModule();
+  await checkRecoveryModule(network, recoveryModule, account, newOwners);
   const recoveryNonce: BigNumber = await recoveryModule.contract.nonce(account);
+  const _newOwners = newOwners.map(e => e.toLowerCase());
+  const recoveryHash = await recoveryModule.getRecoveryHash(account, _newOwners, newThreshold, recoveryNonce.toBigInt());
   let recoveryRequest = await prisma.recoveryRequest.create(
     {
       data: {
         emoji: createEmojiSet(15, false),
         account: account.toLowerCase(),
-        newOwners: newOwners.map(e => e.toLowerCase()),
+        newOwners: _newOwners,
         newThreshold: newThreshold,
         chainId,
         nonce: recoveryNonce.toBigInt(),
@@ -56,17 +58,25 @@ export const create = async (account: string, newOwners: string[], newThreshold:
         finalizeData: {sponsored: false, transactionHash: ""},
         status: "PENDING",
         discoverable: false,
+        moduleAddress: recoveryModule.address,
+        recoveryHash,
       }
     }
   );
   try {
-    await signRecoveryHash(recoveryRequest, signer, signature);
+    await addSignature(recoveryRequest, recoveryModule, signer, signature, fallback);
     recoveryRequest = await prisma.recoveryRequest.update({
       data: {discoverable: true},
       where: {id: recoveryRequest.id}
     });
     log.info(
-      { recoveryRequestId: recoveryRequest.id, account: recoveryRequest.account, chainId, nonce: recoveryRequest.nonce },
+      {
+        recoveryRequestId: recoveryRequest.id,
+        account: recoveryRequest.account,
+        chainId,
+        moduleAddress: recoveryModule.address,
+        nonce: recoveryRequest.nonce,
+      },
       "recovery request created"
     );
   } catch (e) {
@@ -96,29 +106,50 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
   }else{
     recoveryRequest = id;
   }
-  const network = Network.instances.get(recoveryRequest!.chainId.toString())!;
-  const recoveryModule = network.requireFallbackModule();
-  const isSignerAGuardian: boolean = await recoveryModule.contract.isGuardian(recoveryRequest!.account, signer);
+  const network = Network.instances.get(recoveryRequest.chainId.toString())!;
+  const recoveryModule = network.requireRequestModule(recoveryRequest.moduleAddress);
+  return addSignature(recoveryRequest, recoveryModule, signer, signature, false);
+};
+
+// fallback: the request named no module (create only), so a signature made for another module gets an
+// error naming it.
+const addSignature = async (
+  recoveryRequest: RecoveryRequest,
+  recoveryModule: RecoveryModule,
+  signer: string,
+  signature: string,
+  fallback: boolean,
+) => {
+  const network = Network.instances.get(recoveryRequest.chainId.toString())!;
+  const isSignerAGuardian: boolean = await recoveryModule.contract.isGuardian(recoveryRequest.account, signer);
   if (!isSignerAGuardian) {
     throw new ApiError(
       httpStatus.BAD_REQUEST,
       `Signer not a guardian`
     );
   }
-  //
-  const recoveryHash = await getRecoveryRequestExecutionHash(recoveryModule.contract, recoveryRequest!);
-  let validSignature: boolean;
-  try {
-    validSignature = await isValidSignature(
-      signer,
-      ethers.utils.arrayify(recoveryHash),
-      ethers.utils.arrayify(signature),
-      network.jsonRPCProvider,
+  if (signature === "0x" && !recoveryModule.acceptsRelayedEmptySignature) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      `Empty signatures cannot be relayed on the ${recoveryModule.label} recovery module`
     );
-  } catch (e) {
-    validSignature = false;
   }
-  if (!validSignature){
+  //
+  const recoveryHash = recoveryRequest.recoveryHash ?? await recoveryModule.getRecoveryHash(
+    recoveryRequest.account,
+    recoveryRequest.newOwners,
+    recoveryRequest.newThreshold,
+    recoveryRequest.nonce,
+  );
+  if (!await verifySignature(network, signer, recoveryHash, signature)){
+    const signedModule = fallback ? await findSignedModule(network, recoveryModule, recoveryRequest, signer, signature) : undefined;
+    if (signedModule) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `Invalid signature: it was made for the ${signedModule.label} recovery module ` +
+        `${ethers.utils.getAddress(signedModule.address)}; pass it as moduleAddress`
+      );
+    }
     throw new ApiError(
       httpStatus.BAD_REQUEST,
       `Invalid signature`
@@ -148,20 +179,49 @@ export const signRecoveryHash = async (id: string | RecoveryRequest, signer: str
   return true;
 };
 
-const getRecoveryRequestExecutionHash = async (socialRecoveryModule: ethers.Contract, recoveryRequest: RecoveryRequest | Prisma.RecoveryRequestCreateInput) => {
-  return await socialRecoveryModule.getRecoveryHash(
-    recoveryRequest.account,
-    recoveryRequest.newOwners,
-    recoveryRequest.newThreshold,
-    recoveryRequest.nonce,
-  );
+const verifySignature = async (network: Network, signer: string, hash: string, signature: string): Promise<boolean> => {
+  try {
+    return await isValidSignature(
+      signer,
+      ethers.utils.arrayify(hash),
+      ethers.utils.arrayify(signature),
+      network.jsonRPCProvider,
+    );
+  } catch (e) {
+    return false;
+  }
 };
 
-export const findByAccountAddress = async (account: string, chainId: number, nonce: bigint) => {
+// The other configured module whose recovery hash (at that module's current nonce) the signature is
+// valid for, if any. Runs only after a signature failed under the fallback, which keeps its RPC calls
+// off the normal path.
+const findSignedModule = async (
+  network: Network,
+  requestModule: RecoveryModule,
+  recoveryRequest: RecoveryRequest,
+  signer: string,
+  signature: string,
+): Promise<RecoveryModule | undefined> => {
+  const matches = await Promise.all(network.modules.filter((module) => module !== requestModule).map(async (module) => {
+    try {
+      const nonce: BigNumber = await module.contract.nonce(recoveryRequest.account);
+      const hash = await module.getRecoveryHash(recoveryRequest.account, recoveryRequest.newOwners, recoveryRequest.newThreshold, nonce.toBigInt());
+      return await verifySignature(network, signer, hash, signature) ? module : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }));
+  return matches.find((module) => module !== undefined);
+};
+
+// Reads filter by module: requests made on other modules can share a nonce (every module starts each
+// account's nonce at 0).
+export const findByAccountAddress = async (account: string, chainId: number, nonce: bigint, module: RecoveryModule) => {
   return prisma.recoveryRequest.findMany({
     where: {
       account: {equals: account.toLowerCase()},
       chainId: {equals: chainId},
+      moduleAddress: {equals: module.address},
       nonce: {equals: nonce},
       discoverable: {equals: true},
     }
@@ -171,6 +231,7 @@ export const findByAccountAddress = async (account: string, chainId: number, non
 export const findByAccount = async (
   account: string,
   chainId: number,
+  module: RecoveryModule,
   filters: Record<string, any>,
   orderBy?: "createdAt" | "nonce",
   order: "asc" | "desc" = "desc",
@@ -180,6 +241,7 @@ export const findByAccount = async (
   const where: Prisma.RecoveryRequestWhereInput = {
     account: { equals: account.toLowerCase() },
     chainId: { equals: chainId },
+    moduleAddress: { equals: module.address },
     discoverable: { equals: true },
   };
 
@@ -214,57 +276,50 @@ export const findByAccount = async (
   // Return results as is if executed and finalized filters are not set.
   if (filters.executed == null && filters.finalized == null) return results;
 
-  // Executed/finalized boolean filters. Requests are made on the fallback module, so only its events
-  // can match: every module starts each account's nonce at 0.
-  const network = Network.instances.get(chainId.toString())!;
-  const moduleAddress = network.requireFallbackModule().address;
-  const nonces = [...new Set(results.map(r => r.nonce))];
+  // Executed/finalized boolean filters, on the events of the requests' module only. v0.2.0 events carry
+  // the recovery hash; v0.1.0 events are matched on (newOwnersHash, newThreshold, nonce).
+  const byRecoveryHash = module.version === "0.2.0";
+  const eventWhere = {
+    account: account.toLowerCase(),
+    chainId,
+    moduleAddress: module.address,
+    ...(byRecoveryHash
+      ? { recoveryHash: { in: results.flatMap(r => r.recoveryHash ? [r.recoveryHash] : []) } }
+      : { nonce: { in: [...new Set(results.map(r => r.nonce))] } }),
+  };
 
   const [executedEvents, finalizedEvents] = await Promise.all([
-    prisma.recoveryExecutedEvent.findMany({
-      where: {
-        account: account.toLowerCase(),
-        chainId,
-        moduleAddress,
-        nonce: { in: nonces },
-      },
-    }),
-    prisma.recoveryFinalizedEvent.findMany({
-      where: {
-        account: account.toLowerCase(),
-        chainId,
-        moduleAddress,
-        nonce: { in: nonces },
-      },
-    }),
+    prisma.recoveryExecutedEvent.findMany({ where: eventWhere }),
+    prisma.recoveryFinalizedEvent.findMany({ where: eventWhere }),
   ]);
 
-  const executedEventKeys = new Set(
-    executedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
-  );
-  const finalizedEventKeys = new Set(
-    finalizedEvents.map(e => `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`)
-  );
+  const keyOfEvent = (e: { recoveryHash: string | null, newOwnersHash: string, newThreshold: bigint, nonce: bigint }) =>
+    byRecoveryHash ? e.recoveryHash : `${e.newOwnersHash}:${e.newThreshold}:${e.nonce}`;
+  const executedEventKeys = new Set(executedEvents.map(keyOfEvent));
+  const finalizedEventKeys = new Set(finalizedEvents.map(keyOfEvent));
+  // a missing key (a v0.2.0 request always stores its hash) matches no event
+  const matches = (keys: Set<string | null>, key: string | null) => key !== null && keys.has(key);
 
   const prohibitedIds = new Set<string>();
   for (const request of results) {
     // We use solidityKeccak256 because Solidity dynamic indexed types are encoded this way, see https://docs.soliditylang.org/en/v0.8.33/abi-spec.html#encoding-of-indexed-event-parameters
-    const newOwnersHash = ethers.utils.solidityKeccak256(["address[]"], [request.newOwners]).toLowerCase();
     // We explicitly cast request.newThreshold into a BigInt because FinalizedEvent.newThreshold and ExecutedEvent.newThreshold are both BigInt
-    const eventKey = `${newOwnersHash}:${BigInt(request.newThreshold)}:${request.nonce}`;
+    const eventKey = byRecoveryHash
+      ? request.recoveryHash
+      : `${ethers.utils.solidityKeccak256(["address[]"], [request.newOwners]).toLowerCase()}:${BigInt(request.newThreshold)}:${request.nonce}`;
     if (filters.executed != null){
-      if (filters.executed === true && !executedEventKeys.has(eventKey)) {
+      if (filters.executed === true && !matches(executedEventKeys, eventKey)) {
         prohibitedIds.add(request.id);
       }
-      if (filters.executed === false && executedEventKeys.has(eventKey)) {
+      if (filters.executed === false && matches(executedEventKeys, eventKey)) {
         prohibitedIds.add(request.id);
       }
     }
     if (filters.finalized != null){
-      if (filters.finalized === true && !finalizedEventKeys.has(eventKey)) {
+      if (filters.finalized === true && !matches(finalizedEventKeys, eventKey)) {
         prohibitedIds.add(request.id);
       }
-      if (filters.finalized === false && finalizedEventKeys.has(eventKey)) {
+      if (filters.finalized === false && matches(finalizedEventKeys, eventKey)) {
         prohibitedIds.add(request.id);
       }
     }
@@ -307,7 +362,7 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
     }
   }
   //
-  const recoveryModule = network.requireFallbackModule();
+  const recoveryModule = network.requireRequestModule(request.moduleAddress);
   const guardianThreshold = await recoveryModule.contract.threshold(request.account) as BigNumber;
   const accountNonce = await recoveryModule.contract.nonce(request.account) as BigNumber;
   if (!accountNonce.eq(request.nonce)){
@@ -348,20 +403,18 @@ export const sponsorExecution = async (request: RecoveryRequest) => {
       `Execution already pending`
     );
   }
-  const callData = recoveryModule.contract.interface.encodeFunctionData(
-    "multiConfirmRecovery",
-    [
-      request.account,
-      request.newOwners,
-      request.newThreshold,
-      request.signatures,
-      true,
-    ]
-  );
+  const callData = recoveryModule.encodeExecute({
+    account: request.account,
+    newOwners: request.newOwners,
+    newThreshold: request.newThreshold,
+    nonce: request.nonce,
+    signatures: request.signatures as string[][],
+  });
   const context = {
     recoveryRequestId: request.id,
     account: request.account,
     chainId: network.chainId,
+    moduleAddress: recoveryModule.address,
     signerId: network.executeRecoveryRequestConfig.signer!,
     phase: "execute",
   };
@@ -427,7 +480,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
   if (typeof finalizeData["transactionHash"] == "string" && finalizeData["transactionHash"]._0xRemove().length > 0) return finalizeData["transactionHash"];
   if (request.status === "FINALIZED") return finalizeData["transactionHash"];
   //
-  const recoveryModule = network.requireFallbackModule();
+  const recoveryModule = network.requireRequestModule(request.moduleAddress);
   //
   const onChainRequest = await recoveryModule.readRecoveryRequest(request.account);
   if (onChainRequest.executableAt === 0n){
@@ -460,6 +513,7 @@ export const sponsorFinalization = async (request: RecoveryRequest) => {
     recoveryRequestId: request.id,
     account: request.account,
     chainId: network.chainId,
+    moduleAddress: recoveryModule.address,
     signerId: network.finalizeRecoveryRequestConfig.signer!,
     phase: "finalize",
   };

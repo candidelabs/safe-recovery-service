@@ -13,8 +13,14 @@ export const getNetworkConfig = catchAsync(async (req, res) => {
   const result: Record<string, any> = {
     name: network.name,
     chainId: params.chainId,
-    // the module requests use when they do not name one; absent on a chain without a fallback
+    // the module requests use when they do not name one, until the Sunset date; absent on a chain without a fallback
     moduleAddress: network.fallbackModule ? ethers.utils.getAddress(network.fallbackModule.address) : undefined,
+    // every module a request can name with moduleAddress (recoveryPeriod in seconds)
+    modules: network.modules.map((module) => ({
+      address: ethers.utils.getAddress(module.address),
+      version: module.version,
+      recoveryPeriod: module.recoveryPeriod,
+    })),
     sponsorships: {
       execution: {
         enabled: false,

@@ -1,13 +1,16 @@
 import Joi from "joi";
-import {ethereumAddress, hexBigInt, hexString} from "./custom.validation";
+import {ethereumAddress, hexBigInt, hexString, newOwners} from "./custom.validation";
 import {Network} from "../models/network";
 
+// moduleAddress names the recovery module a flow runs on; when omitted, the chain's fallback module is
+// used until the Sunset date. Later steps (sign, execute, finalize) use the module saved on the request.
 export const create = {
   body: Joi.object().keys({
     account: Joi.custom(ethereumAddress).required(),
-    newOwners: Joi.array().items(Joi.custom(ethereumAddress).required()).min(1),
+    newOwners: newOwners,
     newThreshold: Joi.number().integer().min(1).max(Joi.ref('newOwners.length')).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    moduleAddress: Joi.custom(ethereumAddress),
     signer: Joi.custom(ethereumAddress).required(),
     signature: Joi.custom(hexString).required(),
   }),
@@ -25,6 +28,7 @@ export const fetchByAddress = {
   query: Joi.object().keys({
     account: Joi.custom(ethereumAddress).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    moduleAddress: Joi.custom(ethereumAddress),
     nonce: Joi.custom(hexBigInt).required(),
   }),
 };
@@ -33,6 +37,7 @@ export const listByAddress = {
   query: Joi.object().keys({
     account: Joi.custom(ethereumAddress).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    moduleAddress: Joi.custom(ethereumAddress),
     // nonce comparison operators
     nonce: Joi.custom(hexBigInt),
     nonce__lt: Joi.custom(hexBigInt),

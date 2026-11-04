@@ -2,10 +2,11 @@ import httpStatus from "http-status";
 import {BigNumber} from "ethers";
 import {ApiError, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
-import {Network} from "../models/network";
+import {ModuleSelection, Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
+import {checkRecoveryModule} from "./recovery-modules.service";
 
 export const createRegistration = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
@@ -153,7 +154,13 @@ export const deleteRegistration = async (registrationId: string, message: string
   return true;
 };
 
-export const requestSignature = async (account: string, newOwners: string[], newThreshold: number, chainId: number) => {
+export const requestSignature = async (
+  account: string,
+  newOwners: string[],
+  newThreshold: number,
+  chainId: number,
+  {module: recoveryModule}: ModuleSelection,
+) => {
   const network = Network.instances.get(chainId.toString())!;
   if (!network.guardian){
     throw new ApiError(httpStatus.BAD_REQUEST, `Recovery Guardian is not enabled on this network`);
@@ -172,12 +179,11 @@ export const requestSignature = async (account: string, newOwners: string[], new
   if (accountRegistrations.length == 0){
     throw new ApiError(httpStatus.BAD_REQUEST, `No registrations found for this account on this chainId`);
   }
-  const recoveryModule = network.requireFallbackModule();
-  const recoveryNonce: BigNumber = await recoveryModule.contract.nonce(account);
-  const isGuardianEnabled = await recoveryModule.contract.isGuardian(account, guardianAddress);
-  if (!isGuardianEnabled){
+  const guardians = await checkRecoveryModule(network, recoveryModule, account, newOwners);
+  if (!guardians.includes(guardianAddress)){
     throw new ApiError(httpStatus.BAD_REQUEST, `This account has not set '${guardianAddress}' as a guardian`);
   }
+  const recoveryNonce: BigNumber = await recoveryModule.contract.nonce(account);
   //
   const requiredVerifications = Math.floor(accountRegistrations.length/2)+1;
   const authSignatureRequest = await prisma.authSignatureRequest.create({
@@ -188,6 +194,7 @@ export const requestSignature = async (account: string, newOwners: string[], new
       chainId,
       nonce: recoveryNonce.toBigInt(),
       requiredVerifications,
+      moduleAddress: recoveryModule.address,
     }
   });
   const auths: {challengeId: string, channel: string, target: string}[] = [];
@@ -240,7 +247,8 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
   if (!network.guardian){
     throw new ApiError(httpStatus.BAD_REQUEST, `Recovery Guardian is not enabled on this network`);
   }
-  const recoveryModule = network.requireFallbackModule();
+  // The module saved on the request: a signature for another module would look valid but never verify on chain.
+  const recoveryModule = network.requireRequestModule(signatureRequest.moduleAddress);
   const signer = Signers.instance().getSigner(network.guardian)!;
   const guardianAddress = (await signer.signer()).toLowerCase();
   const isGuardianEnabled = await recoveryModule.contract.isGuardian(signatureRequest.account, guardianAddress);
@@ -299,7 +307,7 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
     if (challenge.verified) collectedVerifications++;
   }
   if (collectedVerifications >= signatureRequest.requiredVerifications){
-    const recoveryHash = await recoveryModule.contract.getRecoveryHash(
+    const recoveryHash = await recoveryModule.getRecoveryHash(
       signatureRequest.account,
       signatureRequest.newOwners,
       signatureRequest.newThreshold,

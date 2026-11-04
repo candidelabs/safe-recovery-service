@@ -8,7 +8,9 @@
     "trustProxy": true,
     "sentryDSN": "...",
     "rateLimit": 50,
-    "supportEmail": "support@example.com"
+    "supportEmail": "support@example.com",
+    "moduleFallbackDeprecation": "~",
+    "moduleFallbackSunset": "~"
   },
 
   "signers": [

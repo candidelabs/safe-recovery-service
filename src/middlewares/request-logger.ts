@@ -8,7 +8,7 @@ const log = logger.child({ component: "http" });
 // Full pattern of the matched route, e.g. /v1/alerts/subscribe. Express restores req.baseUrl to ""
 // before the app-level error handlers run, so once the response is finished the mount prefix is
 // recovered by matching req.route.path against the end of the request path.
-function routePattern(req: Request): string | undefined {
+export function routePattern(req: Request): string | undefined {
   const routePath: unknown = req.route?.path;
   if (typeof routePath !== "string") return undefined;
   const requestPath = (req.originalUrl ?? req.url ?? "").split("?")[0];

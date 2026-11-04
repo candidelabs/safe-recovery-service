@@ -75,14 +75,49 @@ export class Network {
     return this.modules.find((module) => module.address === _address);
   }
 
-  // Request flows use the fallback module until requests can name their module.
+  // The module a request that starts a flow names, or the fallback when it names none.
+  public resolveModule(moduleAddress?: string): ModuleSelection {
+    if (moduleAddress === undefined) {
+      return {module: this.requireFallbackModule(), fallback: true};
+    }
+    const module = this.getModule(moduleAddress);
+    if (!module) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `Recovery module ${moduleAddress} is not configured on this network (${this.chainId})`
+      );
+    }
+    return {module, fallback: false};
+  }
+
   public requireFallbackModule(): RecoveryModule {
     if (!this.fallbackModule) {
       throw new ApiError(
         httpStatus.BAD_REQUEST,
-        `No default recovery module is configured on this network (${this.chainId})`
+        `No default recovery module is configured on this network (${this.chainId}); pass moduleAddress`
       );
     }
     return this.fallbackModule;
   }
+
+  // The module a stored request was made on. Later steps of a flow always use it, never a module derived again.
+  public requireRequestModule(moduleAddress: string | null): RecoveryModule {
+    if (!moduleAddress) {
+      // only between boot and the assignment of rows made before requests named their module
+      throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, `This request is not bound to a recovery module yet, try again shortly`);
+    }
+    const module = this.getModule(moduleAddress);
+    if (!module) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `The recovery module of this request (${moduleAddress}) is no longer configured on this network (${this.chainId})`
+      );
+    }
+    return module;
+  }
+}
+
+export interface ModuleSelection {
+  module: RecoveryModule;
+  fallback: boolean; // the request named no module
 }

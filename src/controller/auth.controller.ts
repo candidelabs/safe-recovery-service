@@ -1,5 +1,6 @@
 import * as authService from "../services/auth.service";
 import {catchAsync} from "../utils";
+import {selectRecoveryModule} from "../utils/module-fallback";
 
 interface CreateRegistrationBody {
   account: string;
@@ -33,6 +34,7 @@ interface RequestSignatureBody {
   newOwners: string[];
   newThreshold: number;
   chainId: number;
+  moduleAddress?: string;
 }
 
 interface SubmitSignatureChallengeBody {
@@ -89,11 +91,13 @@ export const deleteRegistration = catchAsync(async (req, res) => {
 
 export const requestSignature = catchAsync(async (req, res) => {
   const params = req.body as RequestSignatureBody;
+  const selection = selectRecoveryModule(req, res, params.chainId, params.moduleAddress);
   const response = await authService.requestSignature(
     params.account,
     params.newOwners,
     params.newThreshold,
-    params.chainId
+    params.chainId,
+    selection,
   );
   res.send(response);
 });

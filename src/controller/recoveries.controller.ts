@@ -1,12 +1,14 @@
 import httpStatus from "http-status";
 import {ApiError, catchAsync, JsonBigIntParser} from "../utils";
 import * as RecoveriesService from "../services/recoveries.service";
+import {selectRecoveryModule} from "../utils/module-fallback";
 
 interface CreateRecoveryBody {
   account: string;
   newOwners: string[];
   newThreshold: number;
   chainId: number;
+  moduleAddress?: string;
   signer: string;
   signature: string;
 }
@@ -19,13 +21,15 @@ interface SignRecoveryBody {
 
 export const create = catchAsync(async (req, res) => {
   const params = req.body as CreateRecoveryBody;
+  const selection = selectRecoveryModule(req, res, params.chainId, params.moduleAddress);
   const response = await RecoveriesService.create(
     params.account,
     params.newOwners,
     params.newThreshold,
     params.chainId,
     params.signer,
-    params.signature
+    params.signature,
+    selection,
   );
 
   res.send(JsonBigIntParser(response));
@@ -41,31 +45,36 @@ export const sign = catchAsync(async (req, res) => {
 });
 
 export const fetchByAddress = catchAsync(async (req, res) => {
-  const { account, chainId, nonce } = req.query as unknown as {
+  const { account, chainId, moduleAddress, nonce } = req.query as unknown as {
     account: string;
     chainId: number;
+    moduleAddress?: string;
     nonce: string;
   };
+  const {module} = selectRecoveryModule(req, res, chainId, moduleAddress);
   const recoveryRequests = await RecoveriesService.findByAccountAddress(
     account,
     chainId,
     BigInt(nonce),
+    module,
   );
 
   res.send(JsonBigIntParser(recoveryRequests));
 });
 
 export const listByAddress = catchAsync(async (req, res) => {
-  const { account, chainId, orderBy, order, limit, offset, ...filters } = req.query as unknown as {
+  const { account, chainId, moduleAddress, orderBy, order, limit, offset, ...filters } = req.query as unknown as {
     account: string;
     chainId: number;
+    moduleAddress?: string;
     orderBy?: "createdAt" | "nonce";
     order?: "asc" | "desc";
     limit: number;
     offset: number;
     [key: string]: any;
   };
-  const recoveries = await RecoveriesService.findByAccount(account, chainId, filters, orderBy, order, limit, offset);
+  const {module} = selectRecoveryModule(req, res, chainId, moduleAddress);
+  const recoveries = await RecoveriesService.findByAccount(account, chainId, module, filters, orderBy, order, limit, offset);
   res.send(JsonBigIntParser(recoveries));
 });
 

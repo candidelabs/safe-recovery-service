@@ -1,5 +1,5 @@
 import Joi from "joi";
-import {ethereumAddress, hexString, siweMessage} from "./custom.validation";
+import {ethereumAddress, hexString, newOwners, siweMessage} from "./custom.validation";
 import {Network} from "../models/network";
 
 export const register = {
@@ -37,12 +37,14 @@ export const deleteRegistration = {
   }),
 };
 
+// moduleAddress: see recoveries.validation.ts; signature/submit signs for the module saved on the request.
 export const requestSignature = {
   body: Joi.object().keys({
     account: Joi.custom(ethereumAddress).required(),
-    newOwners: Joi.array().items(Joi.custom(ethereumAddress).required()).min(1),
+    newOwners: newOwners,
     newThreshold: Joi.number().integer().min(1).max(Joi.ref('newOwners.length')).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    moduleAddress: Joi.custom(ethereumAddress),
   }),
 };
 

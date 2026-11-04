@@ -40,6 +40,16 @@ export interface OnChainRecoveryRequest {
   nonce?: bigint; // v0.2.0 only
 }
 
+// What execution needs from a stored recovery request: signatures are [signer, signature] pairs sorted
+// by signer, as the contract requires.
+export interface ExecutableRecoveryRequest {
+  account: string;
+  newOwners: string[];
+  newThreshold: number;
+  nonce: bigint;
+  signatures: string[][];
+}
+
 type LogPosition = [blockNumber: number, transactionIndex: number, logIndex: number, transactionHash: string];
 
 const v0_1_0Interface = new ethers.utils.Interface(socialSourceV0_1_0.abi);
@@ -90,7 +100,21 @@ export abstract class RecoveryModule {
     return `v${this.version} (${formatRecoveryPeriod(this.recoveryPeriod)})`;
   }
 
+  // Whether an empty signature ("0x") can be relayed: v0.2.0 checks it through EIP-1271 (a Safe guardian
+  // that pre-approved the hash), v0.1.0 cannot execute it.
+  public abstract readonly acceptsRelayedEmptySignature: boolean;
+
   public abstract readRecoveryRequest(account: string): Promise<OnChainRecoveryRequest>;
+
+  // The hash guardians sign (lower case). Its EIP-712 domain holds the module's address and version,
+  // so a hash and its signatures are valid on one module only.
+  public async getRecoveryHash(account: string, newOwners: string[], newThreshold: number, nonce: bigint): Promise<string> {
+    const hash: string = await this.contract.getRecoveryHash(account, newOwners, newThreshold, nonce);
+    return hash.toLowerCase();
+  }
+
+  // Calldata for multiConfirmRecovery with execute=true.
+  public abstract encodeExecute(request: ExecutableRecoveryRequest): string;
 
   // Decodes a log emitted by this module; undefined for events the indexer does not store.
   public decodeLog(log: ethers.providers.Log, chainId: number): IndexedEvent | undefined {
@@ -125,6 +149,7 @@ export abstract class RecoveryModule {
 
 class RecoveryModuleV0_1_0 extends RecoveryModule {
   public readonly topics = eventTopics(v0_1_0Interface);
+  public readonly acceptsRelayedEmptySignature = false;
 
   constructor(variant: RecoveryModuleVariant, fallback: boolean, indexer: RecoveryModuleIndexerConfig, provider: ethers.providers.Provider) {
     super(variant, fallback, indexer, v0_1_0Interface, provider);
@@ -138,6 +163,13 @@ class RecoveryModuleV0_1_0 extends RecoveryModule {
       newOwners: (request.newOwners as string[]).map((owner) => owner.toLowerCase()),
       executableAt: toBigInt(request.executeAfter),
     };
+  }
+
+  public encodeExecute(request: ExecutableRecoveryRequest): string {
+    return this.contract.interface.encodeFunctionData(
+      "multiConfirmRecovery",
+      [request.account, request.newOwners, request.newThreshold, request.signatures, true],
+    );
   }
 
   // newOwners is an indexed address[], so the log only carries its hash.
@@ -174,6 +206,7 @@ class RecoveryModuleV0_1_0 extends RecoveryModule {
 
 class RecoveryModuleV0_2_0 extends RecoveryModule {
   public readonly topics = eventTopics(v0_2_0Interface);
+  public readonly acceptsRelayedEmptySignature = true;
 
   constructor(variant: RecoveryModuleVariant, fallback: boolean, indexer: RecoveryModuleIndexerConfig, provider: ethers.providers.Provider) {
     super(variant, fallback, indexer, v0_2_0Interface, provider);
@@ -188,6 +221,14 @@ class RecoveryModuleV0_2_0 extends RecoveryModule {
       executableAt: toBigInt(request.executableAt),
       nonce: toBigInt(request.nonce),
     };
+  }
+
+  // The confirmations are bound to the request's nonce: the contract rejects any other.
+  public encodeExecute(request: ExecutableRecoveryRequest): string {
+    return this.contract.interface.encodeFunctionData(
+      "multiConfirmRecovery",
+      [request.account, request.newOwners, request.newThreshold, request.nonce, request.signatures, true],
+    );
   }
 
   // newOwners is in the log data and recoveryHash is indexed. newOwnersHash is computed the way
