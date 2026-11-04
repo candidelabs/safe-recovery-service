@@ -1,3 +1,4 @@
+import {ethers} from "ethers";
 import {catchAsync} from "../utils";
 import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
@@ -12,7 +13,8 @@ export const getNetworkConfig = catchAsync(async (req, res) => {
   const result: Record<string, any> = {
     name: network.name,
     chainId: params.chainId,
-    moduleAddress: network.recoveryModuleAddress,
+    // the module requests use when they do not name one; absent on a chain without a fallback
+    moduleAddress: network.fallbackModule ? ethers.utils.getAddress(network.fallbackModule.address) : undefined,
     sponsorships: {
       execution: {
         enabled: false,

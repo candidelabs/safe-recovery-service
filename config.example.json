@@ -80,7 +80,16 @@
       "enabled": true,
       "chainId": 11155111,
       "jsonRpcEndpoint": "https://ethereum-sepolia-rpc.publicnode.com",
-      "recoveryModuleAddress": "0x949d01d424bE050D09C16025dd007CB59b3A8c66",
+      "recoveryModules": [
+        {"address": "0x949d01d424bE050D09C16025dd007CB59b3A8c66", "fallback": true, "indexer": {"enabled": true, "startBlock": 4337}},
+        {"address": "0x38275826E1933303E508433dD5f289315Da2541c", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0x088f6cfD8BB1dDb1BB069CCb3fc1A98927D233f2", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0x9BacD92F4687Db306D7ded5d4513a51EA05df25b", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0x4dF6081A82E07A7cD99aEf91C72d12a5138e468B", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0x00480F5ecC008995469fA7e12c70Ef3DC9FEe7fD", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0xEaC444E2F28469E641215F129874Aff8294cAfE0", "indexer": {"enabled": true, "startBlock": "<deployment block>"}},
+        {"address": "0x4d92D03a47468d9FC62495d85E3F205b4616FC5c", "indexer": {"enabled": true, "startBlock": "<deployment block>"}}
+      ],
       "executeRecoveryRequests": {
         "enabled": false,
         "rateLimit": "~"
@@ -94,11 +103,7 @@
         }
       },
       "guardian": "signer-1",
-      "alerts": "alert-2",
-      "indexer": {
-        "enabled": true,
-        "startBlock": 4337
-      }
+      "alerts": "alert-2"
     }
   }
 }

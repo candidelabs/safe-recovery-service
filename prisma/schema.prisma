@@ -145,16 +145,20 @@ model AlertLog {
 model IndexerData {
   id                 String   @id @default(uuid())
   chainId            Int
+  moduleAddress      String?
   latestIndexedBlock Int
   active             Boolean
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  @@unique([chainId, moduleAddress])
 }
 
 model GuardianAddedEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  moduleAddress    String?
   guardian         String
   transactionHash  String
   blockNumber      Int
@@ -168,6 +172,7 @@ model GuardianRevokedEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  moduleAddress    String?
   guardian         String
   transactionHash  String
   blockNumber      Int
@@ -181,6 +186,7 @@ model ThresholdChangedEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  moduleAddress    String?
   threshold        BigInt
   transactionHash  String
   blockNumber      Int
@@ -194,6 +200,9 @@ model RecoveryExecutedEvent {
   id                     String   @id @default(uuid())
   account                String
   chainId                Int
+  moduleAddress          String?
+  recoveryHash           String?
+  newOwners              String[] @default([])
   newOwnersHash          String
   newThreshold           BigInt
   nonce                  BigInt
@@ -211,6 +220,9 @@ model RecoveryFinalizedEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  moduleAddress    String?
+  recoveryHash     String?
+  newOwners        String[] @default([])
   newOwnersHash    String
   newThreshold     BigInt
   nonce            BigInt
@@ -226,7 +238,9 @@ model RecoveryCanceledEvent {
   id               String   @id @default(uuid())
   account          String
   chainId          Int
+  moduleAddress    String?
   nonce            BigInt
+  recoveryHash     String?
   transactionHash  String
   blockNumber      Int
   transactionIndex Int

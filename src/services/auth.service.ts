@@ -1,6 +1,6 @@
 import httpStatus from "http-status";
 import {BigNumber} from "ethers";
-import {ApiError, getSocialModuleInstance, validateSIWEMessage,} from "../utils";
+import {ApiError, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
@@ -172,9 +172,9 @@ export const requestSignature = async (account: string, newOwners: string[], new
   if (accountRegistrations.length == 0){
     throw new ApiError(httpStatus.BAD_REQUEST, `No registrations found for this account on this chainId`);
   }
-  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
-  const recoveryNonce: BigNumber = await socialRecoveryModule.nonce(account);
-  const isGuardianEnabled = await socialRecoveryModule.isGuardian(account, guardianAddress);
+  const recoveryModule = network.requireFallbackModule();
+  const recoveryNonce: BigNumber = await recoveryModule.contract.nonce(account);
+  const isGuardianEnabled = await recoveryModule.contract.isGuardian(account, guardianAddress);
   if (!isGuardianEnabled){
     throw new ApiError(httpStatus.BAD_REQUEST, `This account has not set '${guardianAddress}' as a guardian`);
   }
@@ -240,10 +240,10 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
   if (!network.guardian){
     throw new ApiError(httpStatus.BAD_REQUEST, `Recovery Guardian is not enabled on this network`);
   }
-  const socialRecoveryModule = getSocialModuleInstance(network.recoveryModuleAddress, network.jsonRPCProvider);
+  const recoveryModule = network.requireFallbackModule();
   const signer = Signers.instance().getSigner(network.guardian)!;
   const guardianAddress = (await signer.signer()).toLowerCase();
-  const isGuardianEnabled = await socialRecoveryModule.isGuardian(signatureRequest.account, guardianAddress);
+  const isGuardianEnabled = await recoveryModule.contract.isGuardian(signatureRequest.account, guardianAddress);
   if (!isGuardianEnabled){
     throw new ApiError(httpStatus.BAD_REQUEST, `This account has not set '${guardianAddress}' as a guardian`);
   }
@@ -299,7 +299,7 @@ export const submitSignatureRequestChallenge = async (requestId: string, challen
     if (challenge.verified) collectedVerifications++;
   }
   if (collectedVerifications >= signatureRequest.requiredVerifications){
-    const recoveryHash = await socialRecoveryModule.getRecoveryHash(
+    const recoveryHash = await recoveryModule.contract.getRecoveryHash(
       signatureRequest.account,
       signatureRequest.newOwners,
       signatureRequest.newThreshold,
