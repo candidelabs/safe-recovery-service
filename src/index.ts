@@ -73,17 +73,8 @@ app.use(errorConverter);
 // handle error
 app.use(errorHandler);
 
-app.listen(configuration.port, () => {
+const listen = () => app.listen(configuration.port, () => {
   logger.info({ port: configuration.port }, "server listening");
-  //
-  // Requests made before they named their module get it now, whether or not the indexer runs.
-  Promise.all(Network.instances.instances.map(assignLegacyRequestRows))
-    .catch((error) => {
-      // Serving them on a guessed module would sign and execute against the wrong contract.
-      logger.fatal({ err: error }, "legacy requests cannot be assigned to a recovery module");
-      logger.flush();
-      process.exit(1);
-    });
   releaseOrphanedSponsorships()
     .then((count) => {
       if (count > 0) logger.warn({ count }, "released orphaned sponsorship claims left by a previous run");
@@ -95,3 +86,13 @@ app.listen(configuration.port, () => {
     startSendNotificationsCronJob();
   })
 });
+
+// Requests made before they named their module get it before the server takes any request, whether or not
+// the indexer runs.
+Promise.all(Network.instances.instances.map(assignLegacyRequestRows))
+  .then(listen, (error) => {
+    // Serving them on a guessed module would sign and execute against the wrong contract.
+    logger.fatal({ err: error }, "legacy requests cannot be assigned to a recovery module");
+    logger.flush();
+    process.exit(1);
+  });

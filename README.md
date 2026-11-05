@@ -53,7 +53,7 @@ This configuration file is used to set up and customize the service. It consists
 * `skipFirstAccountSetupAlert`: When set to `true`, suppresses the first alert for `GuardianAdded` or `ChangedThreshold` events if the account has no previously indexed events on the current chain. This avoids noisy alerts during initial account setup. (optional, default: `false`)
 * `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes. (optional)
 * `moduleFallbackDeprecation`: ISO 8601 date (e.g. `"2026-11-15"`) since which a request that names no recovery module is deprecated. Once set, such requests are answered with a `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)). (optional)
-* `moduleFallbackSunset`: ISO 8601 date after which a request must name its recovery module. Once set, requests that name none are answered with a `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)). Must be later than `moduleFallbackDeprecation`. (optional)
+* `moduleFallbackSunset`: ISO 8601 date announced as the end of requests that name no recovery module. Once set, such requests are answered with a `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)). The header only announces the date: the service keeps serving such requests after it, until the operator removes `fallback: true` from the network's modules (see [Recovery modules in requests](#recovery-modules-in-requests)). Must be later than `moduleFallbackDeprecation`. (optional)
 
 #### Signers
 
@@ -141,7 +141,7 @@ A network can serve several recovery modules, and a Safe can have more than one 
 * The reads `GET /v1/recoveries/fetchByAddress` and `/listByAddress` take an optional `moduleAddress` and return the requests made on that module only. Every module starts each account's recovery nonce at 0, so requests made on different modules can share a nonce.
 * `GET /v1/config/getNetworkConfig` lists every configured module as `modules: [{address, version, recoveryPeriod}]` (`recoveryPeriod` in seconds). `moduleAddress` remains the network's fallback module.
 
-When `moduleAddress` is omitted, the network's fallback module is used, as before. This default is deprecated: such responses carry the `Deprecation` and `Sunset` headers once `options.moduleFallbackDeprecation` and `options.moduleFallbackSunset` are set (both exposed to browser clients), and each use is logged (`moduleFallback: true`). After the Sunset date `moduleAddress` becomes required. Reads without `moduleAddress` return the fallback module's requests only.
+When `moduleAddress` is omitted, the network's fallback module is used, as before. This default is deprecated: such responses carry the `Deprecation` and `Sunset` headers once `options.moduleFallbackDeprecation` and `options.moduleFallbackSunset` are set (both exposed to browser clients), and each use is logged (`moduleFallback: true`). The headers only announce the dates: the service does not reject such requests after the Sunset date. The operator ends the fallback by removing `fallback: true` from the network's `recoveryModules` (a legacy `recoveryModuleAddress` is always the fallback), after which `moduleAddress` is required and a request without it fails with a 400. Reads without `moduleAddress` return the fallback module's requests only.
 
 `create` and `signature/request` check, for the module named or the fallback:
 
