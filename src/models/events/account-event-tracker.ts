@@ -18,6 +18,8 @@ interface SubscriptionData {
 export class AccountEventTracker {
   private static _instance: AccountEventTracker;
   private subscriptions = new Map<string, SubscriptionData[]>();
+  // Set once loadSubscriptions has read the active subscriptions; the indexer stores no events before that.
+  public subscriptionsLoaded = false;
   // account -> chainId -> module address -> buffered events
   private eventsByAccount: Map<string, Map<number, Map<string, IndexedEvent[]>>>;
 
@@ -44,6 +46,7 @@ export class AccountEventTracker {
         target: subscription.target
       });
     }
+    this.subscriptionsLoaded = true;
   }
 
   public addSubscription(account: string, subscriptionId: string, channel: string, target: string){

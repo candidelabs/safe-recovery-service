@@ -283,6 +283,9 @@ export class Indexer {
   // Alerts are built per (account, module); events are then stored and every module's cursor is saved,
   // except for modules with a range still waiting to be retried.
   public async storeEvents(){
+    // Events stored before the active subscriptions are loaded would never be alerted on: until then they
+    // stay buffered and the cursors unsaved, and a later tick stores them.
+    if (!AccountEventTracker.instance().subscriptionsLoaded) return;
     this.storingBusy = true;
     try {
       const accountEventTracker = AccountEventTracker.instance();
