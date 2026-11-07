@@ -14,6 +14,32 @@ import logger from "../utils/logger";
 
 const log = logger.child({ component: "alerts" });
 
+const fetchAccountOwners = async (account: string, chainId: number): Promise<string[]> => {
+  const safeAccount = new SafeAccount(account);
+  const network = Network.instances.get(chainId.toString())!;
+  let owners: string[];
+  try {
+    owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
+  } catch (e) {
+    throw new ApiError(httpStatus.BAD_REQUEST, `Unable to fetch owners for account '${account}' on chain ${chainId}. The account may not be deployed.`);
+  }
+  return owners.map(e => e.toLowerCase());
+};
+
+const requireAccountOwner = async (account: string, owner: string, chainId: number): Promise<string[]> => {
+  const owners = await fetchAccountOwners(account, chainId);
+  if (!owners.includes(owner.toLowerCase())){
+    throw new ApiError(httpStatus.FORBIDDEN, `Owner must be a valid owner for the account provided`);
+  }
+  return owners;
+};
+
+// A subscription belongs to the account, and `owner` records who created it. A current owner of the account
+// manages its own subscriptions and the ones whose creator is no longer an owner (a recovery or an owner swap
+// replaced the key), but not those of another current owner.
+const canManageSubscription = (subscriptionOwner: string, owner: string, owners: string[]) =>
+  subscriptionOwner === owner.toLowerCase() || !owners.includes(subscriptionOwner);
+
 export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
@@ -30,19 +56,7 @@ export const createSubscription = async (account: string, owner: string, chainId
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
   await validateSIWEMessage(message, owner, chainId, statement, signature);
-  //
-  const safeAccount = new SafeAccount(account);
-  const network = Network.instances.get(chainId.toString())!;
-  let owners: string[];
-  try {
-    owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
-  } catch (e) {
-    throw new ApiError(httpStatus.BAD_REQUEST, `Unable to fetch owners for account '${account}' on chain ${chainId}. The account may not be deployed.`);
-  }
-  owners = owners.map(e => e.toLowerCase());
-  if (!owners.includes(owner.toLowerCase())){
-    throw new ApiError(httpStatus.FORBIDDEN, `Owner must be a valid owner for the account provided`);
-  }
+  await requireAccountOwner(account, owner, chainId);
   //
   target = sanitizedTarget;
   const existingSubscription = await prisma.alertSubscription.findFirst({
@@ -137,15 +151,21 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
 export const fetchSubscriptions = async (account: string, owner: string, chainId: number, message: string, signature: string) => {
   let statement = MessageStatements["alerts-fetch"];
   await validateSIWEMessage(message, owner, chainId, statement, signature);
+  const owners = await requireAccountOwner(account, owner, chainId);
   //
   const subscriptions = await prisma.alertSubscription.findMany({
     where: {
       account: {equals: account.toLowerCase()},
-      owner: {equals: owner.toLowerCase()},
-      active: {equals: true}
+      active: {equals: true},
+      // canManageSubscription, as a query
+      OR: [
+        {owner: {equals: owner.toLowerCase()}},
+        {owner: {notIn: owners}},
+      ],
     },
     select: {
       id: true,
+      owner: true,
       channel: true,
       target: true
     }
@@ -160,6 +180,10 @@ export const unsubscribe = async (subscriptionId: string, chainId: number, owner
   }
   const statement = MessageStatements["alerts-unsubscribe"];
   await validateSIWEMessage(message, owner, chainId, statement, signature);
+  const owners = await requireAccountOwner(alertSubscription.account, owner, chainId);
+  if (!canManageSubscription(alertSubscription.owner, owner, owners)){
+    throw new ApiError(httpStatus.FORBIDDEN, `This subscription belongs to another owner of the account`);
+  }
   //
   await prisma.alertSubscription.delete({
     where: {id: subscriptionId}

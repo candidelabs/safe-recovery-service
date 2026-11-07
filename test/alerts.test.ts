@@ -56,6 +56,25 @@ const params :[bigint, string, string, string][] = [
     [chainId_1, bundlerUrl_1, jsonRpcNodeProvider_1, paymasterRPC_1],
     [chainId_2, bundlerUrl_2, jsonRpcNodeProvider_2, paymasterRPC_2],
 ];
+
+const fetchStatement = "I request to retrieve all Social Recovery Module alert subscriptions linked to my account";
+const unsubscribeStatement = "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account";
+
+// a SIWE message for `address` with `statement`, signed by `wallet`
+const signStatement = async (wallet: ethers.Wallet, address: string, statement: string, chainId: bigint): Promise<[SiweMessage, string]> => {
+    const siweMessage = new SiweMessage({
+        domain: "example.com",
+        address,
+        statement,
+        uri: "https://example.com",
+        chainId: Number(chainId),
+        version: "1",
+        nonce: Math.random().toString(36).substring(2),
+        issuedAt: new Date().toISOString(),
+    });
+    return [siweMessage, await wallet.signMessage(siweMessage.prepareMessage())];
+};
+
 describe('alerts', ()=>{
     it.concurrent.each(params)('should return a 404 if wrong path' + ' for chainid: %d', async (chainId, bundlerUrl, jsonRpcNodeProvider, paymasterRPC) => {
         await supertest(app).get('/v1/alerts/wrong/').expect(404);
@@ -251,6 +270,39 @@ describe('alerts', ()=>{
                     "challenge": otp,
                 })
                 .expect(200);
+
+                console.log('alerts/subscriptions should not return the subscriptions of another current owner')
+                const [coOwnerFetchMessage, coOwnerFetchSignature] = await signStatement(
+                    secondOwner, secondOwnerPublicAddress, fetchStatement, chainId
+                );
+                const coOwnerSubscriptionsRes = await supertest(app).get('/v1/alerts/subscriptions/')
+                .query({
+                    account: smartAccount.accountAddress,
+                    owner: secondOwnerPublicAddress,
+                    chainId: Number(chainId),
+                    message: coOwnerFetchMessage,
+                    signature: coOwnerFetchSignature
+                })
+                .expect(200);
+                expect(coOwnerSubscriptionsRes.body.subscriptions.length).toBe(0);
+
+                console.log('alerts/unsubscribe should fail with 403 if the subscription belongs to another current owner')
+                const [coOwnerUnsubscribeMessage, coOwnerUnsubscribeSignature] = await signStatement(
+                    secondOwner, secondOwnerPublicAddress, unsubscribeStatement, chainId
+                );
+                await supertest(app).post('/v1/alerts/unsubscribe/')
+                .send({
+                    subscriptionId,
+                    chainId: Number(chainId),
+                    owner: secondOwnerPublicAddress,
+                    message: coOwnerUnsubscribeMessage,
+                    signature: coOwnerUnsubscribeSignature
+                })
+                .expect(403).then((response) => {
+                    expect(response.body.message).toContain(
+                        "belongs to another owner"
+                    )
+                });
             }
             else{
                 await supertest(app).post('/v1/alerts/activate/')
@@ -387,73 +439,60 @@ describe('alerts', ()=>{
                 )
             });
 
-        console.log('alerts/subscriptions should succeed with 200 to if correct signature')
+            // the recovery replaced both owners with newOwner: the subscription created by owner is now orphaned
             if(!hasUnsubscribed){
-                domain = "example.com";
-                statement = "I request to retrieve all Social Recovery Module alert subscriptions linked to my account";
-                uri = "https://example.com";
-                version = "1";
-                nonce = Math.random().toString(36).substring(2); // Generate a random nonce
-                issuedAt = new Date().toISOString();
+                hasUnsubscribed = true;
 
-                siweMessage = new SiweMessage({
-                    domain,
-                    address: ownerPublicAddress,
-                    statement,
-                    uri,
-                    chainId: Number(chainId),
-                    version, //optional
-                    nonce, //optional
-                    issuedAt, //optional
-                });
-
-                message = siweMessage.prepareMessage();
-                signature = await owner.signMessage(message);
-
-                const subscriptionsRes = await supertest(app).get('/v1/alerts/subscriptions/')
+                console.log('alerts/subscriptions should fail with 403 if the signer is no longer an owner of the account')
+                const [removedOwnerFetchMessage, removedOwnerFetchSignature] = await signStatement(
+                    owner, ownerPublicAddress, fetchStatement, chainId
+                );
+                await supertest(app).get('/v1/alerts/subscriptions/')
                 .query({
                     account: smartAccount.accountAddress,
                     owner: ownerPublicAddress,
                     chainId: Number(chainId),
-                    message:siweMessage,
-                    signature
+                    message: removedOwnerFetchMessage,
+                    signature: removedOwnerFetchSignature
                 })
-                .expect(200);
-                const subscriptions = subscriptionsRes.body.subscriptions;
-                //expect(subscriptions.length).toBe(1);
-                expect(subscriptions[0].channel).toBe("email");
-                expect(subscriptions[0].target).toBe("user@example.com");
-
-                console.log('alerts/unsubscribe should fail with 403 to if wrong owner signature')
-                hasUnsubscribed = true;
-                domain = "example.com";
-                statement = "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account";
-                uri = "https://example.com";
-                version = "1";
-                nonce = Math.random().toString(36).substring(2); // Generate a random nonce
-                issuedAt = new Date().toISOString();
-
-                siweMessage = new SiweMessage({
-                    domain,
-                    address: ownerPublicAddress,
-                    statement,
-                    uri,
-                    chainId: Number(chainId),
-                    version, //optional
-                    nonce, //optional
-                    issuedAt, //optional
+                .expect(403).then((response) => {
+                    expect(response.body.message).toContain(
+                        "Owner must be a valid owner"
+                    )
                 });
 
-                message = siweMessage.prepareMessage();
-                signature = await secondOwner.signMessage(message);
+                console.log('alerts/subscriptions should return the subscriptions of a replaced owner to the new owner')
+                const [newOwnerFetchMessage, newOwnerFetchSignature] = await signStatement(
+                    newOwner, newOwnerPublicAddress, fetchStatement, chainId
+                );
+                const subscriptionsRes = await supertest(app).get('/v1/alerts/subscriptions/')
+                .query({
+                    account: smartAccount.accountAddress,
+                    owner: newOwnerPublicAddress,
+                    chainId: Number(chainId),
+                    message: newOwnerFetchMessage,
+                    signature: newOwnerFetchSignature
+                })
+                .expect(200);
+                const subscription = subscriptionsRes.body.subscriptions.find(
+                    (s: {id: string}) => s.id === subscriptionId
+                );
+                expect(subscription).toBeDefined();
+                expect(subscription.owner).toBe(ownerPublicAddress.toLowerCase());
+                expect(subscription.channel).toBe("email");
+                expect(subscription.target).toBe("user@example.com");
 
+                console.log('alerts/unsubscribe should fail with 403 to if wrong owner signature')
+                const [wrongSignerMessage, wrongSignerSignature] = await signStatement(
+                    newOwner, ownerPublicAddress, unsubscribeStatement, chainId
+                );
                 await supertest(app).post('/v1/alerts/unsubscribe/')
                 .send({
                     subscriptionId,
                     chainId: Number(chainId),
                     owner: ownerPublicAddress,
-                    message:siweMessage,
-                    signature
+                    message: wrongSignerMessage,
+                    signature: wrongSignerSignature
                 })
                 .expect(403).then((response) => {
                     expect(response.body.message).toContain(
@@ -461,59 +500,49 @@ describe('alerts', ()=>{
                     )
                 });
 
-                console.log('alerts/unsubscribe should succeed with 200 to if correct owner signature')
-                domain = "example.com";
-                statement = "I request to unsubscribe from all Social Recovery Module alert subscriptions linked to my account";
-                uri = "https://example.com";
-                version = "1";
-                nonce = Math.random().toString(36).substring(2); // Generate a random nonce
-                issuedAt = new Date().toISOString();
-
-                const unsubscripeSiweMessage = new SiweMessage({
-                    domain,
-                    address: ownerPublicAddress,
-                    statement,
-                    uri,
-                    chainId: Number(chainId),
-                    version, //optional
-                    nonce, //optional
-                    issuedAt, //optional
-                });
-
-                message = unsubscripeSiweMessage.prepareMessage();
-                signature = await owner.signMessage(message);
-
-                const res2 = await supertest(app).post('/v1/alerts/unsubscribe/')
+                console.log('alerts/unsubscribe should fail with 403 if the signer is no longer an owner of the account')
+                const [removedOwnerUnsubscribeMessage, removedOwnerUnsubscribeSignature] = await signStatement(
+                    owner, ownerPublicAddress, unsubscribeStatement, chainId
+                );
+                await supertest(app).post('/v1/alerts/unsubscribe/')
                 .send({
                     subscriptionId,
                     chainId: Number(chainId),
                     owner: ownerPublicAddress,
-                    message:unsubscripeSiweMessage,
-                    signature
+                    message: removedOwnerUnsubscribeMessage,
+                    signature: removedOwnerUnsubscribeSignature
+                })
+                .expect(403).then((response) => {
+                    expect(response.body.message).toContain(
+                        "Owner must be a valid owner"
+                    )
+                });
+
+                console.log('alerts/unsubscribe should succeed with 200 if the new owner removes the orphaned subscription')
+                const [newOwnerUnsubscribeMessage, newOwnerUnsubscribeSignature] = await signStatement(
+                    newOwner, newOwnerPublicAddress, unsubscribeStatement, chainId
+                );
+                const res2 = await supertest(app).post('/v1/alerts/unsubscribe/')
+                .send({
+                    subscriptionId,
+                    chainId: Number(chainId),
+                    owner: newOwnerPublicAddress,
+                    message: newOwnerUnsubscribeMessage,
+                    signature: newOwnerUnsubscribeSignature
                 })
                 .expect(200);
                 expect(res2.body.success).toBe(true);
 
-                const fetchSubscriptionsSiweMessage = new SiweMessage({
-                    domain,
-                    address: ownerPublicAddress,
-                    statement: "I request to retrieve all Social Recovery Module alert subscriptions linked to my account",
-                    uri,
-                    chainId: Number(chainId),
-                    version, //optional
-                    nonce, //optional
-                    issuedAt, //optional
-                });
-                message = fetchSubscriptionsSiweMessage.prepareMessage();
-                signature = await owner.signMessage(message);
-
+                const [newOwnerFetchMessage2, newOwnerFetchSignature2] = await signStatement(
+                    newOwner, newOwnerPublicAddress, fetchStatement, chainId
+                );
                 const subscriptionsRes2 = await supertest(app).get('/v1/alerts/subscriptions/')
                 .query({
                     account: smartAccount.accountAddress,
-                    owner: ownerPublicAddress,
+                    owner: newOwnerPublicAddress,
                     chainId: Number(chainId),
-                    message:fetchSubscriptionsSiweMessage,
-                    signature
+                    message: newOwnerFetchMessage2,
+                    signature: newOwnerFetchSignature2
                 })
                 .expect(200);
                 const subscriptions2 = subscriptionsRes2.body.subscriptions;
