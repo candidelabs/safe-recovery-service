@@ -4,6 +4,7 @@ import {StaticInstanceManager} from "./static-instance-manager";
 import {Indexer} from "../services/indexer.service";
 import {createRecoveryModule, RecoveryModule, RecoveryModuleConfig} from "./recovery-module";
 import {ApiError} from "../utils/error";
+import {isMulticall3Deployed} from "../utils/erc6492";
 
 interface ExecuteRecoveryRequestConfig {
   enabled: boolean;
@@ -33,6 +34,9 @@ export class Network {
   public guardian?: string;
   public alert?: string;
   public indexer: Indexer;
+  // Multicall3, which simulates the deployment of an undeployed account (ERC-6492 signatures)
+  public multicall3: string;
+  private counterfactualSupport?: Promise<boolean>;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -47,6 +51,7 @@ export class Network {
     finalizeRecoveryRequestConfig: FinalizeRecoveryRequestConfig,
     guardian: string | undefined,
     alert: string | undefined,
+    multicall3: string,
   ) {
     this.name = name;
     this.chainId = chainId;
@@ -60,6 +65,7 @@ export class Network {
     this.finalizeRecoveryRequestConfig = finalizeRecoveryRequestConfig;
     this.guardian = guardian;
     this.alert = alert;
+    this.multicall3 = multicall3;
     this.indexer = new Indexer(this);
     this.indexer.start();
     Network.supportedChainIds.push(chainId);
@@ -68,6 +74,27 @@ export class Network {
 
   public id() {
     return this.chainId.toString();
+  }
+
+  // Whether Multicall3 is deployed, so undeployed accounts can be verified (checked once; a failed check is retried).
+  public supportsCounterfactual(): Promise<boolean> {
+    if (!this.counterfactualSupport) {
+      const check = isMulticall3Deployed(this.jsonRPCProvider, this.multicall3);
+      this.counterfactualSupport = check;
+      check.catch(() => {
+        if (this.counterfactualSupport === check) this.counterfactualSupport = undefined;
+      });
+    }
+    return this.counterfactualSupport;
+  }
+
+  public async requireCounterfactualSupport(): Promise<void> {
+    if (!(await this.supportsCounterfactual())) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `ERC-6492 signatures are not supported on this network (${this.chainId}): Multicall3 is not deployed at ${this.multicall3}`
+      );
+    }
   }
 
   public getModule(address: string): RecoveryModule | undefined {

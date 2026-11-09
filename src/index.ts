@@ -19,6 +19,7 @@ import {startSendNotificationsCronJob} from "./services/alerts.service";
 import {releaseOrphanedSponsorships} from "./services/recoveries.service";
 import {assignLegacyRequestRows, verifyRecoveryModuleCode} from "./services/recovery-modules.service";
 import {Network} from "./models/network";
+import {warnIfCounterfactualUnsupported} from "./services/counterfactual.service";
 
 // Console output of dependencies, Node warnings and crashes go through the same JSON logger.
 installProcessLogging(logger);
@@ -81,6 +82,7 @@ const listen = () => app.listen(configuration.port, () => {
     })
     .catch((error) => logger.error({ err: error }, "orphaned sponsorship release failed"));
   void verifyRecoveryModuleCode();
+  void warnIfCounterfactualUnsupported();
   delay(2500).then(async () => {
     await AccountEventTracker.instance().loadSubscriptions();
     startSendNotificationsCronJob();

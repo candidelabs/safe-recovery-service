@@ -7,6 +7,9 @@ import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
 import {checkRecoveryModule} from "./recovery-modules.service";
+import logger from "../utils/logger";
+
+const log = logger.child({ component: "auth" });
 
 export const createRegistration = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
   const network = Network.instances.get(chainId.toString())!;
@@ -26,7 +29,8 @@ export const createRegistration = async (account: string, chainId: number, chann
   let statement = MessageStatements["auth-register"];
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
-  await validateSIWEMessage(message, account, chainId, statement, signature);
+  // the account signs; an ERC-6492-wrapped signature of an account that is not deployed yet is verified in simulation
+  const {counterfactual} = await validateSIWEMessage(message, account, chainId, statement, signature);
   //
   target = sanitizedTarget;
   const existingRegistration = await prisma.authRegistration.findFirst({
@@ -60,6 +64,11 @@ export const createRegistration = async (account: string, chainId: number, chann
         expiresAt: new Date(Date.now() + 10*60*1000)
       }
     }
+  );
+  // the target (email / phone number) and the OTP are never logged
+  log.info(
+    { challengeId: authRegistrationRequest.id, account: account.toLowerCase(), chainId, channel, accountDeployed: !counterfactual },
+    "auth registration requested"
   );
   return authRegistrationRequest.id;
 };

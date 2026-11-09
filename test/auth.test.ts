@@ -248,3 +248,126 @@ describe('auth', ()=>{
         });
     });
 });
+
+// An account that is not deployed yet signs with its Safe signature (the owners' SafeMessage signatures, as
+// above), wrapped with ERC-6492: abi.encode(factory, factoryCalldata, signature) followed by the magic suffix.
+describe('auth (counterfactual account)', ()=>{
+    const registerStatement = "I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using user@example.com (via email)";
+    const fetchStatement = "I request to retrieve all authentication methods currently registered to my account with Safe Recovery Service";
+    const erc6492Magic = "0x6492649264926492649264926492649264926492649264926492649264926492";
+
+    const cfOwner = ethers.Wallet.createRandom();
+    const cfSecondOwner = ethers.Wallet.createRandom();
+    const cfOwners = [cfOwner.address, cfSecondOwner.address];
+    const cfAccount = SafeAccount.initializeNewAccount(cfOwners, {threshold: 2});
+    const [cfFactory, cfFactoryCalldata] = SafeAccount.createFactoryAddressAndData(cfOwners, {threshold: 2});
+
+    const wrap = (factory: string, factoryCalldata: string, signature: string) => ethers.utils.hexConcat([
+        ethers.utils.defaultAbiCoder.encode(["address", "bytes", "bytes"], [factory, factoryCalldata, signature]),
+        erc6492Magic,
+    ]);
+
+    // a SIWE message for the counterfactual account, with its Safe signature by `signers`
+    const signAsSafe = async (statement: string, signers: ethers.Wallet[]): Promise<[SiweMessage, string]> => {
+        const siweMessage = new SiweMessage({
+            domain: "example.com",
+            address: cfAccount.accountAddress,
+            statement,
+            uri: "https://example.com",
+            chainId: Number(chainId),
+            version: "1",
+            nonce: Math.random().toString(36).substring(2),
+            issuedAt: new Date().toISOString(),
+        });
+        const safeTypedData = getSafeMessageEip712Data(cfAccount.accountAddress, chainId, siweMessage.prepareMessage());
+        const pairs = await Promise.all(signers.map(async (signer) => ({
+            signer: signer.address,
+            signature: await signer._signTypedData(safeTypedData.domain, safeTypedData.types, safeTypedData.messageValue),
+        })));
+        return [siweMessage, SafeAccount.buildSignaturesFromSingerSignaturePairs(pairs)];
+    };
+
+    const register = (siweMessage: SiweMessage, signature: string) => supertest(app).post('/v1/auth/register/').send({
+        "account": cfAccount.accountAddress,
+        "chainId": Number(chainId),
+        "channel": "email",
+        "target": "user@example.com",
+        "message": siweMessage,
+        "signature": signature,
+    });
+
+    const registrations = (siweMessage: SiweMessage, signature: string) => supertest(app).get('/v1/auth/registrations/').query({
+        account: cfAccount.accountAddress,
+        chainId: Number(chainId),
+        message: siweMessage,
+        signature,
+    });
+
+    it('should fail with 403 to register an undeployed account with an unwrapped Safe signature', async ()=>{
+        const [siweMessage, signature] = await signAsSafe(registerStatement, [cfOwner, cfSecondOwner]);
+        await register(siweMessage, signature).expect(403).then((response) => {
+            expect(response.body.message).toContain("invalid signature");
+        });
+    });
+
+    it('should fail with 403 to register an undeployed account with one owner signature only', async ()=>{
+        const [siweMessage, signature] = await signAsSafe(registerStatement, [cfOwner]);
+        await register(siweMessage, wrap(cfFactory, cfFactoryCalldata, signature)).expect(403).then((response) => {
+            expect(response.body.message).toContain("invalid signature");
+        });
+    });
+
+    it('should fail with 400 to register with deployment data that does not deploy the account', async ()=>{
+        const [, otherCalldata] = SafeAccount.createFactoryAddressAndData(
+            [ethers.Wallet.createRandom().address, ethers.Wallet.createRandom().address], {threshold: 2}
+        );
+        const [siweMessage, signature] = await signAsSafe(registerStatement, [cfOwner, cfSecondOwner]);
+        await register(siweMessage, wrap(cfFactory, otherCalldata, signature)).expect(400).then((response) => {
+            expect(response.body.message).toContain("does not deploy");
+        });
+    });
+
+    it('should fail with 400 to register with a malformed ERC-6492 signature', async ()=>{
+        const [siweMessage] = await signAsSafe(registerStatement, [cfOwner, cfSecondOwner]);
+        await register(siweMessage, "0x1234" + erc6492Magic.slice(2)).expect(400).then((response) => {
+            expect(response.body.message).toContain("malformed ERC-6492 signature");
+        });
+    });
+
+    it('should succeed with 200 to register and fetch registrations of an undeployed account', async ()=>{
+        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider).getCode(cfAccount.accountAddress)).toBe("0x");
+        const [siweMessage, signature] = await signAsSafe(registerStatement, [cfOwner, cfSecondOwner]);
+        const registerRes = await register(siweMessage, wrap(cfFactory, cfFactoryCalldata, signature)).expect(200);
+        expect(registerRes.body.challengeId).toBeDefined();
+
+        const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, [cfOwner, cfSecondOwner]);
+        const fetchRes = await registrations(fetchMessage, wrap(cfFactory, cfFactoryCalldata, fetchSignature)).expect(200);
+        expect(fetchRes.body.registrations).toEqual([]); // the registration is active once its OTP is submitted
+    });
+
+    it('should accept plain and still-wrapped signatures once the account is deployed', async ()=>{
+        let userOperation = await cfAccount.createUserOperation(
+            [srm.createEnableModuleMetaTransaction(cfAccount.accountAddress)],
+            jsonRpcNodeProvider,
+            bundlerUrl,
+        );
+        const paymaster = new CandidePaymaster(paymasterRPC);
+        const [paymasterUserOperation] = await paymaster.createSponsorPaymasterUserOperation(
+            userOperation, bundlerUrl, sponsorshipPolicyId
+        );
+        userOperation = paymasterUserOperation;
+        userOperation.signature = cfAccount.signUserOperation(
+            userOperation, [cfOwner.privateKey, cfSecondOwner.privateKey], BigInt(chainId),
+        );
+        const sendUserOperationResponse = await cfAccount.sendUserOperation(userOperation, bundlerUrl);
+        await sendUserOperationResponse.included();
+        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider).getCode(cfAccount.accountAddress)).not.toBe("0x");
+
+        const [plainMessage, plainSignature] = await signAsSafe(fetchStatement, [cfOwner, cfSecondOwner]);
+        await registrations(plainMessage, plainSignature).expect(200);
+
+        // the deployment data is ignored once the account has code
+        const [wrappedMessage, wrappedSignature] = await signAsSafe(fetchStatement, [cfOwner, cfSecondOwner]);
+        await registrations(wrappedMessage, wrap(cfFactory, cfFactoryCalldata, wrappedSignature)).expect(200);
+    });
+});

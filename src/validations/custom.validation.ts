@@ -31,6 +31,7 @@ export const newOwners = Joi.array()
   .min(1)
   .unique((a: string, b: string) => a.toLowerCase() === b.toLowerCase());
 
+// A SIWE `signature` may be ERC-6492-wrapped (an account that is not deployed yet), so a few KB is expected.
 export const hexString: Joi.CustomValidator = (value, helpers) => {
   if (!value.match(/^0x[a-fA-F0-9]*$/)) {
     return helpers.message({

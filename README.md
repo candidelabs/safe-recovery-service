@@ -109,6 +109,7 @@ This configuration file is used to set up and customize the service. It consists
         * `maxPerAccount`: The maximum number of recovery finalizations allowed per account within the specified period.
         * `period`: The time period for which the rate limit is applied.
 	+ `alerts`: Optionally specifies the alert to use for this network with with an alert `id`.
+	+ `multicall3`: Optional, the Multicall3 address used to verify ERC-6492 signatures of accounts that are not deployed yet (see [Counterfactual accounts](#counterfactual-accounts-erc-6492)). Defaults to the canonical `0xcA11bde05977b3631167028862bE2a173976CA11`; must be a valid address.
 
 ##### Supported recovery modules
 
@@ -154,6 +155,59 @@ An empty signature (`0x`) is accepted on v0.2.0 modules only, where it is checke
 **Migrating clients:** read `modules` from `/v1/config/getNetworkConfig`, sign the recovery hash of the module the Safe uses (its `getRecoveryHash`, at that module's `nonce`), and send that module as `moduleAddress` to `create`, `signature/request`, `fetchByAddress` and `listByAddress`.
 
 **Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`). Requests made before this version have no module; at boot they are assigned to the module of a legacy `recoveryModuleAddress` config (see [Networks](#networks)).
+
+## Counterfactual accounts (ERC-6492)
+
+A Safe can register auth methods and subscribe to alerts before it is deployed. The client wraps the request's `signature` with [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492): `abi.encode(address factory, bytes factoryCalldata, bytes signature)` followed by the 32-byte magic suffix `0x6492649264926492649264926492649264926492649264926492649264926492`, where `factory` and `factoryCalldata` are the call that deploys the Safe (for a Safe, its `SafeProxyFactory.createProxyWithNonce` call). No other request field changes.
+
+* **Auth** (`POST /v1/auth/register`, `GET /v1/auth/registrations`, `POST /v1/auth/delete`): standard ERC-6492. The SIWE `address` is the Safe, and the inner signature is the Safe signature a deployed Safe would give (the owners' signatures of the SafeMessage, up to the threshold). The service deploys the Safe in simulation and calls its `isValidSignature`, so the Safe's threshold applies.
+* **Alerts** (`POST /v1/alerts/subscribe`, `GET /v1/alerts/subscriptions`, `POST /v1/alerts/unsubscribe`): the SIWE `address` is an owner and the inner signature is that owner's SIWE signature, as for a deployed Safe, but the wrapper's deployment data describes the **account** (the request's `account`, or the subscription's for `unsubscribe`), not the signer. The service reads the owners of the simulated deployment and requires the signer to be one of them.
+
+The recovery endpoints (`/v1/recoveries/*`) do not accept wrapped signatures: the module checks guardian signatures on chain with EIP-1271, which needs a deployed contract. `POST /v1/auth/signature/request` and `/submit` carry no signature and need the Safe deployed with the module enabled and the service's guardian added, so a registration made before deployment can be used once that is done.
+
+Rules:
+
+* A signature without the suffix is checked exactly as before.
+* Once the account has code, the deployment data is ignored and the inner signature is checked against the deployed account, so a client may keep sending wrapped signatures after deployment.
+* The check is one `eth_call` to Multicall3's `aggregate3` (the factory call, then `isValidSignature` or `getOwners` on the account in the state the factory call left). Nothing is broadcast. Multicall3 is expected at `0xcA11bde05977b3631167028862bE2a173976CA11` unless the network sets `multicall3`. On a network where it is not deployed, wrapped signatures of undeployed accounts are rejected (deployed accounts keep working), and a warning is logged after boot (`counterfactual accounts unsupported`).
+* The deployment data is chosen by the client: a factory can only deploy at addresses derived from itself, so deployment data that is not the account's own cannot put code (or owners) at its address, and the request fails.
+
+Deviations from ERC-6492:
+
+1. On the alerts endpoints, the deployment data describes the account while the inner signature belongs to the SIWE address (an owner). A standard ERC-6492 verifier would reject such a signature; it is specific to these endpoints.
+2. No "prepare" call: when the account already has code, the factory call is not run, not even in simulation.
+3. No nesting: the inner signature is never unwrapped again, so an owner that is itself an undeployed contract is not supported.
+4. The verifier is Multicall3, not the EIP's `ValidateSigOffchain` deployless contract (same result for these two calls).
+
+Errors:
+
+| Status | Message | When |
+| --- | --- | --- |
+| 400 | `SIWE Message: malformed ERC-6492 signature` | the signature ends with the magic suffix but does not decode |
+| 400 | `ERC-6492 signatures are not supported on this network (<chainId>): Multicall3 is not deployed at <address>` | the account is not deployed and the network has no Multicall3 |
+| 400 | `SIWE Message: the ERC-6492 deployment data does not deploy <account> on chain <chainId>` | auth: the factory call reverts, or leaves no code at the account |
+| 403 | `SIWE Message: invalid signature, ...` | auth: the simulated Safe rejects the signature (e.g. fewer owner signatures than its threshold); alerts: the inner signature is not the SIWE address's |
+| 400 | `Unable to fetch owners for account '<account>' on chain <chainId>: the account is not deployed. Wrap the signature ...` | alerts: the account has no code and the signature is not wrapped |
+| 400 | `Unable to fetch owners for account '<account>' on chain <chainId>: the ERC-6492 deployment data does not deploy it` | alerts: the factory call reverts, or the account gives no owners after it |
+| 400 | `Unable to fetch owners for account '<account>' on chain <chainId>: it does not answer getOwners()` | alerts: the deployed account is not a Safe |
+| 403 | `Owner must be a valid owner for the account provided` | alerts: the SIWE address is not an owner of the account |
+
+Building the wrapper with abstractionkit and ethers v5:
+
+```ts
+const [factory, factoryCalldata] = SafeAccountV0_3_0.createFactoryAddressAndData(owners, {threshold});
+// auth: `signature` is the Safe signature over the SIWE message (getSafeMessageEip712Data, each owner's
+//       _signTypedData, then SafeAccountV0_3_0.buildSignaturesFromSingerSignaturePairs)
+// alerts: `signature` is the owner's signMessage(siweMessage.prepareMessage())
+const wrapped = ethers.utils.hexConcat([
+  ethers.utils.defaultAbiCoder.encode(["address", "bytes", "bytes"], [factory, factoryCalldata, signature]),
+  "0x6492649264926492649264926492649264926492649264926492649264926492",
+]);
+```
+
+`GET /v1/auth/registrations` and `GET /v1/alerts/subscriptions` take `signature` in the query string. A wrapped signature for a two-owner Safe with abstractionkit's default setup is about 2 KB of hex, well under the usual header limits (Node's default is 16 KB), but a Safe with a very large initializer may not fit. Accepting `POST` for these two reads is a possible follow-up.
+
+Nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
 
 ## Running
 
