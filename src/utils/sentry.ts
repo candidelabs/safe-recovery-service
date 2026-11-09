@@ -51,22 +51,38 @@ const UNTOUCHED_KEYS = new Set([
 ]);
 const MAX_DEPTH = 12;
 
+// the marker the registered options.authentication.apiKey secret is replaced with
+const API_KEY_REDACTED = "[REDACTED:options.authentication.apiKey]";
+
+// Matches the API key with any of its characters percent-encoded (e.g. "~" as %7E or %7e). Express decodes
+// the path before checking the key, so a client may send it encoded, and Sentry's request URLs keep it as
+// sent; the registered secret only matches it literally. The key is ASCII (parseAuthentication).
+export function percentEncodedPattern(apiKey: string): RegExp {
+  const characters = [...apiKey].map((char) => {
+    const hex = char.charCodeAt(0).toString(16).padStart(2, "0");
+    const encoded = `%${[...hex].map((digit) => (/[a-f]/.test(digit) ? `[${digit}${digit.toUpperCase()}]` : digit)).join("")}`;
+    return `(?:${char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|${encoded})`;
+  });
+  return new RegExp(characters.join(""), "g");
+}
+
 // `beforeSend` / `beforeSendTransaction`: applies the log redaction rules to every string of an
 // outgoing Sentry event (exception messages, stack frames, breadcrumbs, span data, request url)
 // and blanks values under secret-looking keys. Request bodies, query strings and cookies are
-// dropped outright, as they are from the logs.
-export function sanitizeSentryEvent<T>(event: T): T {
+// dropped outright, as they are from the logs. `apiKeyPattern` (percentEncodedPattern) also redacts
+// the API key in its percent-encoded forms.
+export function sanitizeSentryEvent<T>(event: T, apiKeyPattern?: RegExp): T {
   const request = (event as { request?: Record<string, unknown> }).request;
   if (request && typeof request === "object") {
     delete request.data;
     delete request.query_string;
     delete request.cookies;
   }
-  sanitizeInPlace(event, 0);
+  sanitizeInPlace(event, 0, apiKeyPattern);
   return event;
 }
 
-function sanitizeInPlace(value: unknown, depth: number): void {
+function sanitizeInPlace(value: unknown, depth: number, apiKeyPattern?: RegExp): void {
   if (value === null || typeof value !== "object" || depth > MAX_DEPTH) return;
   const container = value as Record<string, unknown>;
   const isArray = Array.isArray(value);
@@ -76,10 +92,10 @@ function sanitizeInPlace(value: unknown, depth: number): void {
     if (!isArray && isSensitiveKey(key)) {
       if (item !== undefined) container[key] = REDACTED;
     } else if (typeof item === "string") {
-      const clean = sanitizeString(item);
+      const clean = sanitizeString(apiKeyPattern ? item.replace(apiKeyPattern, API_KEY_REDACTED) : item);
       if (clean !== item) container[key] = clean;
     } else {
-      sanitizeInPlace(item, depth + 1);
+      sanitizeInPlace(item, depth + 1, apiKeyPattern);
     }
   }
 }

@@ -2,6 +2,7 @@ import supertest from "supertest";
 import {ethers} from "ethers";
 import type {Express} from "express";
 import {parseAuthentication} from "../src/config/config-manager";
+import {percentEncodedPattern, sanitizeSentryEvent} from "../src/utils/sentry";
 
 // options.authentication on the real app (src/index.ts, src/routes/v1/index.ts): an API key as the first path
 // segment or a bearer token in the Authorization header. config.json is replaced by the configs below and the
@@ -146,6 +147,11 @@ describe("API key", () => {
         expect(response.body).toMatchObject({code: 401, message: "Invalid API key"});
     });
 
+    // Express decodes the path before the key is checked, hence the Sentry redaction below
+    test("accepts the key percent-encoded", async () => {
+        await supertest(loaded.app).get(networkConfig(`/%74${API_KEY.slice(1)}`)).query({chainId: CHAIN_ID}).expect(200);
+    });
+
     test("does not take the key as a bearer token", async () => {
         await supertest(loaded.app).get(networkConfig("")).set("Authorization", `Bearer ${API_KEY}`).expect(401);
     });
@@ -218,5 +224,30 @@ describe("bearer token", () => {
 
     test("redacts the token from every log line", () => {
         expect(loaded.sanitizeString(`got ${BEARER_TOKEN}`)).toBe("got [REDACTED:options.authentication.bearerToken]");
+    });
+});
+
+describe("Sentry events", () => {
+    // letters and '~' only, so no other redaction rule masks it
+    const key = "test~api~key~abcdefgh";
+    const redacted = "/[REDACTED:options.authentication.apiKey]/v1/config/getNetworkConfig";
+
+    test.each([
+        ["literal", key],
+        ["percent-encoded", key.replace(/~/g, "%7E")],
+        ["percent-encoded in lower case", key.replace(/~/g, "%7e")],
+        ["fully percent-encoded", [...key].map((char) => `%${char.charCodeAt(0).toString(16)}`).join("")],
+    ])("redact the API key %s", (_name, form) => {
+        const event = sanitizeSentryEvent({
+            request: {url: `http://localhost:4337/${form}/v1/config/getNetworkConfig`},
+            contexts: {trace: {data: {"http.target": `/${form}/v1/config/getNetworkConfig`}}},
+        }, percentEncodedPattern(key));
+        expect(event.contexts.trace.data["http.target"]).toBe(redacted);
+        expect(event.request.url).toBe(`http://localhost:4337${redacted}`);
+    });
+
+    test("leave other paths alone", () => {
+        const event = sanitizeSentryEvent({request: {url: "/test~api~key~abcdefgX/v1"}}, percentEncodedPattern(key));
+        expect(event.request.url).toBe("/test~api~key~abcdefgX/v1");
     });
 });
