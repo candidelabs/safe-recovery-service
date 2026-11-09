@@ -54,6 +54,7 @@ This configuration file is used to set up and customize the service. It consists
 * `sentryDSN`: Optional field for [sentry](sentry.io) logging purposes. (optional)
 * `moduleFallbackDeprecation`: ISO 8601 date (e.g. `"2026-11-15"`) since which a request that names no recovery module is deprecated. Once set, such requests are answered with a `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)). (optional)
 * `moduleFallbackSunset`: ISO 8601 date announced as the end of requests that name no recovery module. Once set, such requests are answered with a `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)). The header only announces the date: the service keeps serving such requests after it, until the operator removes `fallback: true` from the network's modules (see [Recovery modules in requests](#recovery-modules-in-requests)). Must be later than `moduleFallbackDeprecation`. (optional)
+* `authentication`: A secret every request must carry: `{"apiKey": "..."}` (in the path) or `{"bearerToken": "..."}` (in the `Authorization` header), never both. Omitted or `~`: no authentication. See [Authentication](#authentication). (optional)
 
 #### Signers
 
@@ -132,6 +133,17 @@ Each variant has the same address on every network. The service takes a module's
 > [!TIP]
 The config file supports loading values from `.env`. Use `${ENV::VAR_NAME}` anywhere inside a string value and the named environment variable will be substituted in at boot. Examples: `"privateKey": "${ENV::PRIVATE_KEY}"` loads the whole field from the env variable, while `"jsonRpcEndpoint": "https://rpc.example.com/${ENV::RPC_API_KEY}"` only substitutes the key segment. Multiple substitutions in one string are supported. Missing env variables throw at boot.
 > 
+
+## Authentication
+
+`options.authentication` restricts the service to the clients that hold a secret, ahead of the SIWE checks of each endpoint. One of the two can be set:
+
+* `apiKey`: the key is the first path segment of every URL, e.g. `POST /<apiKey>/v1/auth/register` or `GET /<apiKey>/v1/config/getNetworkConfig`. Any other first segment is answered with a 401 (`Invalid API key`), so is a request that leaves the key out (`/v1/...`).
+* `bearerToken`: every request under `/v1` needs an `Authorization: Bearer <bearerToken>` header (the scheme in any case). Without one the service answers 401 `Bearer token required`, with a wrong token 401 `Invalid bearer token`, both with a `WWW-Authenticate: Bearer` challenge ([RFC 6750](https://www.rfc-editor.org/rfc/rfc6750)).
+
+The value needs at least 16 characters: letters, digits, `-`, `.`, `_` and `~` for an API key, plus `+`, `/` and trailing `=` for a bearer token (e.g. `openssl rand -hex 32`). Load it with `${ENV::VAR_NAME}` rather than writing it into `config.json`. It is compared in constant time and never logged: request log lines show the key segment as `:apiKey` (also when it is wrong). Proxies and load balancers in front of the service log URLs, though, so an API key ends up in their access logs; prefer the bearer token when the clients can set headers.
+
+CORS preflight requests (`OPTIONS`) are answered without the secret, since browsers send them without credentials. A change of secret takes a restart.
 
 ## Recovery modules in requests
 
