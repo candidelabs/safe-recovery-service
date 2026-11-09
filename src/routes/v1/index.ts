@@ -3,8 +3,16 @@ import configRoute from "./config.route";
 import recoveriesRoute from "./recoveries.route";
 import authRoute from "./auth.route";
 import alertsRoute from "./alerts.route";
+import {requireBearerToken} from "../../middlewares";
+import {Configuration} from "../../config/config-manager";
 
 const router = express.Router();
+
+// options.authentication.bearerToken: every v1 request needs "Authorization: Bearer <token>"
+const {bearerToken} = Configuration.instance().authentication;
+if (bearerToken !== undefined) {
+  router.use(requireBearerToken(bearerToken));
+}
 
 type Route = {
   path: string;

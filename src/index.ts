@@ -13,7 +13,7 @@ import rateLimit from "express-rate-limit";
 import httpStatus from "http-status";
 import v1Routes from "./routes/v1";
 import {ApiError, delay} from "./utils";
-import {errorConverter, errorHandler, requestLogger} from "./middlewares";
+import {API_KEY_PATH, errorConverter, errorHandler, requestLogger, requireApiKey} from "./middlewares";
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
 import {releaseOrphanedSponsorships} from "./services/recoveries.service";
@@ -60,8 +60,16 @@ app.use(
   })
 );
 
-// v1 api routes
-app.use("/v1", v1Routes);
+// v1 api routes. With options.authentication.apiKey they are served under /<apiKey>/v1, and a request whose
+// first path segment is not the key is answered 401; options.authentication.bearerToken is checked by the
+// v1 router.
+const routes = express.Router().use("/v1", v1Routes);
+const {apiKey} = configuration.authentication;
+if (apiKey !== undefined) {
+  app.use(API_KEY_PATH, requireApiKey(apiKey), routes);
+} else {
+  app.use(routes);
+}
 
 // send back a 404 error for any unknown api request
 app.use((_req, _res, next) => {

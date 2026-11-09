@@ -33,6 +33,8 @@ type Config = {
     // ISO dates announced with the Deprecation / Sunset headers on requests that name no recovery module
     moduleFallbackDeprecation?: string;
     moduleFallbackSunset?: string;
+    // who may call the service at all: an API key in the path or a bearer token (see parseAuthentication)
+    authentication?: {apiKey?: string; bearerToken?: string} | string;
   };
   signers: Array<{
     id: string;
@@ -106,6 +108,7 @@ export class Configuration {
   public supportEmail?: string;
   public moduleFallbackDeprecation?: Date;
   public moduleFallbackSunset?: Date;
+  public authentication!: ServiceAuthentication;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -119,6 +122,11 @@ export class Configuration {
   // and alert ids, SMTP hosts and users, Twilio SIDs, chain ids) stay loggable.
   private registerSecrets(config: Config) {
     registerSecret(config.options?.sentryDSN, "options.sentryDSN");
+    const authentication = config.options?.authentication;
+    if (typeof authentication === "object" && authentication !== null) {
+      registerSecret(authentication.apiKey, "options.authentication.apiKey");
+      registerSecret(authentication.bearerToken, "options.authentication.bearerToken");
+    }
     for (const signer of Array.isArray(config.signers) ? config.signers : []) {
       registerSecret(signer?.privateKey, `signers.${signer?.id}.privateKey`);
       registerSecret(signer?.awsKMS?.accessKeyId, `signers.${signer?.id}.awsKMS.accessKeyId`);
@@ -236,6 +244,8 @@ export class Configuration {
     const {deprecation, sunset} = parseModuleFallbackDates(options);
     this.moduleFallbackDeprecation = deprecation;
     this.moduleFallbackSunset = sunset;
+
+    this.authentication = parseAuthentication(options.authentication);
   }
 
   private initializeSigners(signers: Config["signers"]) {
@@ -518,6 +528,45 @@ export const parseModuleFallbackDates = (options: Pick<Config["options"], "modul
     throw new Error("Options.moduleFallbackSunset must be later than options.moduleFallbackDeprecation.");
   }
   return {deprecation, sunset};
+};
+
+// Who may call the service at all, ahead of the SIWE checks of each route: at most one of the two is set.
+// - apiKey: the first path segment of every request, /<apiKey>/v1/... (src/index.ts)
+// - bearerToken: sent as "Authorization: Bearer <bearerToken>" (src/routes/v1/index.ts)
+export type ServiceAuthentication = {apiKey?: string; bearerToken?: string};
+
+const MIN_AUTHENTICATION_SECRET_LENGTH = 16;
+const AUTHENTICATION_SECRETS = {
+  // unreserved URL characters, so the key needs no percent-encoding in a path
+  apiKey: {pattern: /^[A-Za-z0-9._~-]+$/, characters: "letters, digits, '-', '.', '_' and '~'"},
+  // the b64token of RFC 6750
+  bearerToken: {pattern: /^[A-Za-z0-9._~+/-]+=*$/, characters: "letters, digits, '-', '.', '_', '~', '+', '/' and trailing '='"},
+} as const;
+
+// options.authentication: omitted or '~' for none, else {apiKey} or {bearerToken} ('~' counts as omitted).
+export const parseAuthentication = (authentication: Config["options"]["authentication"]): ServiceAuthentication => {
+  if (authentication === undefined || authentication === null || authentication === "~") return {};
+  if (typeof authentication !== "object" || Array.isArray(authentication)) {
+    throw new Error("Options.authentication must be an object with either 'apiKey' or 'bearerToken', or '~'.");
+  }
+  const set = (["apiKey", "bearerToken"] as const).filter((field) => ![undefined, null, "~"].includes(authentication[field]));
+  if (set.length === 0) {
+    throw new Error("Options.authentication must have either 'apiKey' or 'bearerToken' defined.");
+  }
+  if (set.length > 1) {
+    throw new Error("Options.authentication cannot have both 'apiKey' and 'bearerToken' defined.");
+  }
+  const field = set[0];
+  const value = authentication[field];
+  const {pattern, characters} = AUTHENTICATION_SECRETS[field];
+  // the value itself never appears in an error: it would end up in the fatal boot line
+  if (typeof value !== "string" || value.length < MIN_AUTHENTICATION_SECRET_LENGTH) {
+    throw new Error(`Options.authentication.${field} must be a string of at least ${MIN_AUTHENTICATION_SECRET_LENGTH} characters.`);
+  }
+  if (!pattern.test(value)) {
+    throw new Error(`Options.authentication.${field} may only contain ${characters}.`);
+  }
+  return {[field]: value};
 };
 
 // 'recoveryModules' lists every module the network serves and indexes, each with its own 'indexer'

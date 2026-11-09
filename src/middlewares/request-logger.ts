@@ -2,21 +2,22 @@ import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { serializeRequest, serializeResponse } from "../logging";
 import logger from "../utils/logger";
+import { redactApiKey } from "./authentication";
 
 const log = logger.child({ component: "http" });
 
-// Full pattern of the matched route, e.g. /v1/alerts/subscribe. Express restores req.baseUrl to ""
-// before the app-level error handlers run, so once the response is finished the mount prefix is
-// recovered by matching req.route.path against the end of the request path.
+// Full pattern of the matched route, e.g. /v1/alerts/subscribe (/:apiKey/v1/alerts/subscribe with an API
+// key). Express restores req.baseUrl to "" before the app-level error handlers run, so once the response
+// is finished the mount prefix is recovered by matching req.route.path against the end of the request path.
 export function routePattern(req: Request): string | undefined {
   const routePath: unknown = req.route?.path;
   if (typeof routePath !== "string") return undefined;
-  const requestPath = (req.originalUrl ?? req.url ?? "").split("?")[0];
+  const requestPath = redactApiKey(req.originalUrl ?? req.url ?? "").split("?")[0];
   const tail = routePath
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     .replace(/:[A-Za-z0-9_]+/g, "[^/]+");
   const match = new RegExp(`${tail}/?$`, "i").exec(requestPath);
-  return match ? `${requestPath.slice(0, match.index)}${routePath}` : `${req.baseUrl ?? ""}${routePath}`;
+  return match ? `${requestPath.slice(0, match.index)}${routePath}` : `${redactApiKey(req.baseUrl ?? "")}${routePath}`;
 }
 
 // One line per request once the response is finished. Replaces morgan: the route pattern is logged
@@ -33,7 +34,7 @@ export const requestLogger = (req: Request, res: Response, next: NextFunction): 
     // headers, query strings and bodies never get in.
     const request = serializeRequest({
       method: req.method,
-      originalUrl: req.originalUrl,
+      originalUrl: redactApiKey(req.originalUrl),
       ip: req.ip,
       baseUrl: "",
       route: route === undefined ? undefined : { path: route },
