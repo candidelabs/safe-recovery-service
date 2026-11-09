@@ -551,3 +551,117 @@ describe('alerts', ()=>{
         });
     });
 });
+
+// An account that is not deployed yet: an owner signs the SIWE message as usual, and wraps the signature with
+// the account's ERC-6492 deployment data (abi.encode(factory, factoryCalldata, signature) + magic suffix).
+// Runs after the concurrent per-chain flows above (they are awaited first) and finds its OTP by recipient.
+describe('alerts (counterfactual account)', ()=>{
+    const erc6492Magic = "0x6492649264926492649264926492649264926492649264926492649264926492";
+    const cfOwner = ethers.Wallet.createRandom();
+    const cfSecondOwner = ethers.Wallet.createRandom();
+    const stranger = ethers.Wallet.createRandom();
+    const cfOwners = [cfOwner.address, cfSecondOwner.address];
+    const cfAccount = SafeAccount.initializeNewAccount(cfOwners, {threshold: 2});
+    const [cfFactory, cfFactoryCalldata] = SafeAccount.createFactoryAddressAndData(cfOwners, {threshold: 2});
+    const target = `counterfactual-${Math.random().toString(36).substring(2)}@example.com`;
+    const subscribeStatement = "I agree to receive Social Recovery Module alert notifications for " + cfAccount.accountAddress.toLowerCase() + " on all supported chains sent to " + target + " (via email)";
+    let cfSubscriptionId = "";
+
+    const wrap = (signature: string) => ethers.utils.hexConcat([
+        ethers.utils.defaultAbiCoder.encode(["address", "bytes", "bytes"], [cfFactory, cfFactoryCalldata, signature]),
+        erc6492Magic,
+    ]);
+
+    const subscribe = (owner: string, siweMessage: SiweMessage, signature: string) => supertest(app).post('/v1/alerts/subscribe/').send({
+        account: cfAccount.accountAddress,
+        owner,
+        chainId: Number(chainId_1),
+        channel: "email",
+        target,
+        message: siweMessage,
+        signature,
+    });
+
+    const subscriptions = (siweMessage: SiweMessage, signature: string) => supertest(app).get('/v1/alerts/subscriptions/').query({
+        account: cfAccount.accountAddress,
+        owner: cfOwner.address,
+        chainId: Number(chainId_1),
+        message: siweMessage,
+        signature,
+    });
+
+    const fetchOtp = async (): Promise<string> => {
+        const response = await fetch('http://localhost:8025/api/v1/messages');
+        const {messages} = await response.json() as {messages: {To: {Address: string}[], Snippet: string}[]};
+        const email = messages.find((message) => message.To.some((to) => to.Address === target));
+        const otp = email ? /-?\d{6}/.exec(email.Snippet) : null;
+        expect(otp).not.toBeNull();
+        return otp![0];
+    };
+
+    it('should fail with 400 to subscribe for an undeployed account with an unwrapped signature', async ()=>{
+        const [siweMessage, signature] = await signStatement(cfOwner, cfOwner.address, subscribeStatement, chainId_1);
+        await subscribe(cfOwner.address, siweMessage, signature).expect(400).then((response) => {
+            expect(response.body.message).toContain("the account is not deployed");
+        });
+    });
+
+    it('should fail with 403 to subscribe for an undeployed account by a non-owner', async ()=>{
+        const [siweMessage, signature] = await signStatement(stranger, stranger.address, subscribeStatement, chainId_1);
+        await subscribe(stranger.address, siweMessage, wrap(signature)).expect(403).then((response) => {
+            expect(response.body.message).toContain("Owner must be a valid owner");
+        });
+    });
+
+    it('should succeed with 200 to subscribe, activate and fetch for an undeployed account', async ()=>{
+        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider_1).getCode(cfAccount.accountAddress)).toBe("0x");
+        const [siweMessage, signature] = await signStatement(cfOwner, cfOwner.address, subscribeStatement, chainId_1);
+        const subscribeRes = await subscribe(cfOwner.address, siweMessage, wrap(signature)).expect(200);
+        cfSubscriptionId = subscribeRes.body.subscriptionId;
+        expect(cfSubscriptionId).toBeTruthy();
+
+        await supertest(app).post('/v1/alerts/activate/')
+        .send({subscriptionId: cfSubscriptionId, challenge: await fetchOtp()})
+        .expect(200);
+
+        const [fetchMessage, fetchSignature] = await signStatement(cfOwner, cfOwner.address, fetchStatement, chainId_1);
+        const fetchRes = await subscriptions(fetchMessage, wrap(fetchSignature)).expect(200);
+        expect(fetchRes.body.subscriptions.map((s: {id: string}) => s.id)).toEqual([cfSubscriptionId]);
+    });
+
+    it('should keep working once the account is deployed', async ()=>{
+        let userOperation = await cfAccount.createUserOperation(
+            [srm.createEnableModuleMetaTransaction(cfAccount.accountAddress)],
+            jsonRpcNodeProvider_1,
+            bundlerUrl_1,
+        );
+        const paymaster = new CandidePaymaster(paymasterRPC_1);
+        const [paymasterUserOperation] = await paymaster.createSponsorPaymasterUserOperation(userOperation, bundlerUrl_1);
+        userOperation = paymasterUserOperation;
+        userOperation.signature = cfAccount.signUserOperation(
+            userOperation, [cfOwner.privateKey, cfSecondOwner.privateKey], BigInt(chainId_1),
+        );
+        const sendUserOperationResponse = await cfAccount.sendUserOperation(userOperation, bundlerUrl_1);
+        await sendUserOperationResponse.included();
+        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider_1).getCode(cfAccount.accountAddress)).not.toBe("0x");
+
+        const [plainMessage, plainSignature] = await signStatement(cfOwner, cfOwner.address, fetchStatement, chainId_1);
+        const plainRes = await subscriptions(plainMessage, plainSignature).expect(200);
+        expect(plainRes.body.subscriptions.map((s: {id: string}) => s.id)).toEqual([cfSubscriptionId]);
+
+        // the deployment data is ignored once the account has code
+        const [wrappedMessage, wrappedSignature] = await signStatement(cfOwner, cfOwner.address, fetchStatement, chainId_1);
+        await subscriptions(wrappedMessage, wrap(wrappedSignature)).expect(200);
+
+        const [unsubscribeMessage, unsubscribeSignature] = await signStatement(cfOwner, cfOwner.address, unsubscribeStatement, chainId_1);
+        await supertest(app).post('/v1/alerts/unsubscribe/')
+        .send({
+            subscriptionId: cfSubscriptionId,
+            chainId: Number(chainId_1),
+            owner: cfOwner.address,
+            message: unsubscribeMessage,
+            signature: wrap(unsubscribeSignature),
+        })
+        .expect(200);
+    });
+});

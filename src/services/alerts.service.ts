@@ -1,5 +1,5 @@
 import httpStatus from "http-status";
-import {ApiError, validateSIWEMessage,} from "../utils";
+import {ApiError, requireAccountOwner, validateOwnerSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {Alerts} from "../models/alert/alerts";
 import {AccountEventTracker} from "../models/events/account-event-tracker";
@@ -8,31 +8,10 @@ import {AlertSubscriptionNotification, Prisma} from "@prisma/client";
 import * as cron from "node-cron";
 import {SummaryMessageData} from "../utils/interfaces";
 import {MessageStatements} from "../utils/constants";
-import {SafeAccountV0_3_0 as SafeAccount} from "abstractionkit";
 import {Network} from "../models/network";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "alerts" });
-
-const fetchAccountOwners = async (account: string, chainId: number): Promise<string[]> => {
-  const safeAccount = new SafeAccount(account);
-  const network = Network.instances.get(chainId.toString())!;
-  let owners: string[];
-  try {
-    owners = await safeAccount.getOwners(network.jsonRPCEndpoint);
-  } catch (e) {
-    throw new ApiError(httpStatus.BAD_REQUEST, `Unable to fetch owners for account '${account}' on chain ${chainId}. The account may not be deployed.`);
-  }
-  return owners.map(e => e.toLowerCase());
-};
-
-const requireAccountOwner = async (account: string, owner: string, chainId: number): Promise<string[]> => {
-  const owners = await fetchAccountOwners(account, chainId);
-  if (!owners.includes(owner.toLowerCase())){
-    throw new ApiError(httpStatus.FORBIDDEN, `Owner must be a valid owner for the account provided`);
-  }
-  return owners;
-};
 
 // A subscription belongs to the account, and `owner` records who created it. A current owner of the account
 // manages its own subscriptions and the ones whose creator is no longer an owner (a recovery or an owner swap
@@ -55,8 +34,10 @@ export const createSubscription = async (account: string, owner: string, chainId
   statement = statement.replace("{{account}}", account.toLowerCase());
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
-  await validateSIWEMessage(message, owner, chainId, statement, signature);
-  await requireAccountOwner(account, owner, chainId);
+  const network = Network.instances.get(chainId.toString())!;
+  // the owner signs; an ERC-6492 wrapper carries the deployment data of an account that is not deployed yet
+  const {deployment} = await validateOwnerSIWEMessage(message, owner, chainId, statement, signature);
+  const {deployed} = await requireAccountOwner(network, account, owner, deployment);
   //
   target = sanitizedTarget;
   const existingSubscription = await prisma.alertSubscription.findFirst({
@@ -94,7 +75,10 @@ export const createSubscription = async (account: string, owner: string, chainId
     }
   );
   // the target (email / phone number) and the OTP are never logged
-  log.info({ subscriptionId: alertSubscription.id, account: account.toLowerCase(), chainId, channel }, "alert subscription created");
+  log.info(
+    { subscriptionId: alertSubscription.id, account: account.toLowerCase(), chainId, channel, accountDeployed: deployed },
+    "alert subscription created"
+  );
   return alertSubscription.id;
 };
 
@@ -150,8 +134,9 @@ export const activateSubscription = async (subscriptionId: string, challenge: st
 
 export const fetchSubscriptions = async (account: string, owner: string, chainId: number, message: string, signature: string) => {
   let statement = MessageStatements["alerts-fetch"];
-  await validateSIWEMessage(message, owner, chainId, statement, signature);
-  const owners = await requireAccountOwner(account, owner, chainId);
+  const network = Network.instances.get(chainId.toString())!;
+  const {deployment} = await validateOwnerSIWEMessage(message, owner, chainId, statement, signature);
+  const {owners} = await requireAccountOwner(network, account, owner, deployment);
   //
   const subscriptions = await prisma.alertSubscription.findMany({
     where: {
@@ -179,8 +164,9 @@ export const unsubscribe = async (subscriptionId: string, chainId: number, owner
     throw new ApiError(httpStatus.NOT_FOUND, `Could not find an alert subscription with this id`);
   }
   const statement = MessageStatements["alerts-unsubscribe"];
-  await validateSIWEMessage(message, owner, chainId, statement, signature);
-  const owners = await requireAccountOwner(alertSubscription.account, owner, chainId);
+  const network = Network.instances.get(chainId.toString())!;
+  const {deployment} = await validateOwnerSIWEMessage(message, owner, chainId, statement, signature);
+  const {owners, deployed} = await requireAccountOwner(network, alertSubscription.account, owner, deployment);
   if (!canManageSubscription(alertSubscription.owner, owner, owners)){
     throw new ApiError(httpStatus.FORBIDDEN, `This subscription belongs to another owner of the account`);
   }
@@ -190,7 +176,7 @@ export const unsubscribe = async (subscriptionId: string, chainId: number, owner
   });
   AccountEventTracker.instance().removeSubscription(alertSubscription.account, alertSubscription.id);
   log.info(
-    { subscriptionId: alertSubscription.id, account: alertSubscription.account, channel: alertSubscription.channel },
+    { subscriptionId: alertSubscription.id, account: alertSubscription.account, chainId, channel: alertSubscription.channel, accountDeployed: deployed },
     "alert subscription removed"
   );
   return true;

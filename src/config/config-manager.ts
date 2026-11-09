@@ -15,6 +15,7 @@ import {registerSecret} from "../logging";
 import logger from "../utils/logger";
 import {findRecoveryModuleVariant} from "../utils/recovery-modules";
 import {RecoveryModuleConfig} from "../models/recovery-module";
+import {MULTICALL3_ADDRESS} from "../utils/erc6492";
 
 const log = logger.child({ component: "config" });
 
@@ -81,6 +82,8 @@ type Config = {
       guardian?: string | '~';
       alerts?: string | '~';
       indexer?: IndexerConfig;
+      // Multicall3 used to verify ERC-6492 signatures of undeployed accounts; defaults to the canonical address
+      multicall3?: string;
     };
   };
 };
@@ -473,6 +476,11 @@ export class Configuration {
         }
       }
       //
+      const multicall3 = networkConfig.multicall3 ?? MULTICALL3_ADDRESS;
+      if (typeof multicall3 !== "string" || !ethers.utils.isAddress(multicall3)) {
+        throw new Error(`Network '${networkName}' 'multicall3' must be a valid address.`);
+      }
+      //
       new Network(
         networkName,
         chainId,
@@ -483,6 +491,7 @@ export class Configuration {
         {...networkConfig.finalizeRecoveryRequests, rateLimit: finalizationSponsorshipRateLimiting},
         networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts,
+        ethers.utils.getAddress(multicall3),
       );
     });
     if (Network.instances.instances.length === 0) {

@@ -5,6 +5,15 @@ import {hexValue} from "ethers/lib/utils";
 import {SiweMessage} from "siwe";
 import {ApiError} from "./error";
 import httpStatus from "http-status";
+import {
+  AccountDeployment,
+  Erc6492Error,
+  hasCode,
+  isErc6492Signature,
+  simulateIsValidSignature,
+  UnwrappedSignature,
+  unwrapErc6492Signature,
+} from "./erc6492";
 
 export const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 export const e164Regex = /^\+?[1-9]\d{1,14}$/;
@@ -242,17 +251,91 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
   return [true, ""];
 }
 
-export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string) {
-  const network = Network.instances.get(chainId.toString())!;
+const parseSIWEMessage = (message: string, address: string, chainId: number, statement: string): SiweMessage => {
   const siweMessage = new SiweMessage(message);
-  const [success, errorMessage] = verifySiweMessageData(siweMessage, account, chainId, statement);
+  const [success, errorMessage] = verifySiweMessageData(siweMessage, address, chainId, statement);
   if (!success){
     throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${errorMessage}`);
   }
+  return siweMessage;
+};
+
+const invalidSIWESignature = () =>
+  new ApiError(httpStatus.FORBIDDEN, `SIWE Message: invalid signature, make sure you correctly signed this request, learn more here ...`); // todo add link for signature generation
+
+// ECDSA recovery of the message's address, else EIP-1271 on the address (deployed contracts only)
+const verifySIWESignature = async (siweMessage: SiweMessage, signature: string, network: Network) => {
   const validSignature = await siweMessage.verify({signature}, {provider: network.jsonRPCProvider, suppressExceptions: true});
   if (!validSignature.success) {
-    throw new ApiError(httpStatus.FORBIDDEN, `SIWE Message: invalid signature, make sure you correctly signed this request, learn more here ...`); // todo add link for signature generation
+    throw invalidSIWESignature();
   }
-  return true;
+};
+
+const unwrapSIWESignature = (signature: string): UnwrappedSignature => {
+  try {
+    return unwrapErc6492Signature(signature);
+  } catch (error) {
+    if (error instanceof Erc6492Error) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: malformed ERC-6492 signature`);
+    }
+    throw error;
+  }
+};
+
+export interface SiweVerification {
+  counterfactual: boolean; // the account was not deployed: its ERC-6492 signature was verified in simulation
+}
+
+export interface OwnerSiweVerification {
+  deployment?: AccountDeployment; // the account's ERC-6492 deployment data, when the signature was wrapped
+}
+
+// Self mode (standard ERC-6492): the SIWE address is the account and the account signs. An ERC-6492-wrapped
+// signature of an account without code is checked by deploying the account in simulation and calling its
+// isValidSignature; once the account has code, the wrapper's deployment data is ignored.
+export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string): Promise<SiweVerification> {
+  const network = Network.instances.get(chainId.toString())!;
+  const siweMessage = parseSIWEMessage(message, account, chainId, statement);
+  if (!isErc6492Signature(signature)) {
+    await verifySIWESignature(siweMessage, signature, network);
+    return {counterfactual: false};
+  }
+  const {deployment, signature: innerSignature} = unwrapSIWESignature(signature);
+  if (await hasCode(network.jsonRPCProvider, account)) {
+    await verifySIWESignature(siweMessage, innerSignature, network);
+    return {counterfactual: false};
+  }
+  await network.requireCounterfactualSupport();
+  const hash = ethers.utils.hashMessage(siweMessage.prepareMessage()); // the hash siwe passes to isValidSignature
+  let validSignature: boolean;
+  try {
+    validSignature = await simulateIsValidSignature(
+      network.jsonRPCProvider, network.multicall3, deployment, account, hash, innerSignature
+    );
+  } catch (error) {
+    if (error instanceof Erc6492Error) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: the ERC-6492 deployment data does not deploy ${account} on chain ${chainId}`);
+    }
+    throw error;
+  }
+  if (!validSignature) {
+    throw invalidSIWESignature();
+  }
+  return {counterfactual: true};
+}
+
+// Owner mode (this service's variant of ERC-6492): the SIWE address is an owner of the account, and the
+// wrapper's deployment data describes the account, not the signer. The inner signature is the owner's, checked
+// as an unwrapped one (ECDSA, else EIP-1271 on a deployed owner; never unwrapped again); the deployment data is
+// returned for the owner lookup (requireAccountOwner).
+export async function validateOwnerSIWEMessage(message: string, owner: string, chainId: number, statement: string, signature: string): Promise<OwnerSiweVerification> {
+  const network = Network.instances.get(chainId.toString())!;
+  const siweMessage = parseSIWEMessage(message, owner, chainId, statement);
+  let deployment: AccountDeployment | undefined;
+  if (isErc6492Signature(signature)) {
+    ({deployment, signature} = unwrapSIWESignature(signature));
+  }
+  await verifySIWESignature(siweMessage, signature, network);
+  return {deployment};
 }
 
