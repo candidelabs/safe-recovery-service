@@ -14,6 +14,7 @@ import {Network} from "../src/models/network";
 
 const CHAIN_ID = 11155111;
 const MINUTE = 60 * 1000;
+const DAY = 24 * 60 * MINUTE;
 const NOW = Date.now(); // the fake clock starts here, so the entries it leaves outlive the tests on the real clock
 const statement = "I request to retrieve all Social Recovery Module alert subscriptions linked to my account";
 const owner = ethers.Wallet.createRandom();
@@ -21,6 +22,8 @@ const stranger = ethers.Wallet.createRandom();
 
 const NONCE_USED = "nonce has been already used in a previous request, please use a random nonce";
 const TOO_OLD = "issuedAt is valid only for 5 minutes and signature is already expired";
+const PAST_LIFETIME = "issuedAt is valid only for 24 hours, even with a later expirationTime, and signature is already expired";
+const EXPIRED = "expirationTimestamp has passed and signature has expired";
 const IN_THE_FUTURE = "issuedAt is in the future";
 
 const at = (offsetMs: number) => new Date(NOW + offsetMs);
@@ -45,17 +48,22 @@ describe("verifySiweMessageData time window", () => {
   beforeEach(() => jest.useFakeTimers({now: NOW}));
   afterEach(() => jest.useRealTimers());
 
-  it("rejects an issuedAt more than 5 minutes old, even with a far-future expirationTime", () => {
-    for (const expirationTime of [at(365 * 24 * 60 * MINUTE), at(MINUTE), undefined]) {
-      expect(check(siweMessage({issuedAt: at(-5 * MINUTE - 1), expirationTime}))).toEqual([false, TOO_OLD]);
-    }
-    expect(check(siweMessage({issuedAt: at(-30 * 24 * 60 * MINUTE), expirationTime: at(365 * 24 * 60 * MINUTE)})))
-      .toEqual([false, TOO_OLD]);
+  it("rejects an issuedAt more than 5 minutes old without expirationTime", () => {
+    expect(check(siweMessage({issuedAt: at(-5 * MINUTE - 1)}))).toEqual([false, TOO_OLD]);
+    expect(check(siweMessage({issuedAt: at(-30 * DAY)}))).toEqual([false, TOO_OLD]);
   });
 
   it("accepts an issuedAt up to 5 minutes old", () => {
     expect(check(siweMessage({issuedAt: at(-5 * MINUTE)}))).toEqual([true, ""]);
-    expect(check(siweMessage({issuedAt: at(-5 * MINUTE), expirationTime: at(365 * 24 * 60 * MINUTE)}))).toEqual([true, ""]);
+    expect(check(siweMessage({issuedAt: at(-5 * MINUTE), expirationTime: at(365 * DAY)}))).toEqual([true, ""]);
+  });
+
+  it("with expirationTime, accepts the message until then, at most 24 hours after its issuedAt", () => {
+    expect(check(siweMessage({issuedAt: at(-2 * 60 * MINUTE), expirationTime: at(60 * MINUTE)}))).toEqual([true, ""]);
+    expect(check(siweMessage({issuedAt: at(-DAY), expirationTime: at(365 * DAY)}))).toEqual([true, ""]);
+    expect(check(siweMessage({issuedAt: at(-2 * 60 * MINUTE), expirationTime: at(-1)}))).toEqual([false, EXPIRED]);
+    expect(check(siweMessage({issuedAt: at(-DAY - 1), expirationTime: at(365 * DAY)}))).toEqual([false, PAST_LIFETIME]);
+    expect(check(siweMessage({issuedAt: at(-30 * DAY), expirationTime: at(365 * DAY)}))).toEqual([false, PAST_LIFETIME]);
   });
 
   it("rejects an issuedAt more than 60 seconds ahead", () => {
@@ -75,8 +83,7 @@ describe("verifySiweMessageData time window", () => {
   });
 
   it("rejects an expired expirationTime", () => {
-    expect(check(siweMessage({issuedAt: at(-2 * MINUTE), expirationTime: at(-1)})))
-      .toEqual([false, "expirationTimestamp has passed and signature has expired"]);
+    expect(check(siweMessage({issuedAt: at(-2 * MINUTE), expirationTime: at(-1)}))).toEqual([false, EXPIRED]);
   });
 
   it("rejects a notBefore that has not passed", () => {
@@ -253,9 +260,30 @@ describe("nonce replay protection", () => {
       expect(check(siweMessage({issuedAt: new Date(), nonce}))).toEqual([false, NONCE_USED]);
       jest.setSystemTime(NOW + 6 * MINUTE);
       expect(check(siweMessage({issuedAt: new Date(), nonce}))).toEqual([true, ""]);
-      jest.setSystemTime(NOW + 24 * 60 * MINUTE); // everything reserved so far has expired
+      jest.setSystemTime(NOW + 2 * DAY); // everything reserved so far has expired
       expect(check(siweMessage({issuedAt: new Date()}))).toEqual([true, ""]);
       expect(siweNonces.size).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("holds the nonce of a message with expirationTime until then, at most 24 hours after its issuedAt", () => {
+    jest.useFakeTimers({now: NOW});
+    try {
+      const nonce = generateNonce();
+      expect(check(siweMessage({issuedAt: at(0), expirationTime: at(60 * MINUTE), nonce}))).toEqual([true, ""]);
+      jest.setSystemTime(NOW + 61 * MINUTE - 1); // expirationTime + 60 seconds, minus 1 ms
+      expect(check(siweMessage({issuedAt: new Date(), nonce}))).toEqual([false, NONCE_USED]);
+      jest.setSystemTime(NOW + 61 * MINUTE);
+      expect(check(siweMessage({issuedAt: new Date(), nonce}))).toEqual([true, ""]);
+
+      const capped = generateNonce();
+      expect(check(siweMessage({issuedAt: at(0), expirationTime: at(365 * DAY), nonce: capped}))).toEqual([true, ""]);
+      jest.setSystemTime(NOW + DAY + MINUTE - 1); // issuedAt + 24 hours + 60 seconds, minus 1 ms
+      expect(check(siweMessage({issuedAt: new Date(), nonce: capped}))).toEqual([false, NONCE_USED]);
+      jest.setSystemTime(NOW + DAY + MINUTE);
+      expect(check(siweMessage({issuedAt: new Date(), nonce: capped}))).toEqual([true, ""]);
     } finally {
       jest.useRealTimers();
     }

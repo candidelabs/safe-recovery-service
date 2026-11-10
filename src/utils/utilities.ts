@@ -192,9 +192,11 @@ export function toNormalCase(input: string): string {
     .join(' ');
 }
 
-// A signed SIWE message is accepted for SIWE_MESSAGE_MAX_AGE_MS after its issuedAt, whatever its expirationTime,
-// and its issuedAt may be up to SIWE_CLOCK_SKEW_MS ahead of this server's clock.
+// A signed SIWE message is accepted for SIWE_MESSAGE_MAX_AGE_MS after its issuedAt or, when it sets an
+// expirationTime, until then but at most SIWE_MESSAGE_MAX_LIFETIME_MS after its issuedAt (time for the owners of a
+// multisig account to sign it). Its issuedAt may be up to SIWE_CLOCK_SKEW_MS ahead of this server's clock.
 export const SIWE_MESSAGE_MAX_AGE_MS = 5 * 60 * 1000;
+export const SIWE_MESSAGE_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
 export const SIWE_CLOCK_SKEW_MS = 60 * 1000;
 
 // A nonce reservation, returned by SiweNonceStore.reserve. The object is its ownership token: release takes it back
@@ -205,10 +207,10 @@ export interface SiweNonceReservation {
 }
 
 // The SIWE messages this process accepted or is verifying, by message identifier (address, chainId, statement,
-// nonce), each with the time it can be dropped: issuedAt + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS, when the
-// message fails the issuedAt check anyway. Expired entries are pruned on each reservation (no timer). The store is in
-// memory, so it only covers this process: after a restart, or on another replica, a message can be replayed until
-// it is SIWE_MESSAGE_MAX_AGE_MS old.
+// nonce), each with the time it can be dropped: SIWE_CLOCK_SKEW_MS after the message stops being accepted, when it
+// fails the issuedAt or expirationTime check anyway. Expired entries are pruned on each reservation (no timer). The
+// store is in memory, so it only covers this process: after a restart, or on another replica, a message can be
+// replayed until it stops being accepted.
 export class SiweNonceStore {
   private readonly reservations: Map<string, SiweNonceReservation> = new Map();
 
@@ -281,8 +283,11 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
   if ((messageTimestamp - currentTimestamp) > SIWE_CLOCK_SKEW_MS) {
     return [false, `issuedAt is in the future`];
   }
-  if ((currentTimestamp - messageTimestamp) > SIWE_MESSAGE_MAX_AGE_MS) {
+  if (!message.expirationTime && (currentTimestamp - messageTimestamp) > SIWE_MESSAGE_MAX_AGE_MS) {
     return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
+  }
+  if ((currentTimestamp - messageTimestamp) > SIWE_MESSAGE_MAX_LIFETIME_MS) {
+    return [false, `issuedAt is valid only for 24 hours, even with a later expirationTime, and signature is already expired`];
   }
   if (message.notBefore){
     const notBeforeTimestamp = Date.parse(message.notBefore);
@@ -293,6 +298,7 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
       return [false, `notBeforeTimestamp has not yet passed, this signature cannot be used until then`];
     }
   }
+  let acceptedUntil = messageTimestamp + SIWE_MESSAGE_MAX_AGE_MS;
   if (message.expirationTime){
     const expirationTimestamp = Date.parse(message.expirationTime);
     if (Number.isNaN(expirationTimestamp)){
@@ -301,8 +307,9 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     if (expirationTimestamp < currentTimestamp) {
       return [false, `expirationTimestamp has passed and signature has expired`];
     }
+    acceptedUntil = Math.min(expirationTimestamp, messageTimestamp + SIWE_MESSAGE_MAX_LIFETIME_MS);
   }
-  const nonceExpiresAt = messageTimestamp + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS;
+  const nonceExpiresAt = acceptedUntil + SIWE_CLOCK_SKEW_MS;
   const reservation = siweNonces.reserve(siweMessageIdentifier(message), nonceExpiresAt, currentTimestamp);
   if (!reservation){
     return [false, `nonce has been already used in a previous request, please use a random nonce`];
