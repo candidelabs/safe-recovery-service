@@ -38,7 +38,8 @@ const siweMessage = (fields: {issuedAt: Date; expirationTime?: Date; notBefore?:
   notBefore: fields.notBefore?.toISOString(),
 });
 
-const check = (message: SiweMessage) => verifySiweMessageData(message, owner.address, CHAIN_ID, statement);
+// the verdict, without the nonce reservation
+const check = (message: SiweMessage) => verifySiweMessageData(message, owner.address, CHAIN_ID, statement).slice(0, 2);
 
 describe("verifySiweMessageData time window", () => {
   beforeEach(() => jest.useFakeTimers({now: NOW}));
@@ -87,32 +88,55 @@ describe("verifySiweMessageData time window", () => {
 describe("SiweNonceStore", () => {
   it("rejects a held identifier until it is released", () => {
     const store = new SiweNonceStore();
-    expect(store.reserve("a", 2000, 1000)).toBe(true);
-    expect(store.reserve("a", 2000, 1000)).toBe(false);
-    expect(store.reserve("b", 2000, 1000)).toBe(true);
-    store.release("a");
+    const a = store.reserve("a", 2000, 1000)!;
+    expect(a).toEqual({identifier: "a", expiresAt: 2000});
+    expect(store.reserve("a", 2000, 1000)).toBeUndefined();
+    expect(store.reserve("b", 2000, 1000)).toBeDefined();
+    store.release(a);
     expect(store.size).toBe(1);
-    expect(store.reserve("a", 2000, 1000)).toBe(true);
+    expect(store.reserve("a", 2000, 1000)).toBeDefined();
   });
 
   it("prunes expired entries on each reservation", () => {
     const store = new SiweNonceStore();
     store.reserve("a", 2000, 1000);
     store.reserve("b", 3000, 1000);
-    expect(store.reserve("c", 5000, 1999)).toBe(true); // nothing expired yet
+    expect(store.reserve("c", 5000, 1999)).toBeDefined(); // nothing expired yet
     expect(store.size).toBe(3);
-    expect(store.reserve("d", 5000, 2000)).toBe(true); // drops "a"
+    expect(store.reserve("d", 5000, 2000)).toBeDefined(); // drops "a"
     expect(store.size).toBe(3);
-    expect(store.reserve("a", 6000, 2000)).toBe(true); // free again
-    expect(store.reserve("e", 9000, 6000)).toBe(true); // drops all but "e"
+    expect(store.reserve("a", 6000, 2000)).toBeDefined(); // free again
+    expect(store.reserve("e", 9000, 6000)).toBeDefined(); // drops all but "e"
     expect(store.size).toBe(1);
+  });
+
+  it("ignores the release of a reservation that expired and was replaced", () => {
+    const store = new SiweNonceStore();
+    const stale = store.reserve("a", 2000, 1000)!;
+    const current = store.reserve("a", 5000, 2000)!; // "a" expired at 2000: a new reservation replaces it
+    store.release(stale);
+    expect(store.reserve("a", 5000, 2000)).toBeUndefined();
+    store.release(current);
+    expect(store.reserve("a", 5000, 2000)).toBeDefined();
   });
 });
 
 // A JSON-RPC provider with no contract, so siwe's EIP-1271 fallback answers "invalid" for any non-ECDSA signature.
 class FakeChain extends ethers.providers.StaticJsonRpcProvider {
+  private held: Promise<void> = Promise.resolve();
+
   constructor() {
     super("http://fake-chain.invalid", {chainId: CHAIN_ID, name: "sepolia"});
+  }
+
+  // Holds the contract reads (eth_getCode, eth_call) made from now on until the returned function is called.
+  hold(): () => void {
+    let open!: () => void;
+    this.held = new Promise((resolve) => open = resolve);
+    return () => {
+      this.held = Promise.resolve();
+      open();
+    };
   }
 
   async send(method: string): Promise<any> {
@@ -123,6 +147,7 @@ class FakeChain extends ethers.providers.StaticJsonRpcProvider {
         return CHAIN_ID.toString();
       case "eth_getCode":
       case "eth_call":
+        await this.held;
         return "0x";
       default:
         throw new Error(`unexpected ${method}`);
@@ -131,10 +156,11 @@ class FakeChain extends ethers.providers.StaticJsonRpcProvider {
 }
 
 describe("nonce replay protection", () => {
+  const chain = new FakeChain();
   const network = Object.assign(Object.create(Network.prototype), {
     name: "sepolia",
     chainId: CHAIN_ID,
-    jsonRPCProvider: new FakeChain(),
+    jsonRPCProvider: chain,
     multicall3: MULTICALL3_ADDRESS,
   }) as Network;
   Network.instances.add(network);
@@ -195,6 +221,27 @@ describe("nonce replay protection", () => {
     expect(results.find((result) => result.status === "rejected")).toMatchObject({reason: nonceUsed});
     // the rejected request did not release the reservation of the other one
     await expect(validateOwner(message, signature)).rejects.toMatchObject(nonceUsed);
+  });
+
+  it("does not free a later reservation of the nonce when a check that outlived its own fails", async () => {
+    const nonce = generateNonce();
+    const start = Date.now();
+    const clock = jest.spyOn(Date, "now").mockReturnValue(start);
+    const open = chain.hold();
+    try {
+      // reserved until start + 2 minutes (issuedAt + 5 minutes + 60 seconds); its EIP-1271 check waits on the chain
+      const [staleText, strangerSignature] = await signed(siweMessage({issuedAt: new Date(start - 4 * MINUTE), nonce}), stranger);
+      const stale = validateOwner(staleText, strangerSignature);
+      clock.mockReturnValue(start + 3 * MINUTE);
+      const [text, signature] = await signed(siweMessage({issuedAt: new Date(start + 3 * MINUTE), nonce}));
+      expect(await validateOwner(text, signature)).toEqual({deployment: undefined});
+      open();
+      await expect(stale).rejects.toMatchObject({statusCode: 403});
+      await expect(validateOwner(text, signature)).rejects.toMatchObject(nonceUsed);
+    } finally {
+      open();
+      clock.mockRestore();
+    }
   });
 
   it("holds a nonce until its message is past the issuedAt window, then prunes it", () => {

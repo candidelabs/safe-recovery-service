@@ -197,35 +197,47 @@ export function toNormalCase(input: string): string {
 export const SIWE_MESSAGE_MAX_AGE_MS = 5 * 60 * 1000;
 export const SIWE_CLOCK_SKEW_MS = 60 * 1000;
 
+// A nonce reservation, returned by SiweNonceStore.reserve. The object is its ownership token: release takes it back
+// and frees the identifier only while this reservation still holds it.
+export interface SiweNonceReservation {
+  readonly identifier: string;
+  readonly expiresAt: number;
+}
+
 // The SIWE messages this process accepted or is verifying, by message identifier (address, chainId, statement,
 // nonce), each with the time it can be dropped: issuedAt + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS, when the
 // message fails the issuedAt check anyway. Expired entries are pruned on each reservation (no timer). The store is in
 // memory, so it only covers this process: after a restart, or on another replica, a message can be replayed until
 // it is SIWE_MESSAGE_MAX_AGE_MS old.
 export class SiweNonceStore {
-  private readonly expiries: Map<string, number> = new Map();
+  private readonly reservations: Map<string, SiweNonceReservation> = new Map();
 
   get size(): number {
-    return this.expiries.size;
+    return this.reservations.size;
   }
 
   // Prunes the expired entries, then reserves the identifier unless it is held. Synchronous, so of two concurrent
   // requests with the same message only the first gets it.
-  reserve(identifier: string, expiresAt: number, now: number): boolean {
-    for (const [heldIdentifier, heldExpiresAt] of this.expiries) {
-      if (heldExpiresAt <= now) {
-        this.expiries.delete(heldIdentifier);
+  reserve(identifier: string, expiresAt: number, now: number): SiweNonceReservation | undefined {
+    for (const [heldIdentifier, held] of this.reservations) {
+      if (held.expiresAt <= now) {
+        this.reservations.delete(heldIdentifier);
       }
     }
-    if (this.expiries.has(identifier)) {
-      return false;
+    if (this.reservations.has(identifier)) {
+      return undefined;
     }
-    this.expiries.set(identifier, expiresAt);
-    return true;
+    const reservation: SiweNonceReservation = {identifier, expiresAt};
+    this.reservations.set(identifier, reservation);
+    return reservation;
   }
 
-  release(identifier: string): void {
-    this.expiries.delete(identifier);
+  // Frees the reservation's identifier, unless the reservation expired and a later one of the same identifier
+  // replaced it (a signature check that outlived its reservation must not free the later request's nonce).
+  release(reservation: SiweNonceReservation): void {
+    if (this.reservations.get(reservation.identifier) === reservation) {
+      this.reservations.delete(reservation.identifier);
+    }
   }
 }
 
@@ -236,9 +248,12 @@ const siweMessageIdentifier = (message: SiweMessage): string => ethers.utils.def
   [message.address.toLowerCase(), message.chainId, message.statement, message.nonce]
 );
 
+// [true, "", the message's nonce reservation], or [false, why the message is rejected]
+export type SiweMessageCheck = [true, "", SiweNonceReservation] | [false, string];
+
 // Checks the message, then reserves its nonce in siweNonces: the caller verifies the signature next and releases the
-// nonce if that fails (releaseNonceOnFailure).
-export function verifySiweMessageData(message: SiweMessage, account: string, chainId: number, statement: string): [boolean, string] {
+// returned reservation if that fails (releaseNonceOnFailure).
+export function verifySiweMessageData(message: SiweMessage, account: string, chainId: number, statement: string): SiweMessageCheck {
   const messageAccount = message.address.toLowerCase();
   if (message.version !== "1"){
     return [false, `this service only accepts messages (siwe) that are formatted in version '1'`];
@@ -288,29 +303,30 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     }
   }
   const nonceExpiresAt = messageTimestamp + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS;
-  if (!siweNonces.reserve(siweMessageIdentifier(message), nonceExpiresAt, currentTimestamp)){
+  const reservation = siweNonces.reserve(siweMessageIdentifier(message), nonceExpiresAt, currentTimestamp);
+  if (!reservation){
     return [false, `nonce has been already used in a previous request, please use a random nonce`];
   }
-  return [true, ""];
+  return [true, "", reservation];
 }
 
-const parseSIWEMessage = (message: string, address: string, chainId: number, statement: string): SiweMessage => {
+const parseSIWEMessage = (message: string, address: string, chainId: number, statement: string): [SiweMessage, SiweNonceReservation] => {
   const siweMessage = new SiweMessage(message);
-  const [success, errorMessage] = verifySiweMessageData(siweMessage, address, chainId, statement);
-  if (!success){
-    throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${errorMessage}`);
+  const check = verifySiweMessageData(siweMessage, address, chainId, statement);
+  if (!check[0]){
+    throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${check[1]}`);
   }
-  return siweMessage;
+  return [siweMessage, check[2]];
 };
 
-// Runs the signature check of a message that passed verifySiweMessageData, which reserved its nonce. The nonce stays
-// used if the check passes and is released if it fails or throws, so a bad signature neither leaves an entry behind
+// Runs the signature check of a message that passed verifySiweMessageData, which reserved its nonce. The reservation
+// is kept if the check passes and released if it fails or throws, so a bad signature neither leaves an entry behind
 // nor uses up the nonce the client signed.
-const releaseNonceOnFailure = async <T>(siweMessage: SiweMessage, verify: () => Promise<T>): Promise<T> => {
+const releaseNonceOnFailure = async <T>(reservation: SiweNonceReservation, verify: () => Promise<T>): Promise<T> => {
   try {
     return await verify();
   } catch (error) {
-    siweNonces.release(siweMessageIdentifier(siweMessage));
+    siweNonces.release(reservation);
     throw error;
   }
 };
@@ -350,8 +366,8 @@ export interface OwnerSiweVerification {
 // isValidSignature; once the account has code, the wrapper's deployment data is ignored.
 export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string): Promise<SiweVerification> {
   const network = Network.instances.get(chainId.toString())!;
-  const siweMessage = parseSIWEMessage(message, account, chainId, statement);
-  return releaseNonceOnFailure(siweMessage, () => verifyAccountSIWESignature(siweMessage, account, chainId, signature, network));
+  const [siweMessage, reservation] = parseSIWEMessage(message, account, chainId, statement);
+  return releaseNonceOnFailure(reservation, () => verifyAccountSIWESignature(siweMessage, account, chainId, signature, network));
 }
 
 const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: string, chainId: number, signature: string, network: Network): Promise<SiweVerification> => {
@@ -389,8 +405,8 @@ const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: str
 // returned for the owner lookup (requireAccountOwner).
 export async function validateOwnerSIWEMessage(message: string, owner: string, chainId: number, statement: string, signature: string): Promise<OwnerSiweVerification> {
   const network = Network.instances.get(chainId.toString())!;
-  const siweMessage = parseSIWEMessage(message, owner, chainId, statement);
-  return releaseNonceOnFailure(siweMessage, async () => {
+  const [siweMessage, reservation] = parseSIWEMessage(message, owner, chainId, statement);
+  return releaseNonceOnFailure(reservation, async () => {
     let deployment: AccountDeployment | undefined;
     if (isErc6492Signature(signature)) {
       ({deployment, signature} = unwrapSIWESignature(signature));
