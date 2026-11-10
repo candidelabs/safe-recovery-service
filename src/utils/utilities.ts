@@ -192,7 +192,52 @@ export function toNormalCase(input: string): string {
     .join(' ');
 }
 
-const nonceTracker: Set<string> = new Set();
+// A signed SIWE message is accepted for SIWE_MESSAGE_MAX_AGE_MS after its issuedAt, whatever its expirationTime,
+// and its issuedAt may be up to SIWE_CLOCK_SKEW_MS ahead of this server's clock.
+export const SIWE_MESSAGE_MAX_AGE_MS = 5 * 60 * 1000;
+export const SIWE_CLOCK_SKEW_MS = 60 * 1000;
+
+// The SIWE messages this process accepted or is verifying, by message identifier (address, chainId, statement,
+// nonce), each with the time it can be dropped: issuedAt + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS, when the
+// message fails the issuedAt check anyway. Expired entries are pruned on each reservation (no timer). The store is in
+// memory, so it only covers this process: after a restart, or on another replica, a message can be replayed until
+// it is SIWE_MESSAGE_MAX_AGE_MS old.
+export class SiweNonceStore {
+  private readonly expiries: Map<string, number> = new Map();
+
+  get size(): number {
+    return this.expiries.size;
+  }
+
+  // Prunes the expired entries, then reserves the identifier unless it is held. Synchronous, so of two concurrent
+  // requests with the same message only the first gets it.
+  reserve(identifier: string, expiresAt: number, now: number): boolean {
+    for (const [heldIdentifier, heldExpiresAt] of this.expiries) {
+      if (heldExpiresAt <= now) {
+        this.expiries.delete(heldIdentifier);
+      }
+    }
+    if (this.expiries.has(identifier)) {
+      return false;
+    }
+    this.expiries.set(identifier, expiresAt);
+    return true;
+  }
+
+  release(identifier: string): void {
+    this.expiries.delete(identifier);
+  }
+}
+
+export const siweNonces = new SiweNonceStore();
+
+const siweMessageIdentifier = (message: SiweMessage): string => ethers.utils.defaultAbiCoder.encode(
+  ["address", "uint256", "string", "string"],
+  [message.address.toLowerCase(), message.chainId, message.statement, message.nonce]
+);
+
+// Checks the message, then reserves its nonce in siweNonces: the caller verifies the signature next and releases the
+// nonce if that fails (releaseNonceOnFailure).
 export function verifySiweMessageData(message: SiweMessage, account: string, chainId: number, statement: string): [boolean, string] {
   const messageAccount = message.address.toLowerCase();
   if (message.version !== "1"){
@@ -210,13 +255,6 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
   if (message.chainId !== chainId){
     return [false, `invalid chainId in signed message (expected: ${chainId}, actual ${message.chainId})`];
   }
-  const messageIdentifier = ethers.utils.defaultAbiCoder.encode(
-    ["address", "uint256", "string", "string"],
-    [messageAccount, message.chainId, message.statement, message.nonce]
-  );
-  if (nonceTracker.has(messageIdentifier)){
-    return [false, `nonce has been already used in a previous request, please use a random nonce`];
-  }
   if (!message.issuedAt){
     return [false, `issuedAt in signed message MUST be specified`];
   }
@@ -225,6 +263,12 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     return [false, `issuedAt could not be parsed in signed message, please make sure it is correctly formatted`];
   }
   const currentTimestamp = Date.now();
+  if ((messageTimestamp - currentTimestamp) > SIWE_CLOCK_SKEW_MS) {
+    return [false, `issuedAt is in the future`];
+  }
+  if ((currentTimestamp - messageTimestamp) > SIWE_MESSAGE_MAX_AGE_MS) {
+    return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
+  }
   if (message.notBefore){
     const notBeforeTimestamp = Date.parse(message.notBefore);
     if (Number.isNaN(notBeforeTimestamp)){
@@ -242,12 +286,11 @@ export function verifySiweMessageData(message: SiweMessage, account: string, cha
     if (expirationTimestamp < currentTimestamp) {
       return [false, `expirationTimestamp has passed and signature has expired`];
     }
-  }else{
-    if ((currentTimestamp - messageTimestamp) > (60*5*1000)) {
-      return [false, `issuedAt is valid only for 5 minutes and signature is already expired`];
-    }
   }
-  nonceTracker.add(messageIdentifier);
+  const nonceExpiresAt = messageTimestamp + SIWE_MESSAGE_MAX_AGE_MS + SIWE_CLOCK_SKEW_MS;
+  if (!siweNonces.reserve(siweMessageIdentifier(message), nonceExpiresAt, currentTimestamp)){
+    return [false, `nonce has been already used in a previous request, please use a random nonce`];
+  }
   return [true, ""];
 }
 
@@ -258,6 +301,18 @@ const parseSIWEMessage = (message: string, address: string, chainId: number, sta
     throw new ApiError(httpStatus.BAD_REQUEST, `SIWE Message: ${errorMessage}`);
   }
   return siweMessage;
+};
+
+// Runs the signature check of a message that passed verifySiweMessageData, which reserved its nonce. The nonce stays
+// used if the check passes and is released if it fails or throws, so a bad signature neither leaves an entry behind
+// nor uses up the nonce the client signed.
+const releaseNonceOnFailure = async <T>(siweMessage: SiweMessage, verify: () => Promise<T>): Promise<T> => {
+  try {
+    return await verify();
+  } catch (error) {
+    siweNonces.release(siweMessageIdentifier(siweMessage));
+    throw error;
+  }
 };
 
 const invalidSIWESignature = () =>
@@ -296,6 +351,10 @@ export interface OwnerSiweVerification {
 export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string): Promise<SiweVerification> {
   const network = Network.instances.get(chainId.toString())!;
   const siweMessage = parseSIWEMessage(message, account, chainId, statement);
+  return releaseNonceOnFailure(siweMessage, () => verifyAccountSIWESignature(siweMessage, account, chainId, signature, network));
+}
+
+const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: string, chainId: number, signature: string, network: Network): Promise<SiweVerification> => {
   if (!isErc6492Signature(signature)) {
     await verifySIWESignature(siweMessage, signature, network);
     return {counterfactual: false};
@@ -322,7 +381,7 @@ export async function validateSIWEMessage(message: string, account: string, chai
     throw invalidSIWESignature();
   }
   return {counterfactual: true};
-}
+};
 
 // Owner mode (this service's variant of ERC-6492): the SIWE address is an owner of the account, and the
 // wrapper's deployment data describes the account, not the signer. The inner signature is the owner's, checked
@@ -331,11 +390,13 @@ export async function validateSIWEMessage(message: string, account: string, chai
 export async function validateOwnerSIWEMessage(message: string, owner: string, chainId: number, statement: string, signature: string): Promise<OwnerSiweVerification> {
   const network = Network.instances.get(chainId.toString())!;
   const siweMessage = parseSIWEMessage(message, owner, chainId, statement);
-  let deployment: AccountDeployment | undefined;
-  if (isErc6492Signature(signature)) {
-    ({deployment, signature} = unwrapSIWESignature(signature));
-  }
-  await verifySIWESignature(siweMessage, signature, network);
-  return {deployment};
+  return releaseNonceOnFailure(siweMessage, async () => {
+    let deployment: AccountDeployment | undefined;
+    if (isErc6492Signature(signature)) {
+      ({deployment, signature} = unwrapSIWESignature(signature));
+    }
+    await verifySIWESignature(siweMessage, signature, network);
+    return {deployment};
+  });
 }
 
