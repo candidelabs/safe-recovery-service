@@ -236,7 +236,7 @@ A user who lost the owner key or forgot the Safe address can list the accounts r
 * The target is normalized as for `register`: an email address is trimmed and lower-cased, a phone number becomes E.164 (checked with Twilio Lookup when the channel uses Twilio).
 * The code is sent through the channel of the first enabled network, in config order, that has a `guardian` and whose `alerts` offers the channel.
 * The response does not tell whether the target has registrations: the status and body are the same, and so is the work done before answering. The code is only sent when the target has a registration on an enabled network, and it is sent after the response.
-* A request within 60 seconds of the latest one for the same channel and target returns the same `challengeId` and sends no new code, so a client that asks twice keeps a code that works. This also holds for targets without registrations.
+* A request within 60 seconds of the latest one for the same channel and target returns the same `challengeId` and sends no new code, so a client that asks twice keeps a code that works. This also holds for targets without registrations. The challenge returned may already be used or dead (5 wrong codes): a new code is only sent once the 60 seconds have passed.
 * After 10 wrong codes for a channel and target within 24 hours, across its challenges, no code is sent to it and every submit for it is refused until older failures leave the window.
 
 | Status | Message | When |

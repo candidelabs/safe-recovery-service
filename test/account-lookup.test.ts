@@ -225,13 +225,13 @@ describe("account lookup", () => {
         await expectNoMessages(disabledOnly);
     });
 
-    it("should leave out a deleted registration", async () => {
+    it("should leave out a registration deleted after the request", async () => {
         const target = newTarget();
         const account = newAccount();
         await register(target, account, CHAIN_A);
         const deleted = await register(target, newAccount(), CHAIN_B);
-        await prisma.authRegistration.delete({where: {id: deleted.id}});
         const challengeId = await newChallenge(target);
+        await prisma.authRegistration.delete({where: {id: deleted.id}});
         const response = await submitLookup(challengeId, await latestCode(target)).expect(200);
         expect(response.body).toEqual({accounts: [{account: account.toLowerCase(), chainId: CHAIN_A}]});
     });

@@ -213,8 +213,8 @@ describe("selectLookupChannel", () => {
 describe("lookup helpers", () => {
     test("the cooldown lasts 60 seconds", () => {
         const now = new Date("2026-11-18T12:00:00Z");
-        expect(withinCooldown(new Date(now.getTime() - ACCOUNT_LOOKUP_COOLDOWN_MS + 1), now)).toBe(true);
-        expect(withinCooldown(new Date(now.getTime() - ACCOUNT_LOOKUP_COOLDOWN_MS), now)).toBe(false);
+        expect(withinCooldown(new Date(now.getTime() - 59_999), now)).toBe(true);
+        expect(withinCooldown(new Date(now.getTime() - 60_000), now)).toBe(false);
     });
 
     test("the code is seeded with the channel and the target", () => {
