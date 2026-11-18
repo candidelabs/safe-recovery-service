@@ -272,7 +272,7 @@ The response lists the accounts registered with the target on that channel:
 | 403 | `Too many invalid challenges for this target, try again later` | 10 wrong codes for the channel and target within 24 hours |
 | 500 | `Channel '<channel>' no longer exists, please contact support` | the alert that sent the code was removed from the config |
 
-Requests and submits for one channel and target are serialized with a Postgres advisory lock, so parallel calls cannot get more than one challenge per cooldown, or more tries than allowed. The log lines are `account lookup requested` (`challengeId`, `channel`, `reused`), `account lookup verified` (`challengeId`, `channel`, `accountCount`) and `account lookup refused` (`challengeId`, `channel`, `statusCode`); the target, the code and the accounts are never logged.
+A submit counts its try with one atomic conditional update before the code is checked, so parallel submits cannot get more tries than allowed. The cooldown is best effort: parallel requests can each get a new challenge and a code. The log lines are `account lookup requested` (`challengeId`, `channel`, `reused`), `account lookup verified` (`challengeId`, `channel`, `accountCount`) and `account lookup refused` (`challengeId`, `channel`, `statusCode`); the target, the code and the accounts are never logged.
 
 **Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `AuthAccountLookupRequest` table and an index on `AuthRegistration (channel, target)`.
 

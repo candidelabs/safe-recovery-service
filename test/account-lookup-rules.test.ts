@@ -8,11 +8,14 @@ import {ApiError} from "../src/utils/error";
 import {
     ACCOUNT_LOOKUP_COOLDOWN_MS,
     ACCOUNT_LOOKUP_TARGET_WINDOW_MS,
+    ALREADY_VERIFIED,
+    EXPIRED,
+    TOO_MANY_TRIES,
     lookupAccounts,
     lookupChallengeSeed,
-    lookupLockKey,
-    lookupSubmitRejection,
+    refusedTry,
     selectLookupChannel,
+    targetLocked,
     withinCooldown,
 } from "../src/utils/account-lookup";
 import {requestAccountLookup, submitAccountLookup} from "../src/services/auth.service";
@@ -21,9 +24,10 @@ import {requestAccountLookup, submitAccountLookup} from "../src/services/auth.se
 // src/utils/account-lookup.ts, the message templates, and the service against in-memory tables
 // (test/account-lookup.test.ts runs the same flow on Postgres and Mailpit).
 
-// In-memory tables for the queries the lookup makes (plain values, equals, in, gt/gte/lt).
+// In-memory tables for the queries the lookup makes (plain values, equals, in, gt/gte/lt; increment and
+// decrement). Each call runs to completion before the next, like one SQL statement, so parallel submits
+// interleave between calls only.
 const mockTables: Record<string, any[]> = {};
-const mockLocks: unknown[] = [];
 jest.mock('../src/config/prisma-client', () => {
     const satisfies = (value: any, condition: any): boolean => {
         if (condition === null || typeof condition !== "object" || condition instanceof Date) return value === condition;
@@ -63,21 +67,24 @@ jest.mock('../src/config/prisma-client', () => {
             },
             update: async ({where, data}: any) => {
                 const row = filter(where)[0];
-                for (const [key, value] of Object.entries(data) as [string, any][]) {
-                    row[key] = value !== null && typeof value === "object" && "increment" in value ? row[key] + value.increment : value;
-                }
+                apply(row, data);
                 return row;
+            },
+            updateMany: async ({where, data}: any) => {
+                const found = filter(where);
+                for (const row of found) apply(row, data);
+                return {count: found.length};
             },
         };
     };
-    const client: any = new Proxy({}, {
-        get: (_target, name: string) => {
-            if (name === "$transaction") return async (run: (tx: any) => Promise<unknown>) => run(client);
-            if (name === "$executeRaw") return async (_strings: TemplateStringsArray, ...values: unknown[]) => { mockLocks.push(values[0]); return 1; };
-            return table(name);
-        },
-    });
-    return {prisma: client};
+    const apply = (row: any, data: Record<string, any>) => {
+        for (const [key, value] of Object.entries(data)) {
+            if (value !== null && typeof value === "object" && "increment" in value) row[key] += value.increment;
+            else if (value !== null && typeof value === "object" && "decrement" in value) row[key] -= value.decrement;
+            else row[key] = value;
+        }
+    };
+    return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
 });
 
 const CHAIN_A = 11155111;
@@ -162,29 +169,28 @@ describe("lookupAccounts", () => {
     });
 });
 
-describe("lookupSubmitRejection", () => {
+describe("refusedTry", () => {
     const now = new Date("2026-11-18T12:00:00Z");
     const live = {verified: false, tries: 0, expiresAt: new Date(now.getTime() + 1000)};
 
-    test("accepts a live challenge", () => {
-        expect(lookupSubmitRejection(live, now, 0)).toBeUndefined();
-        expect(lookupSubmitRejection({...live, tries: 4}, now, 9)).toBeUndefined();
+    test("names a verified challenge first, with 400", () => {
+        expect(refusedTry({verified: true, tries: 5, expiresAt: now}, now)).toBe(ALREADY_VERIFIED);
+        expect(ALREADY_VERIFIED).toEqual({status: 400, message: "challengeId already verified"});
     });
 
-    test("refuses a verified challenge with 400, before anything else", () => {
-        expect(lookupSubmitRejection({verified: true, tries: 5, expiresAt: now}, now, 10)).toEqual({status: 400, message: "challengeId already verified"});
+    test("then an expired one", () => {
+        expect(refusedTry({...live, tries: 5, expiresAt: now}, now)).toBe(EXPIRED);
+        expect(EXPIRED).toEqual({status: 403, message: "challengeId has been expired"});
     });
 
-    test("refuses an expired challenge", () => {
-        expect(lookupSubmitRejection({...live, expiresAt: now}, now, 0)).toEqual({status: 403, message: "challengeId has been expired"});
+    test("else a challenge with 5 tries", () => {
+        expect(refusedTry({...live, tries: 5}, now)).toBe(TOO_MANY_TRIES);
+        expect(TOO_MANY_TRIES).toEqual({status: 403, message: "Too many invalid challenges, request a new code"});
     });
 
-    test("refuses a challenge after 5 wrong codes", () => {
-        expect(lookupSubmitRejection({...live, tries: 5}, now, 5)).toEqual({status: 403, message: "Too many invalid challenges, request a new code"});
-    });
-
-    test("refuses every challenge of a target after 10 wrong codes across its challenges", () => {
-        expect(lookupSubmitRejection(live, now, 10)).toEqual({status: 403, message: "Too many invalid challenges for this target, try again later"});
+    test("a target is locked from 10 tries within the window", () => {
+        expect(targetLocked(9)).toBe(false);
+        expect(targetLocked(10)).toBe(true);
     });
 });
 
@@ -213,14 +219,6 @@ describe("lookup helpers", () => {
 
     test("the code is seeded with the channel and the target", () => {
         expect(lookupChallengeSeed("email", "user@example.com")).toBe("email:user@example.com");
-    });
-
-    test("the lock key is a signed 64-bit integer per channel and target", () => {
-        const key = lookupLockKey("email", "user@example.com");
-        expect(lookupLockKey("email", "user@example.com")).toBe(key);
-        expect(lookupLockKey("sms", "user@example.com")).not.toBe(key);
-        expect(lookupLockKey("email", "other@example.com")).not.toBe(key);
-        expect(key >= -(2n ** 63n) && key < 2n ** 63n).toBe(true);
     });
 });
 
@@ -385,13 +383,50 @@ describe("account lookup service (in-memory tables)", () => {
         expect(await submitAccountLookup(third, thirdCode)).toEqual([{account: ACCOUNT_1, chainId: CHAIN_A}]);
     });
 
-    test("serializes the requests and submits of a target on one lock", async () => {
+    test("checks at most 5 codes of a challenge when wrong codes arrive at once", async () => {
         const target = newTarget();
         register(target, ACCOUNT_1, CHAIN_A);
-        mockLocks.length = 0;
         const challengeId = await request(target);
-        await submitAccountLookup(challengeId, codeFor(target));
-        const key = lookupLockKey("email", target).toString();
-        expect(mockLocks).toEqual([key, key]);
+        const wrong = wrongCode(codeFor(target));
+        const results = await Promise.all(Array.from({length: 20}, () => statusOf(submitAccountLookup(challengeId, wrong))));
+        expect(results.filter((result) => result?.[1] === "Invalid challenge")).toHaveLength(5);
+        expect(results.filter((result) => result?.[1] === "Too many invalid challenges, request a new code")).toHaveLength(15);
+        expect(lookupRow(challengeId).tries).toBe(5);
+    });
+
+    test("checks at most 10 codes of a target when submits arrive at once", async () => {
+        const target = newTarget();
+        register(target, ACCOUNT_1, CHAIN_A);
+        const fail = async (challengeId: string, times: number) => {
+            for (let i = 0; i < times; i++) await statusOf(submitAccountLookup(challengeId, wrongCode(codeFor(target))));
+        };
+        const first = await request(target);
+        await fail(first, 5);
+        backdate(first, ACCOUNT_LOOKUP_COOLDOWN_MS);
+        const second = await request(target);
+        await fail(second, 3);
+        backdate(second, ACCOUNT_LOOKUP_COOLDOWN_MS);
+        const third = await request(target);
+        const wrong = wrongCode(codeFor(target));
+
+        const results = await Promise.all(Array.from({length: 10}, () => statusOf(submitAccountLookup(third, wrong))));
+        expect(results.every((result) => result?.[0] === 403)).toBe(true);
+        expect(results.filter((result) => result?.[1] === "Invalid challenge").length).toBeLessThanOrEqual(2);
+        const tries = lookups().filter((row) => row.target === target).reduce((sum, row) => sum + row.tries, 0);
+        expect(tries).toBeLessThanOrEqual(10);
+    });
+
+    test("accepts a right code once when it arrives twice at once", async () => {
+        const target = newTarget();
+        register(target, ACCOUNT_1, CHAIN_A);
+        const challengeId = await request(target);
+        const code = codeFor(target);
+        const results = await Promise.all([1, 2].map(() => submitAccountLookup(challengeId, code).then(
+            (accounts) => accounts,
+            (e: ApiError) => [e.statusCode, e.message],
+        )));
+        expect(results).toContainEqual([{account: ACCOUNT_1, chainId: CHAIN_A}]);
+        expect(results).toContainEqual([400, "challengeId already verified"]);
+        expect(lookupRow(challengeId)).toMatchObject({verified: true, tries: 0});
     });
 });

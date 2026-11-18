@@ -1,5 +1,4 @@
 import httpStatus from "http-status";
-import {ethers} from "ethers";
 
 // Looking up the accounts registered with an email address or phone number (POST /v1/auth/accounts/request and
 // /v1/auth/accounts/submit). The rules live here, apart from the database, so they are tested without one;
@@ -58,35 +57,28 @@ export function selectLookupChannel<C>(
 // The seed the code is hashed with: the channel and the normalized target.
 export const lookupChallengeSeed = (channel: string, target: string): string => `${channel}:${target}`;
 
-// The Postgres advisory lock key that serializes the requests and submits of one channel and target (64 bits).
-export const lookupLockKey = (channel: string, target: string): bigint =>
-  BigInt.asIntN(64, BigInt(ethers.utils.id(`account-lookup:${channel}:${target}`).slice(0, 18)));
-
 export const withinCooldown = (createdAt: Date, now: Date): boolean =>
   now.getTime() - createdAt.getTime() < ACCOUNT_LOOKUP_COOLDOWN_MS;
 
 export const targetWindowStart = (now: Date): Date => new Date(now.getTime() - ACCOUNT_LOOKUP_TARGET_WINDOW_MS);
 
+// Whether a target is locked, given its tries within the window (not counting the try being checked).
 export const targetLocked = (targetFailures: number): boolean => targetFailures >= ACCOUNT_LOOKUP_TARGET_MAX_FAILURES;
 
+export const ALREADY_VERIFIED: LookupRejection = {status: httpStatus.BAD_REQUEST, message: "challengeId already verified"};
+export const EXPIRED: LookupRejection = {status: httpStatus.FORBIDDEN, message: "challengeId has been expired"};
+export const TOO_MANY_TRIES: LookupRejection = {status: httpStatus.FORBIDDEN, message: "Too many invalid challenges, request a new code"};
+export const TARGET_LOCKED: LookupRejection = {status: httpStatus.FORBIDDEN, message: "Too many invalid challenges for this target, try again later"};
+export const INVALID_CHALLENGE: LookupRejection = {status: httpStatus.FORBIDDEN, message: "Invalid challenge"};
+
 /**
- * Why a submit is refused before its code is checked, or undefined. targetFailures is the number of wrong codes for
- * the challenge's channel and target within the window, this challenge's included.
+ * Why a submit's try could not be counted: the conditional update that counts it (not verified, not expired, fewer
+ * than ACCOUNT_LOOKUP_MAX_TRIES tries) matched nothing, so the challenge, read again, fails one of those.
  */
-export function lookupSubmitRejection(challenge: LookupChallenge, now: Date, targetFailures: number): LookupRejection | undefined {
-  if (challenge.verified) {
-    return {status: httpStatus.BAD_REQUEST, message: "challengeId already verified"};
-  }
-  if (challenge.expiresAt <= now) {
-    return {status: httpStatus.FORBIDDEN, message: "challengeId has been expired"};
-  }
-  if (challenge.tries >= ACCOUNT_LOOKUP_MAX_TRIES) {
-    return {status: httpStatus.FORBIDDEN, message: "Too many invalid challenges, request a new code"};
-  }
-  if (targetLocked(targetFailures)) {
-    return {status: httpStatus.FORBIDDEN, message: "Too many invalid challenges for this target, try again later"};
-  }
-  return undefined;
+export function refusedTry(challenge: LookupChallenge, now: Date): LookupRejection {
+  if (challenge.verified) return ALREADY_VERIFIED;
+  if (challenge.expiresAt <= now) return EXPIRED;
+  return TOO_MANY_TRIES;
 }
 
 /**
