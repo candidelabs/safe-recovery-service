@@ -45,6 +45,7 @@ model AuthRegistration {
   updatedAt DateTime @updatedAt
 
   @@index([account])
+  @@index([channel, target])
 }
 
 model AuthRegistrationRequest {
@@ -62,6 +63,25 @@ model AuthRegistrationRequest {
   updatedAt     DateTime  @updatedAt
 
   @@index([account])
+}
+
+// A lookup of the accounts registered with an email address or phone number (POST /v1/auth/accounts/request):
+// the code sent to the target, which /v1/auth/accounts/submit checks. alertId is the alert whose channel made the
+// code (the first enabled guardian network offering the channel). tries counts wrong codes.
+model AuthAccountLookupRequest {
+  id            String    @id @default(uuid())
+  channel       String
+  target        String
+  alertId       String
+  challengeHash String
+  verified      Boolean
+  verifiedAt    DateTime?
+  tries         Int
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([channel, target, createdAt])
 }
 
 model AuthRegistrationLogs {

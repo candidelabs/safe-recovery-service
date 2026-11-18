@@ -22,6 +22,14 @@ router
   .post(validate(authValidation.deleteRegistration), authController.deleteRegistration);
 
 router
+  .route("/accounts/request")
+  .post(validate(authValidation.requestAccountLookup), authController.requestAccountLookup);
+
+router
+  .route("/accounts/submit")
+  .post(validate(authValidation.submitAccountLookup), authController.submitAccountLookup);
+
+router
   .route("/signature/request")
   .post(validate(authValidation.requestSignature), authController.requestSignature);
 

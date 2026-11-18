@@ -1,11 +1,25 @@
 import httpStatus from "http-status";
 import {BigNumber} from "ethers";
+import {Prisma} from "@prisma/client";
 import {ApiError, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {ModuleSelection, Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
+import {
+  ACCOUNT_LOOKUP_VALIDITY_MS,
+  LookupAccount,
+  LookupRejection,
+  lookupAccounts,
+  lookupChallengeSeed,
+  lookupLockKey,
+  lookupSubmitRejection,
+  selectLookupChannel,
+  targetLocked,
+  targetWindowStart,
+  withinCooldown,
+} from "../utils/account-lookup";
 import {checkRecoveryModule} from "./recovery-modules.service";
 import logger from "../utils/logger";
 
@@ -161,6 +175,140 @@ export const deleteRegistration = async (registrationId: string, message: string
     where: {id: registrationId}
   });
   return true;
+};
+
+// Account lookup by a verified email address or phone number (accounts/request, accounts/submit); the rules are in
+// src/utils/account-lookup.ts. Neither the target, the code nor the accounts found are logged.
+
+// The enabled networks, in config order.
+const enabledNetworks = () => Network.supportedChainIds.map((chainId) => Network.instances.get(chainId.toString())!);
+
+// Serializes the requests and submits of one channel and target until the transaction ends.
+const lockLookupTarget = (tx: Prisma.TransactionClient, channel: string, target: string) =>
+  tx.$executeRaw`SELECT pg_advisory_xact_lock(${lookupLockKey(channel, target).toString()}::bigint)`;
+
+// Wrong codes for a channel and target within the window, across its challenges.
+const lookupTargetFailures = async (tx: Prisma.TransactionClient, channel: string, target: string, now: Date) => {
+  const {_sum} = await tx.authAccountLookupRequest.aggregate({
+    _sum: {tries: true},
+    where: {channel, target, createdAt: {gte: targetWindowStart(now)}},
+  });
+  return _sum.tries ?? 0;
+};
+
+export const requestAccountLookup = async (channel: string, target: string) => {
+  const selected = selectLookupChannel(
+    channel,
+    enabledNetworks(),
+    (alertId, channelName) => Alerts.instance().getAlertChannel(alertId, channelName),
+  );
+  if (!selected){
+    throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported`);
+  }
+  const {alertId, alertChannel} = selected;
+  const sanitizedTarget = await alertChannel.sanitizeTarget(target);
+  if (!sanitizedTarget) {
+    throw new ApiError(httpStatus.FORBIDDEN, `Target is not compatible with the '${channel}' channel`);
+  }
+  target = sanitizedTarget;
+  // The answer does not tell whether the target has registrations: a challenge is always made (or, within the
+  // cooldown, the latest one returned) and the code is only sent when there is something to list.
+  const now = new Date();
+  const lookup = await prisma.$transaction(async (tx) => {
+    await lockLookupTarget(tx, channel, target);
+    const latest = await tx.authAccountLookupRequest.findFirst({
+      where: {channel, target},
+      orderBy: {createdAt: "desc"},
+      select: {id: true, createdAt: true},
+    });
+    if (latest && withinCooldown(latest.createdAt, now)) {
+      return {challengeId: latest.id, reused: true, code: undefined};
+    }
+    const registrations = await tx.authRegistration.count({
+      where: {channel, target, chainId: {in: Network.supportedChainIds}},
+    });
+    const failures = await lookupTargetFailures(tx, channel, target, now);
+    const [challenge, challengeHash] = await alertChannel.generateChallenge(lookupChallengeSeed(channel, target));
+    const lookupRequest = await tx.authAccountLookupRequest.create({
+      data: {
+        channel,
+        target,
+        alertId,
+        challengeHash,
+        verified: false,
+        tries: 0,
+        expiresAt: new Date(now.getTime() + ACCOUNT_LOOKUP_VALIDITY_MS),
+      }
+    });
+    const code = registrations > 0 && !targetLocked(failures) ? challenge : undefined;
+    return {challengeId: lookupRequest.id, reused: false, code};
+  });
+  const code = lookup.code;
+  if (code) {
+    // not awaited, and only once the response is written, so sending does not change its timing
+    setImmediate(() => {
+      void alertChannel.sendMessage("accountLookupOtp", target, {
+        "subject": "Your Safe account lookup code",
+        "otp": code,
+      });
+    });
+  }
+  log.info({ challengeId: lookup.challengeId, channel, reused: lookup.reused }, "account lookup requested");
+  return lookup.challengeId;
+};
+
+export const submitAccountLookup = async (challengeId: string, challenge: string): Promise<LookupAccount[]> => {
+  const lookupRequest = await prisma.authAccountLookupRequest.findFirst({
+    where: {id: {equals: challengeId}},
+    select: {channel: true, target: true},
+  });
+  if (!lookupRequest){
+    throw new ApiError(httpStatus.NOT_FOUND, `challengeId not found`);
+  }
+  const {channel, target} = lookupRequest;
+  const now = new Date();
+  // Under the target's lock, so parallel submits cannot use more tries than allowed. Refusals are returned rather
+  // than thrown: throwing would roll back the try just counted.
+  const rejection = await prisma.$transaction(async (tx): Promise<LookupRejection | undefined> => {
+    await lockLookupTarget(tx, channel, target);
+    const current = await tx.authAccountLookupRequest.findUnique({where: {id: challengeId}});
+    if (!current) {
+      return {status: httpStatus.NOT_FOUND, message: `challengeId not found`};
+    }
+    const refused = lookupSubmitRejection(current, now, await lookupTargetFailures(tx, channel, target, now));
+    if (refused) {
+      return refused;
+    }
+    const alertChannel = Alerts.instance().getAlertChannel(current.alertId, channel);
+    if (!alertChannel) {
+      return {status: httpStatus.INTERNAL_SERVER_ERROR, message: `Channel '${channel}' no longer exists, please contact support`};
+    }
+    const validChallenge = await alertChannel.verifyChallenge(challenge, current.challengeHash, lookupChallengeSeed(channel, target));
+    if (!validChallenge) {
+      await tx.authAccountLookupRequest.update({
+        data: {tries: {increment: 1}},
+        where: {id: current.id}
+      });
+      return {status: httpStatus.FORBIDDEN, message: `Invalid challenge`};
+    }
+    await tx.authAccountLookupRequest.update({
+      data: {verified: true, verifiedAt: now},
+      where: {id: current.id}
+    });
+    return undefined;
+  });
+  if (rejection) {
+    log.info({ challengeId, channel, statusCode: rejection.status }, "account lookup refused");
+    throw new ApiError(rejection.status, rejection.message);
+  }
+  // Registrations as stored: no on-chain check (the guardian may have been removed since).
+  const registrations = await prisma.authRegistration.findMany({
+    where: {channel, target, chainId: {in: Network.supportedChainIds}},
+    select: {account: true, chainId: true},
+  });
+  const accounts = lookupAccounts(registrations, Network.supportedChainIds);
+  log.info({ challengeId, channel, accountCount: accounts.length }, "account lookup verified");
+  return accounts;
 };
 
 export const requestSignature = async (

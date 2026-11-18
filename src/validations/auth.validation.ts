@@ -2,11 +2,13 @@ import Joi from "joi";
 import {ethereumAddress, hexString, newOwners, siweMessage} from "./custom.validation";
 import {Network} from "../models/network";
 
+const channels = ["email", "sms"];
+
 export const register = {
   body: Joi.object().keys({
     account: Joi.custom(ethereumAddress).required(),
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
-    channel: Joi.string().valid(...["email", "sms"]).required(),
+    channel: Joi.string().valid(...channels).required(),
     target: Joi.string().required(),
     message: Joi.custom(siweMessage).required(),
     signature: Joi.custom(hexString).required(),
@@ -26,6 +28,20 @@ export const registrations = {
     chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
     message: Joi.custom(siweMessage).required(),
     signature: Joi.custom(hexString).required(),
+  }),
+};
+
+export const requestAccountLookup = {
+  body: Joi.object().keys({
+    channel: Joi.string().valid(...channels).required(),
+    target: Joi.string().required(),
+  }),
+};
+
+export const submitAccountLookup = {
+  body: Joi.object().keys({
+    challengeId: Joi.string().required(),
+    challenge: Joi.string().required(),
   }),
 };
 

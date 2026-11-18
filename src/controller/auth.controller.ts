@@ -29,6 +29,16 @@ interface DeleteRegistrationBody {
   signature: string;
 }
 
+interface RequestAccountLookupBody {
+  channel: string;
+  target: string;
+}
+
+interface SubmitAccountLookupBody {
+  challengeId: string;
+  challenge: string;
+}
+
 interface RequestSignatureBody {
   account: string;
   newOwners: string[];
@@ -87,6 +97,18 @@ export const deleteRegistration = catchAsync(async (req, res) => {
     params.signature
   );
   res.send({success});
+});
+
+export const requestAccountLookup = catchAsync(async (req, res) => {
+  const params = req.body as RequestAccountLookupBody;
+  const challengeId = await authService.requestAccountLookup(params.channel, params.target);
+  res.send({challengeId});
+});
+
+export const submitAccountLookup = catchAsync(async (req, res) => {
+  const params = req.body as SubmitAccountLookupBody;
+  const accounts = await authService.submitAccountLookup(params.challengeId, params.challenge);
+  res.send({accounts});
 });
 
 export const requestSignature = catchAsync(async (req, res) => {
