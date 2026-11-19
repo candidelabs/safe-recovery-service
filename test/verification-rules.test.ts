@@ -881,11 +881,25 @@ describe("subscribe with a token (in-memory tables)", () => {
 });
 
 describe("log lines", () => {
+    // The code of this test is fixed: a random six-digit code can be part of a fixture in the lines (111111 in
+    // ACCOUNT_1, 111551 in CHAIN_A), which would fail the check below although nothing leaked. It is neither digits nor
+    // hex, so no address, chainId or id can contain it, and it is hashed as the channel hashes codes, so it verifies.
+    const FIXED_CODE = "fixed-code-of-the-log-test";
+    let generateChallenge: jest.SpyInstance;
+    beforeEach(() => {
+        const channel = Alerts.instance().getAlertChannel("alert-a", "email")!;
+        generateChallenge = jest.spyOn(channel, "generateChallenge").mockImplementation(
+            async (seed: string): Promise<[string, string]> => [FIXED_CODE, ethers.utils.id(seed + FIXED_CODE)],
+        );
+    });
+    afterEach(() => generateChallenge.mockRestore());
+
     test("say what happened and never carry the target, the code, the token or its hash", async () => {
         mockLogLines.length = 0;
         const target = newTarget();
         const challengeId = await request(target);
         const code = codeFor(target);
+        expect(code).toBe(FIXED_CODE);
         await statusOf(submitVerification(challengeId, wrongCode(code)));
         const {verifiedTargetToken} = await submitVerification(challengeId, code);
         await listAccounts(verifiedTargetToken);
