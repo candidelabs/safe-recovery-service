@@ -22,12 +22,16 @@ router
   .post(validate(authValidation.deleteRegistration), authController.deleteRegistration);
 
 router
-  .route("/accounts/request")
-  .post(validate(authValidation.requestAccountLookup), authController.requestAccountLookup);
+  .route("/verification/request")
+  .post(validate(authValidation.requestVerification), authController.requestVerification);
 
 router
-  .route("/accounts/submit")
-  .post(validate(authValidation.submitAccountLookup), authController.submitAccountLookup);
+  .route("/verification/submit")
+  .post(validate(authValidation.submitVerification), authController.submitVerification);
+
+router
+  .route("/accounts")
+  .post(validate(authValidation.accounts), authController.listAccounts);
 
 router
   .route("/signature/request")

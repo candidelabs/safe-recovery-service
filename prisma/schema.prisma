@@ -65,21 +65,23 @@ model AuthRegistrationRequest {
   @@index([account])
 }
 
-// A lookup of the accounts registered with an email address or phone number (POST /v1/auth/accounts/request):
-// the code sent to the target, which /v1/auth/accounts/submit checks. alertId is the alert whose channel made the
-// code (the first enabled guardian network offering the channel). tries counts wrong codes.
-model AuthAccountLookupRequest {
-  id            String    @id @default(uuid())
-  channel       String
-  target        String
-  alertId       String
-  challengeHash String
-  verified      Boolean
-  verifiedAt    DateTime?
-  tries         Int
-  expiresAt     DateTime
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+// The verification of an email address or phone number (POST /v1/auth/verification/request): the code sent to the
+// target, which /v1/auth/verification/submit checks, then the hash of the verificationToken it returns. alertId is the
+// alert whose channel made the code. tries counts wrong codes. A row is created only when a code is sent.
+model TargetVerification {
+  id             String    @id @default(uuid())
+  channel        String
+  target         String
+  alertId        String
+  challengeHash  String
+  verified       Boolean
+  verifiedAt     DateTime?
+  tries          Int
+  expiresAt      DateTime
+  tokenHash      String?   @unique
+  tokenExpiresAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([channel, target, createdAt])
 }

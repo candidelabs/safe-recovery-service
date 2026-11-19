@@ -1,4 +1,5 @@
 import * as authService from "../services/auth.service";
+import * as verificationService from "../services/verification.service";
 import {catchAsync} from "../utils";
 import {selectRecoveryModule} from "../utils/module-fallback";
 
@@ -29,14 +30,18 @@ interface DeleteRegistrationBody {
   signature: string;
 }
 
-interface RequestAccountLookupBody {
+interface RequestVerificationBody {
   channel: string;
   target: string;
 }
 
-interface SubmitAccountLookupBody {
+interface SubmitVerificationBody {
   challengeId: string;
   challenge: string;
+}
+
+interface ListAccountsBody {
+  verificationToken: string;
 }
 
 interface RequestSignatureBody {
@@ -99,15 +104,27 @@ export const deleteRegistration = catchAsync(async (req, res) => {
   res.send({success});
 });
 
-export const requestAccountLookup = catchAsync(async (req, res) => {
-  const params = req.body as RequestAccountLookupBody;
-  const challengeId = await authService.requestAccountLookup(params.channel, params.target);
+export const requestVerification = catchAsync(async (req, res) => {
+  const params = req.body as RequestVerificationBody;
+  const challengeId = await verificationService.requestVerification(params.channel, params.target);
   res.send({challengeId});
 });
 
-export const submitAccountLookup = catchAsync(async (req, res) => {
-  const params = req.body as SubmitAccountLookupBody;
-  const accounts = await authService.submitAccountLookup(params.challengeId, params.challenge);
+export const submitVerification = catchAsync(async (req, res) => {
+  const params = req.body as SubmitVerificationBody;
+  const {verificationToken, verificationTokenExpiresAt} = await verificationService.submitVerification(
+    params.challengeId,
+    params.challenge,
+  );
+  // the token is a bearer secret
+  res.set("Cache-Control", "no-store");
+  res.send({verificationToken, verificationTokenExpiresAt: verificationTokenExpiresAt.toISOString()});
+});
+
+export const listAccounts = catchAsync(async (req, res) => {
+  const params = req.body as ListAccountsBody;
+  const accounts = await authService.listAccounts(params.verificationToken);
+  res.set("Cache-Control", "no-store");
   res.send({accounts});
 });
 

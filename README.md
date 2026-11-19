@@ -221,46 +221,44 @@ const wrapped = ethers.utils.hexConcat([
 
 Nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
 
-## Account lookup by email or phone number
+## Verifying an email address or phone number
 
-A user who lost the owner key or forgot the Safe address can list the accounts registered with the guardian for an email address or phone number (the registrations made with `POST /v1/auth/register` and `/submit`), by proving control of it with a one-time code. No wallet signature is needed. Alert subscriptions are not included.
+A client can prove that the user controls an email address or phone number once, with a one-time code, and get a short-lived `verificationToken`. The token then lists the accounts registered with the target. No wallet signature is needed.
 
-### `POST /v1/auth/accounts/request`
+### `POST /v1/auth/verification/request`
 
 ```json
 {"channel": "email", "target": "user@example.com"}
 ```
 
-`channel` is `email` or `sms`. The response is `{"challengeId": "<id>"}`, and a code is sent to the target.
+`channel` is `email` or `sms`. The response is `{"challengeId": "<id>"}`, and a code is sent to the target, after the response.
 
+* Every valid target gets a code, registered or not, and the response is the same for all.
 * The target is normalized as for `register`: an email address is trimmed and lower-cased, a phone number becomes E.164 (checked with Twilio Lookup when the channel uses Twilio).
-* The code is sent through the channel of the first enabled network, in config order, that has a `guardian` and whose `alerts` offers the channel.
-* The response does not tell whether the target has registrations: the status and body are the same, and so is the work done before answering. The code is only sent when the target has a registration on an enabled network, and it is sent after the response.
-* A request within 60 seconds of the latest one for the same channel and target returns the same `challengeId` and sends no new code, so a client that asks twice keeps a code that works. This also holds for targets without registrations. The challenge returned may already be used or dead (5 wrong codes): a new code is only sent once the 60 seconds have passed.
-* After 10 wrong codes for a channel and target within 24 hours, across its challenges, no code is sent to it and every submit for it is refused until older failures leave the window.
+* The code is sent through the first alert that offers the channel, among the `alerts` of each enabled network that has a `guardian` (config order), then `options.indexerAlert`.
+* A request within 60 seconds of the latest one for the same channel and target returns the same `challengeId` and sends no new code, so a client that asks twice keeps a code that works. The challenge returned may already be used or dead (5 wrong codes): a new code is only sent once the 60 seconds have passed.
+* At most 10 codes are sent to a channel and target within 24 hours. Past that, or once the target had 10 wrong codes within 24 hours (across its challenges), the request returns the latest `challengeId` and sends nothing, until older codes or failures leave the window. The client cannot tell this from a slow message.
 
 | Status | Message | When |
 | --- | --- | --- |
 | 400 | `"channel" must be one of [email, sms]` (Joi) | the body does not validate |
-| 400 | `Target channel '<channel>' is not supported` | no enabled network with a guardian offers the channel |
+| 400 | `Target channel '<channel>' is not supported` | no such alert offers the channel |
 | 403 | `Target is not compatible with the '<channel>' channel` | the email address or phone number is invalid |
 
-### `POST /v1/auth/accounts/submit`
+### `POST /v1/auth/verification/submit`
 
 ```json
 {"challengeId": "<id>", "challenge": "123456"}
 ```
 
-The response lists the accounts registered with the target on that channel:
+The response, sent with `Cache-Control: no-store`:
 
 ```json
-{"accounts": [{"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111}]}
+{"verificationToken": "<43 characters>", "verificationTokenExpiresAt": "2026-11-19T12:10:00.000Z"}
 ```
 
-* One entry per account and chain, addresses lower-cased, sorted by account then `chainId`. The list can be empty.
-* Only the networks the service has enabled: registrations on a network that was removed or disabled are left out.
-* The registrations are read as stored, with no on-chain check. A Safe whose owner has since removed the guardian or the module is still listed until its registration is deleted (`POST /v1/auth/delete`), so a client should check the guardian on chain before starting a recovery.
-* A code is valid for 10 minutes and can be used once. A challenge is dead after 5 wrong codes.
+* A code is valid for 10 minutes and can be used once. A challenge is dead after 5 wrong codes, and every submit for a channel and target is refused once it had 10 wrong codes within 24 hours.
+* The token proves control of the channel and normalized target, not of an account. It is valid for 10 minutes (`verificationTokenExpiresAt`) and can be used several times until then. It is a bearer secret: keep it in memory, never in a URL, a log or storage. The service stores only its SHA-256 hash and never logs either.
 
 | Status | Message | When |
 | --- | --- | --- |
@@ -272,9 +270,41 @@ The response lists the accounts registered with the target on that channel:
 | 403 | `Too many invalid challenges for this target, try again later` | 10 wrong codes for the channel and target within 24 hours |
 | 500 | `Channel '<channel>' no longer exists, please contact support` | the alert that sent the code was removed from the config |
 
-A submit counts its try with one atomic conditional update before the code is checked, so parallel submits cannot get more tries than allowed. The cooldown is best effort: parallel requests can each get a new challenge and a code. The log lines are `account lookup requested` (`challengeId`, `channel`, `reused`), `account lookup verified` (`challengeId`, `channel`, `accountCount`) and `account lookup refused` (`challengeId`, `channel`, `statusCode`); the target, the code and the accounts are never logged.
+A submit counts its try with one atomic conditional update before the code is checked, so parallel submits cannot get more tries than allowed, and the update that marks the challenge verified also stores the token's hash, so two right codes at once yield one token. The cooldown and the 10-code cap are best effort: parallel requests can each get a new challenge and a code.
 
-**Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `AuthAccountLookupRequest` table and an index on `AuthRegistration (channel, target)`.
+### Using the verification token
+
+A token that is unknown or expired is refused with one answer, and a malformed one fails validation:
+
+| Status | Message | When |
+| --- | --- | --- |
+| 400 | `"verificationToken" must be a valid verification token` | not 43 base64url characters |
+| 403 | `Invalid or expired verificationToken` | unknown or expired |
+
+#### Looking up accounts: `POST /v1/auth/accounts`
+
+```json
+{"verificationToken": "<token>"}
+```
+
+The response, sent with `Cache-Control: no-store`, lists the accounts registered with the token's target on its channel (the registrations made with `POST /v1/auth/register`), for a user who lost the owner key or forgot the Safe address:
+
+```json
+{"accounts": [{"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111}]}
+```
+
+* One entry per account and chain, addresses lower-cased, sorted by account then `chainId`. The list can be empty. Alert subscriptions are not included.
+* Only the networks the service has enabled: registrations on a network that was removed or disabled are left out.
+* The registrations are read as stored, with no on-chain check. A Safe whose owner has since removed the guardian or the module is still listed until its registration is deleted (`POST /v1/auth/delete`), so a client should check the guardian on chain before starting a recovery.
+* It can be called again while the token is valid, e.g. to refresh the list after a registration.
+
+The token is never accepted by the recovery endpoints: `POST /v1/auth/signature/request` always sends codes of its own, and a token cannot delete a registration or a subscription either.
+
+The log lines are `target verification requested` (`challengeId`, `channel`, `reused`, and `limit`: `locked` or `capped` when nothing was sent), `target verification completed` and `target verification refused` (`challengeId`, `channel`, `statusCode` for a refusal), `verification token refused` (`use`: `lookup`, `reason`: `unknown`, `expired` or `mismatch`, `verificationId` when the token was found) and `account lookup completed` (`verificationId`, `channel`, `accountCount`). The target, the code, the token, its hash and the accounts found are never logged.
+
+**Operators: sending a code to any target costs money.** `POST /v1/auth/verification/request` needs no signature, so one request makes the service send a message. Each target gets at most 10 codes a day, but rotating targets is only bounded by `options.rateLimit` (per IP, over all routes), as it already is for `register` and `subscribe`. For SMS this is the pattern of SMS pumping. Restrict the destination countries at the SMS provider (Twilio's geo permissions), turn on its fraud protection and usage alerts, set `options.rateLimit` with this endpoint in mind, limit requests per client at whatever fronts the service, and set `options.authentication` when only a backend should call the service. Behind a backend every request comes from the same IP, so the per-IP limit does not limit an end user there. For email, use a provider that handles bounces: codes sent to addresses that never asked for one hurt the sender's reputation.
+
+**Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `TargetVerification` table and an index on `AuthRegistration (channel, target)`.
 
 ## Running
 

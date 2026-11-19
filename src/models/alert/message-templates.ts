@@ -2,17 +2,18 @@ import {SummaryMessageData} from "../../utils/interfaces";
 import {escapeHtml} from "../../utils";
 import {Configuration} from "../../config/config-manager";
 
-export type MessageTemplates = "otpVerification" | "accountLookupOtp" | "notification";
+export type MessageTemplates = "otpVerification" | "targetVerificationOtp" | "notification";
 const emailTemplates: Record<MessageTemplates, any> = {
   otpVerification: {
     subject: `{{subject}}`,
     body: `<!doctypehtml><meta charset=UTF-8><meta content="width=device-width,initial-scale=1" name=viewport><title>OTP Verification</title><style>body{font-family:Arial,sans-serif;background-color:#f4f4f4;margin:0;padding:0}.container{max-width:600px;margin:30px auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.1);text-align:center}.header{background:#007bff;color:#fff;padding:15px;font-size:24px;border-top-left-radius:8px;border-top-right-radius:8px}.otp{font-size:24px;font-weight:700;background:#f8f9fa;display:inline-block;padding:10px 20px;border-radius:5px;margin:20px 0}.footer{margin-top:20px;font-size:12px;color:#777}</style><div class=container><div class=header>OTP Verification</div><p><br>Your one-time password (OTP) for verification is:<div class=otp>{{otp}}</div><p>This OTP is valid for 10 minutes. Do not share this code with anyone.<p>If you didn't request this, please ignore this email.</div>`,
     isHtml: true,
   },
-  // POST /v1/auth/accounts/request: the code that lists the accounts registered with this address
-  accountLookupOtp: {
+  // POST /v1/auth/verification/request: the code that verifies this address. It names accounts, not alerts, and says it
+  // does not approve a recovery.
+  targetVerificationOtp: {
     subject: `{{subject}}`,
-    body: `<!doctypehtml><meta charset=UTF-8><meta content="width=device-width,initial-scale=1" name=viewport><title>Account Lookup</title><style>body{font-family:Arial,sans-serif;background-color:#f4f4f4;margin:0;padding:0}.container{max-width:600px;margin:30px auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.1);text-align:center}.header{background:#007bff;color:#fff;padding:15px;font-size:24px;border-top-left-radius:8px;border-top-right-radius:8px}.otp{font-size:24px;font-weight:700;background:#f8f9fa;display:inline-block;padding:10px 20px;border-radius:5px;margin:20px 0}.footer{margin-top:20px;font-size:12px;color:#777}</style><div class=container><div class=header>Account Lookup</div><p><br>Someone asked to list the Safe accounts registered with this address. Your code is:<div class=otp>{{otp}}</div><p>It is valid for 10 minutes. Do not share this code with anyone.<p>If this wasn't you, ignore this message.</div>`,
+    body: `<!doctypehtml><meta charset=UTF-8><meta content="width=device-width,initial-scale=1" name=viewport><title>Verification code</title><style>body{font-family:Arial,sans-serif;background-color:#f4f4f4;margin:0;padding:0}.container{max-width:600px;margin:30px auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.1);text-align:center}.header{background:#007bff;color:#fff;padding:15px;font-size:24px;border-top-left-radius:8px;border-top-right-radius:8px}.otp{font-size:24px;font-weight:700;background:#f8f9fa;display:inline-block;padding:10px 20px;border-radius:5px;margin:20px 0}.footer{margin-top:20px;font-size:12px;color:#777}</style><div class=container><div class=header>Verification code</div><p><br>Someone asked to verify this address with Safe Recovery. Your code is:<div class=otp>{{otp}}</div><p>With it, the app can show the accounts that use this address and add this address to an account. This code does not approve a recovery: recovering an account always asks for a code of its own.<p>It is valid for 10 minutes. Do not share this code with anyone.<p>If this wasn't you, ignore this message: nothing changes without the code.</div>`,
     isHtml: true,
   },
   notification: {
@@ -27,8 +28,8 @@ const smsTemplates: Record<MessageTemplates, any> = {
     body: `Your verification code for registering your account: {{otp}}`,
   },
   // plain ASCII and at most 160 characters with the code: one GSM-7 segment
-  accountLookupOtp: {
-    body: `Someone asked to list the Safe accounts registered with this number. Your code is {{otp}}. It is valid for 10 minutes. If this wasn't you, ignore this message.`,
+  targetVerificationOtp: {
+    body: `{{otp}} is your Safe Recovery code to verify this number for your accounts. It does not approve a recovery. Expires in 10 min. Never share it.`,
   },
   notification: {
     body: generateEventSummarySMS

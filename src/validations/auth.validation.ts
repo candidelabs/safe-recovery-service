@@ -1,5 +1,5 @@
 import Joi from "joi";
-import {ethereumAddress, hexString, newOwners, siweMessage} from "./custom.validation";
+import {ethereumAddress, hexString, newOwners, siweMessage, verificationToken} from "./custom.validation";
 import {Network} from "../models/network";
 
 const channels = ["email", "sms"];
@@ -31,17 +31,23 @@ export const registrations = {
   }),
 };
 
-export const requestAccountLookup = {
+export const requestVerification = {
   body: Joi.object().keys({
     channel: Joi.string().valid(...channels).required(),
     target: Joi.string().required(),
   }),
 };
 
-export const submitAccountLookup = {
+export const submitVerification = {
   body: Joi.object().keys({
     challengeId: Joi.string().required(),
     challenge: Joi.string().required(),
+  }),
+};
+
+export const accounts = {
+  body: Joi.object().keys({
+    verificationToken: Joi.custom(verificationToken).required(),
   }),
 };
 
