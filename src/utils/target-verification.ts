@@ -15,7 +15,8 @@ export const VERIFICATION_COOLDOWN_MS = 60 * 1000;
 // Wrong codes per channel and target across all its challenges within the window, after which every submit for
 // that target is refused (and no code is sent) until older failures leave the window.
 export const VERIFICATION_TARGET_MAX_FAILURES = 10;
-// Codes sent per channel and target within the window, after which no code is sent until older ones leave it.
+// Send attempts per channel and target within the window (a code whose send failed counts), after which no code
+// is sent until older ones leave it.
 export const VERIFICATION_TARGET_MAX_CODES = 10;
 export const VERIFICATION_TARGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 // How long a verifiedTargetToken is accepted after the right code.
@@ -76,7 +77,7 @@ export const targetWindowStart = (now: Date): Date => new Date(now.getTime() - V
 // Whether a target is locked, given its tries within the window (not counting the try being checked).
 export const targetLocked = (targetFailures: number): boolean => targetFailures >= VERIFICATION_TARGET_MAX_FAILURES;
 
-// Whether a target got all the codes it may get within the window, given the codes sent to it there.
+// Whether a target got all the codes it may get within the window, given the send attempts to it there.
 export const targetCapped = (targetCodes: number): boolean => targetCodes >= VERIFICATION_TARGET_MAX_CODES;
 
 export const ALREADY_VERIFIED: VerificationRejection = {status: httpStatus.BAD_REQUEST, message: "challengeId already verified"};

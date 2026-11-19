@@ -36,8 +36,8 @@ const log = logger.child({ component: "verification" });
 // The enabled networks, in config order.
 const enabledNetworks = () => Network.supportedChainIds.map((chainId) => Network.instances.get(chainId.toString())!);
 
-// Wrong codes (tries) and codes sent (rows: a row is created only when a code is sent) for a channel and target
-// within the window, across its challenges.
+// Wrong codes (tries, plus any try whose code is being checked) and send attempts (rows: each is created before
+// its code is sent and stays if the send fails) for a channel and target within the window, across its challenges.
 const targetActivity = async (channel: string, target: string, now: Date) => {
   const {_sum, _count} = await prisma.targetVerification.aggregate({
     _sum: {tries: true},
