@@ -12,6 +12,8 @@ export const register = {
     target: Joi.string().required(),
     message: Joi.custom(siweMessage).required(),
     signature: Joi.custom(hexString).required(),
+    // from POST /v1/auth/verification/submit: the registration is created at once, with no second code
+    verificationToken: Joi.custom(verificationToken),
   }),
 };
 

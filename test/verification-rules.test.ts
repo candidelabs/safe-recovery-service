@@ -1,9 +1,13 @@
+import {ethers} from "ethers";
+import {SiweMessage} from "siwe";
 import {Network} from "../src/models/network";
 import {Alerts} from "../src/models/alert/alerts";
 import {AlertChannel} from "../src/models/alert/alert-channel";
 import {EmailAlertChannel} from "../src/models/alert/email-alert-channel";
 import {SMSAlertChannel} from "../src/models/alert/sms-alert-channel";
 import {getTemplate} from "../src/models/alert/message-templates";
+import {Signers} from "../src/models/signer/signers";
+import {Signer} from "../src/models/signer/signer";
 import {Configuration} from "../src/config/config-manager";
 import {isSensitiveKey} from "../src/logging";
 import {ApiError} from "../src/utils/error";
@@ -29,12 +33,12 @@ import {
     withinCooldown,
 } from "../src/utils/target-verification";
 import {requestVerification, submitVerification} from "../src/services/verification.service";
-import {listAccounts} from "../src/services/auth.service";
+import {createRegistration, listAccounts} from "../src/services/auth.service";
 
 // Verifying an email address or phone number (POST /v1/auth/verification/request and /submit) and using the token
-// (POST /v1/auth/accounts) without a database: the rules in src/utils/target-verification.ts, the Joi rule, the
-// message templates, and the services against in-memory tables (test/verification.test.ts runs them on Postgres and
-// Mailpit).
+// (POST /v1/auth/accounts, /v1/auth/register) without a database: the rules in src/utils/target-verification.ts, the
+// Joi rule, the message templates, and the services against in-memory tables. The SIWE check is mocked
+// (test/verification.test.ts signs for real on Postgres and Mailpit).
 
 // In-memory tables for the queries the services make (plain values, equals, in, gt/gte/lt; increment and
 // decrement). Each call runs to completion before the next, like one SQL statement, so parallel submits
@@ -102,6 +106,15 @@ jest.mock('../src/config/prisma-client', () => {
     return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
 });
 
+// The account's SIWE check of register.
+const mockSiwe = {
+    validateSIWEMessage: jest.fn(),
+};
+jest.mock("../src/utils", () => ({
+    ...jest.requireActual("../src/utils"),
+    validateSIWEMessage: (...args: unknown[]) => mockSiwe.validateSIWEMessage(...args),
+}));
+
 // Every log line, as {level, bindings of the child logger, fields, message}.
 const mockLogLines: {level: string, bindings: Record<string, unknown>, fields: Record<string, unknown>, message?: string}[] = [];
 jest.mock("../src/utils/logger", () => {
@@ -130,6 +143,7 @@ const INDEXER_ALERT = "alert-d";
 const GUARDIAN = "0x9999999999999999999999999999999999999999";
 
 jest.spyOn(Configuration, "instance").mockReturnValue({indexerAlert: INDEXER_ALERT} as unknown as Configuration);
+Signers.instance().addSigner({id: "signer", signer: async () => GUARDIAN} as unknown as Signer);
 
 // Enabled networks in config order, without the constructor (which starts an indexer).
 const addNetwork = (chainId: number, guardian: string | undefined, alert: string) => {
@@ -159,10 +173,17 @@ addNetwork(100, undefined, "alert-c");
 addNetwork(CHAIN_A, "signer", "alert-a");
 addNetwork(CHAIN_B, "signer", "alert-b");
 
+beforeEach(() => {
+    mockSiwe.validateSIWEMessage.mockReset().mockResolvedValue({counterfactual: false});
+});
+
 const verifications = () => mockTables.targetVerification ?? [];
 const verificationRow = (id: string) => verifications().find((row) => row.id === id);
 const rowsFor = (target: string) => verifications().filter((row) => row.target === target);
 const tokenRow = (token: string) => verifications().find((row) => row.tokenHash === hashVerificationToken(token));
+const registrationsOf = (target: string) => (mockTables.authRegistration ?? [])
+    .filter((row) => row.target === target)
+    .map(({account, chainId, channel, guardian}) => ({account, chainId, channel, guardian}));
 const sentTo = (target: string) => sent.filter((message) => message.target === target);
 // sendMessage runs after the response (setImmediate)
 const flushSends = () => new Promise((resolve) => setImmediate(resolve));
@@ -200,6 +221,8 @@ const ageAll = (target: string, ms: number) => rowsFor(target).forEach((row) => 
 const expireToken = (token: string) => {
     tokenRow(token).tokenExpiresAt = new Date(Date.now() - 1);
 };
+const registerWith = (account: string, chainId: number, target: string, verificationToken?: string, channel = "email") =>
+    createRegistration(account, chainId, channel, target, "siwe message", "0x1234", verificationToken);
 const REFUSED = [403, "Invalid or expired verificationToken"];
 
 const ACCOUNT_1 = "0x1111111111111111111111111111111111111111";
@@ -330,7 +353,19 @@ describe("verificationToken", () => {
 describe("verificationToken validation (Joi)", () => {
     // required here, not imported: the schemas read Network.supportedChainIds when they load
     const authValidation = require("../src/validations/auth.validation");
+    const wallet = ethers.Wallet.createRandom();
+    const message = new SiweMessage({
+        domain: "example.com",
+        address: wallet.address,
+        statement: "statement",
+        uri: "https://example.com",
+        chainId: CHAIN_A,
+        version: "1",
+        nonce: "abcdefgh1234",
+        issuedAt: new Date().toISOString(),
+    }).prepareMessage();
     const cases: [string, object, Record<string, unknown>][] = [
+        ["register", authValidation.register, {account: wallet.address, chainId: CHAIN_A, channel: "email", target: "user@example.com", message, signature: "0x1234"}],
         ["accounts", authValidation.accounts, {}],
     ];
     const validationError = (schema: object, body: Record<string, unknown>): string | undefined => {
@@ -344,8 +379,9 @@ describe("verificationToken validation (Joi)", () => {
         expect(validationError(schema, {...body, verificationToken: token})).toBeUndefined();
     });
 
-    test("the lookup requires a token", () => {
-        expect(validationError(cases[0][1], cases[0][2])).toBe(`"verificationToken" is required`);
+    test("register accepts no token, the lookup requires one", () => {
+        expect(validationError(cases[0][1], cases[0][2])).toBeUndefined();
+        expect(validationError(cases[1][1], cases[1][2])).toBe(`"verificationToken" is required`);
     });
 
     test.each(cases)("%s refuses anything else with one message that never quotes the value", (_name, schema, body) => {
@@ -660,6 +696,97 @@ describe("account lookup with a token (in-memory tables)", () => {
     });
 });
 
+describe("register with a token (in-memory tables)", () => {
+    test("creates the registration at once, on each chain asked, and sends nothing", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const requestRows = (mockTables.authRegistrationRequest ?? []).length;
+
+        const first = await registerWith(ACCOUNT_3, CHAIN_A, target, token);
+        expect(first).toEqual({registrationId: expect.any(String), guardianAddress: GUARDIAN});
+        // a second chain with the same token, the target in another case
+        const second = await registerWith(ACCOUNT_3, CHAIN_B, `  ${target.toUpperCase()} `, token);
+        expect(second).toEqual({registrationId: expect.any(String), guardianAddress: GUARDIAN});
+
+        expect(registrationsOf(target)).toEqual([
+            {account: ACCOUNT_3.toLowerCase(), chainId: CHAIN_A, channel: "email", guardian: GUARDIAN},
+            {account: ACCOUNT_3.toLowerCase(), chainId: CHAIN_B, channel: "email", guardian: GUARDIAN},
+        ]);
+        expect(sentTo(target)).toHaveLength(1); // the verification code only
+        expect((mockTables.authRegistrationRequest ?? []).length).toBe(requestRows);
+        expect(mockSiwe.validateSIWEMessage).toHaveBeenCalledTimes(2);
+        expect(await listAccounts(token)).toEqual([
+            {account: ACCOUNT_3.toLowerCase(), chainId: CHAIN_A},
+            {account: ACCOUNT_3.toLowerCase(), chainId: CHAIN_B},
+        ]);
+    });
+
+    test("registers a phone number", async () => {
+        const token = await verify("+15550100010", "sms");
+        expect(await registerWith(ACCOUNT_1, CHAIN_B, "+1 555 010 0010", token, "sms")).toEqual({registrationId: expect.any(String), guardianAddress: GUARDIAN});
+        expect(registrationsOf("+15550100010")).toEqual([{account: ACCOUNT_1, chainId: CHAIN_B, channel: "sms", guardian: GUARDIAN}]);
+    });
+
+    test("refuses an unknown, expired, other-target or other-channel token before the SIWE check", async () => {
+        const target = newTarget();
+        const expiredTarget = newTarget();
+        const expiredToken = await verify(expiredTarget);
+        expireToken(expiredToken);
+        const otherToken = await verify(newTarget());
+        const smsToken = await verify("+15550100011", "sms");
+
+        for (const [token, refusedTarget] of [
+            [newVerificationToken(), target],
+            [expiredToken, expiredTarget],
+            [otherToken, target],
+            [smsToken, target],
+        ]) {
+            expect(await statusOf(registerWith(ACCOUNT_1, CHAIN_A, refusedTarget, token))).toEqual(REFUSED);
+        }
+        expect(await statusOf(registerWith(ACCOUNT_1, CHAIN_B, "+15550100011", otherToken, "sms"))).toEqual(REFUSED);
+        expect(mockSiwe.validateSIWEMessage).not.toHaveBeenCalled();
+        expect(registrationsOf(target)).toEqual([]);
+        expect(registrationsOf(expiredTarget)).toEqual([]);
+        expect(registrationsOf("+15550100011")).toEqual([]);
+        expect(mockLogLines.slice(-5).map(({bindings, fields, message}) => ({...bindings, ...fields, message}))).toEqual([
+            {component: "verification", use: "register", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verification token refused"},
+            {component: "verification", use: "register", reason: "expired", verificationId: tokenRow(expiredToken).id, statusCode: 403, message: "verification token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verification token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(smsToken).id, statusCode: 403, message: "verification token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verification token refused"},
+        ]);
+    });
+
+    test("answers 409 for a registration that exists", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        await registerWith(ACCOUNT_2, CHAIN_A, target, token);
+        expect(await statusOf(registerWith(ACCOUNT_2, CHAIN_A, target, token))).toEqual([409, `An active registration already exists for ${ACCOUNT_2} on chainId ${CHAIN_A} on the 'email' channel`]);
+        expect(registrationsOf(target)).toHaveLength(1);
+    });
+
+    test("stores nothing when the SIWE check fails", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        mockSiwe.validateSIWEMessage.mockRejectedValue(new ApiError(403, "SIWE Message: invalid signature"));
+        expect(await statusOf(registerWith(ACCOUNT_1, CHAIN_A, target, token))).toEqual([403, "SIWE Message: invalid signature"]);
+        expect(registrationsOf(target)).toEqual([]);
+        expect(sentTo(target)).toHaveLength(1);
+    });
+
+    test("without a token, sends the registration code and returns a challengeId as before", async () => {
+        const target = newTarget();
+        const response = await registerWith(ACCOUNT_1, CHAIN_A, target);
+        expect(response).toEqual({challengeId: expect.any(String)});
+        const {challengeId} = response as {challengeId: string};
+        expect(sentTo(target)).toMatchObject([{templateId: "otpVerification", alertId: "alert-a", otp: expect.stringMatching(/^\d{6}$/)}]);
+        expect(mockTables.authRegistrationRequest.find((row) => row.id === challengeId)).toMatchObject({
+            account: ACCOUNT_1, chainId: CHAIN_A, channel: "email", target, verified: false,
+        });
+        expect(registrationsOf(target)).toEqual([]);
+    });
+});
+
 describe("log lines", () => {
     test("say what happened and never carry the target, the code, the token or its hash", async () => {
         mockLogLines.length = 0;
@@ -669,6 +796,7 @@ describe("log lines", () => {
         await statusOf(submitVerification(challengeId, wrongCode(code)));
         const {verificationToken} = await submitVerification(challengeId, code);
         await listAccounts(verificationToken);
+        await registerWith(ACCOUNT_1, CHAIN_A, target, verificationToken);
         await statusOf(listAccounts(newVerificationToken()));
 
         expect(mockLogLines.map(({level, bindings, fields, message}) => ({level, ...bindings, ...fields, message}))).toEqual([
@@ -676,6 +804,10 @@ describe("log lines", () => {
             {level: "info", component: "verification", challengeId, channel: "email", statusCode: 403, message: "target verification refused"},
             {level: "info", component: "verification", challengeId, channel: "email", message: "target verification completed"},
             {level: "info", component: "auth", verificationId: challengeId, channel: "email", accountCount: 0, message: "account lookup completed"},
+            {
+                level: "info", component: "auth", registrationId: expect.any(String), account: ACCOUNT_1, chainId: CHAIN_A, channel: "email",
+                verification: "token", verificationId: challengeId, accountDeployed: true, message: "auth registration created",
+            },
             {level: "info", component: "verification", use: "lookup", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verification token refused"},
         ]);
         const text = JSON.stringify(mockLogLines);

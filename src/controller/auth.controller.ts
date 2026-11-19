@@ -10,6 +10,7 @@ interface CreateRegistrationBody {
   target: string;
   message: string;
   signature: string;
+  verificationToken?: string;
 }
 
 interface SubmitChallengeBody {
@@ -60,15 +61,17 @@ interface SubmitSignatureChallengeBody {
 
 export const createRegistration = catchAsync(async (req, res) => {
   const params = req.body as CreateRegistrationBody;
-  const registrationRequestId = await authService.createRegistration(
+  // with a verificationToken {registrationId, guardianAddress}, else {challengeId}
+  const response = await authService.createRegistration(
     params.account,
     params.chainId,
     params.channel,
     params.target,
     params.message,
-    params.signature
+    params.signature,
+    params.verificationToken,
   );
-  res.send({challengeId: registrationRequestId});
+  res.send(response);
 });
 
 export const submitRegistrationChallenge = catchAsync(async (req, res) => {

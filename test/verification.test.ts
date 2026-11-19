@@ -1,14 +1,16 @@
 import supertest from "supertest";
 import {ethers} from "ethers";
+import {SiweMessage} from "siwe";
 import {randomBytes} from "node:crypto";
 import type {Express} from "express";
 import type {PrismaClient} from "@prisma/client";
 
-// POST /v1/auth/verification/request and /submit, and the verificationToken on POST /v1/auth/accounts, on the real
-// app, against Postgres and Mailpit (./test.sh). config.json is replaced by the config below (two enabled networks and
-// a disabled one, email through Mailpit) and the boot step that assigns legacy rows never resolves, so the app never
-// listens and no chain is called. Registrations are written straight to the database. test/verification-rules.test.ts
-// covers the same rules without Docker.
+// POST /v1/auth/verification/request and /submit, and the verificationToken on POST /v1/auth/accounts and
+// /v1/auth/register, on the real app, against Postgres and Mailpit (./test.sh). config.json is replaced by the config
+// below (two enabled networks and a disabled one, email through Mailpit) and the boot step that assigns legacy rows
+// never resolves, so the app never listens and no chain is called: register is signed by a random wallet (ECDSA).
+// Registrations for the lookup are also written straight to the database. test/verification-rules.test.ts covers the
+// same rules without Docker.
 
 jest.setTimeout(180000);
 
@@ -63,6 +65,7 @@ beforeAll(() => {
 });
 
 const VERIFICATION_SUBJECT = "Your Safe Recovery verification code";
+const REGISTRATION_SUBJECT = "OTP Verification for Safe Recovery";
 const MAILPIT = "http://localhost:8025/api/v1";
 type MailpitMessage = {ID: string, To: {Address: string}[], Subject: string, Snippet: string};
 const messagesTo = async (address: string): Promise<MailpitMessage[]> => {
@@ -126,6 +129,22 @@ const COOLDOWN_MS = 61 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const REFUSED = "Invalid or expired verificationToken";
 const MALFORMED = `"verificationToken" must be a valid verification token`;
+
+// POST /v1/auth/register, signed by the account itself (a random wallet: ECDSA, no chain call).
+const registerBody = async (wallet: ethers.Wallet, chainId: number, target: string) => {
+    const message = new SiweMessage({
+        domain: "example.com",
+        address: wallet.address,
+        statement: `I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using ${target} (via email)`,
+        uri: "https://example.com",
+        chainId,
+        version: "1",
+        nonce: Math.random().toString(36).substring(2),
+        issuedAt: new Date().toISOString(),
+    }).prepareMessage();
+    return {account: wallet.address, chainId, channel: "email", target, message, signature: await wallet.signMessage(message)};
+};
+const register = (body: object) => supertest(app).post("/v1/auth/register").send(body);
 
 describe("verification", () => {
     it("should send a code to any target and return a short-lived token for it", async () => {
@@ -322,5 +341,61 @@ describe("account lookup with a verification token", () => {
     it("should not answer the removed two-step lookup", async () => {
         await supertest(app).post("/v1/auth/accounts/request").send({channel: "email", target: newTarget()}).expect(404);
         await supertest(app).post("/v1/auth/accounts/submit").send({challengeId: "x", challenge: "123456"}).expect(404);
+    });
+});
+
+describe("register with a verification token", () => {
+    it("should register the target on two chains with one token, sending no further code", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+
+        for (const chainId of [CHAIN_A, CHAIN_B]) {
+            const response = await register({...await registerBody(wallet, chainId, target), verificationToken: token}).expect(200);
+            expect(Object.keys(response.body)).toEqual(["registrationId", "guardianAddress"]);
+            expect(response.body.guardianAddress.toLowerCase()).toBe(mockGuardian.address.toLowerCase());
+        }
+        await expectNoMessages(target, 1);
+        expect(await prisma.authRegistrationRequest.count({where: {target}})).toBe(0);
+        await listAccounts(token).expect(200).then((response) => {
+            expect(response.body).toEqual({
+                accounts: [
+                    {account: wallet.address.toLowerCase(), chainId: CHAIN_A},
+                    {account: wallet.address.toLowerCase(), chainId: CHAIN_B},
+                ],
+            });
+        });
+        // the same registration again
+        await register({...await registerBody(wallet, CHAIN_A, target), verificationToken: token}).expect(409);
+    });
+
+    it("should refuse a token before the SIWE check, so the same signed message works without it", async () => {
+        const target = newTarget();
+        const otherToken = await verify(newTarget());
+        const expiredTarget = newTarget();
+        const expiredToken = await verify(expiredTarget);
+        await prisma.targetVerification.updateMany({where: {target: expiredTarget}, data: {tokenExpiresAt: new Date(Date.now() - 1000)}});
+        const wallet = ethers.Wallet.createRandom();
+
+        // another target's token, then the same message without a token: the nonce was not used up
+        const body = await registerBody(wallet, CHAIN_A, target);
+        await register({...body, verificationToken: otherToken}).expect(403).then((response) => {
+            expect(response.body.message).toBe(REFUSED);
+        });
+        await register(body).expect(200).then((response) => {
+            expect(Object.keys(response.body)).toEqual(["challengeId"]);
+        });
+        await latestCode(target, 1, REGISTRATION_SUBJECT);
+
+        const expiredBody = await registerBody(wallet, CHAIN_B, expiredTarget);
+        await register({...expiredBody, verificationToken: expiredToken}).expect(403).then((response) => {
+            expect(response.body.message).toBe(REFUSED);
+        });
+        await register(expiredBody).expect(200);
+
+        const malformedBody = await registerBody(wallet, CHAIN_A, newTarget());
+        await register({...malformedBody, verificationToken: "not a token"}).expect(400).then((response) => {
+            expect(response.body.message).toBe(MALFORMED);
+        });
     });
 });

@@ -13,7 +13,32 @@ import logger from "../utils/logger";
 
 const log = logger.child({ component: "auth" });
 
-export const createRegistration = async (account: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
+// The registration that /submit (after its code) and register (with a verificationToken) create.
+const storeRegistration = async (network: Network, account: string, chainId: number, channel: string, target: string) => {
+  const signer = Signers.instance().getSigner(network.guardian!)!;
+  const guardian = await signer.signer();
+  return prisma.authRegistration.create(
+    {
+      data: {
+        account: account.toLowerCase(),
+        chainId,
+        channel,
+        target,
+        guardian
+      }
+    }
+  );
+};
+
+export const createRegistration = async (
+  account: string,
+  chainId: number,
+  channel: string,
+  target: string,
+  message: string,
+  signature: string,
+  verificationToken?: string,
+): Promise<{challengeId: string} | {registrationId: string, guardianAddress: string}> => {
   const network = Network.instances.get(chainId.toString())!;
   if (!network.guardian){
     throw new ApiError(httpStatus.BAD_REQUEST, `Recovery Guardian is not enabled on this network`);
@@ -27,6 +52,11 @@ export const createRegistration = async (account: string, chainId: number, chann
   if (!sanitizedTarget) {
     throw new ApiError(httpStatus.FORBIDDEN, `Target is not compatible with the '${channel}' channel`);
   }
+  // A token is checked before the SIWE message: a refused token leaves the nonce free (the same signed message can be
+  // sent again without the token) and costs no RPC call. It never replaces the account's signature.
+  const verification = verificationToken === undefined
+    ? undefined
+    : await requireVerifiedTarget(verificationToken, "register", {channel, target: sanitizedTarget});
   //
   let statement = MessageStatements["auth-register"];
   statement = statement.replace("{{target}}", target);
@@ -45,6 +75,19 @@ export const createRegistration = async (account: string, chainId: number, chann
   });
   if (existingRegistration){
     throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} on the '${channel}' channel`);
+  }
+  //
+  if (verification) {
+    // the target was verified: no second code
+    const registration = await storeRegistration(network, account, chainId, channel, target);
+    log.info(
+      {
+        registrationId: registration.id, account: registration.account, chainId, channel, verification: "token",
+        verificationId: verification.verificationId, accountDeployed: !counterfactual,
+      },
+      "auth registration created"
+    );
+    return {registrationId: registration.id, guardianAddress: registration.guardian};
   }
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase());
@@ -72,7 +115,7 @@ export const createRegistration = async (account: string, chainId: number, chann
     { challengeId: authRegistrationRequest.id, account: account.toLowerCase(), chainId, channel, accountDeployed: !counterfactual },
     "auth registration requested"
   );
-  return authRegistrationRequest.id;
+  return {challengeId: authRegistrationRequest.id};
 };
 
 export const submitRegistrationChallenge = async (challengeId: string, challenge: string) => {
@@ -113,21 +156,19 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     where: {id: registrationRequest.id}
   });
   //
-  const signer = Signers.instance().getSigner(network.guardian)!
-  const guardian = await signer.signer();
-  const registration = await prisma.authRegistration.create(
-    {
-      data: {
-        account: registrationRequest.account.toLowerCase(),
-        chainId: registrationRequest.chainId,
-        channel: registrationRequest.channel,
-        target: registrationRequest.target,
-        guardian
-      }
-    }
+  const registration = await storeRegistration(
+    network,
+    registrationRequest.account,
+    registrationRequest.chainId,
+    registrationRequest.channel,
+    registrationRequest.target,
+  );
+  log.info(
+    { registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp" },
+    "auth registration created"
   );
   //
-  return [registration.id, guardian];
+  return [registration.id, registration.guardian];
 };
 
 export const fetchRegistrations = async (account: string, chainId: number, message: string, signature: string) => {
