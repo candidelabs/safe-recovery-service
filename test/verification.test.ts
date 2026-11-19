@@ -5,7 +5,7 @@ import {randomBytes} from "node:crypto";
 import type {Express} from "express";
 import type {PrismaClient} from "@prisma/client";
 
-// POST /v1/auth/verification/request and /submit, and the verificationToken on POST /v1/auth/accounts and
+// POST /v1/auth/verification/request and /submit, and the verifiedTargetToken on POST /v1/auth/accounts and
 // /v1/auth/register, on the real app, against Postgres and Mailpit (./test.sh). config.json is replaced by the config
 // below (two enabled networks and a disabled one, email through Mailpit) and the boot step that assigns legacy rows
 // never resolves, so the app never listens and no chain is called: register is signed by a random wallet (ECDSA).
@@ -104,7 +104,7 @@ const storeRegistration = (target: string, account: string, chainId: number) => 
 });
 const requestVerification = (target: string, channel = "email") => supertest(app).post("/v1/auth/verification/request").send({channel, target});
 const submitVerification = (challengeId: string, challenge: string) => supertest(app).post("/v1/auth/verification/submit").send({challengeId, challenge});
-const listAccounts = (verificationToken: unknown) => supertest(app).post("/v1/auth/accounts").send({verificationToken});
+const listAccounts = (verifiedTargetToken: unknown) => supertest(app).post("/v1/auth/accounts").send({verifiedTargetToken});
 const newChallenge = async (target: string): Promise<string> => {
     const response = await requestVerification(target).expect(200);
     expect(Object.keys(response.body)).toEqual(["challengeId"]);
@@ -114,7 +114,7 @@ const newChallenge = async (target: string): Promise<string> => {
 const verify = async (target: string, count = 1): Promise<string> => {
     const challengeId = await newChallenge(target);
     const response = await submitVerification(challengeId, await latestCode(target, count)).expect(200);
-    return response.body.verificationToken;
+    return response.body.verifiedTargetToken;
 };
 const backdate = async (challengeId: string, ms: number) => {
     const row = await prisma.targetVerification.findUniqueOrThrow({where: {id: challengeId}});
@@ -127,8 +127,8 @@ const ageAll = async (target: string, ms: number) => {
 const wrongCode = (code: string) => code === "000000" ? "111111" : "000000";
 const COOLDOWN_MS = 61 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const REFUSED = "Invalid or expired verificationToken";
-const MALFORMED = `"verificationToken" must be a valid verification token`;
+const REFUSED = "Invalid or expired verifiedTargetToken";
+const MALFORMED = `"verifiedTargetToken" must be a valid token`;
 
 // POST /v1/auth/register, signed by the account itself (a random wallet: ECDSA, no chain call).
 const registerBody = async (wallet: ethers.Wallet, chainId: number, target: string) => {
@@ -156,16 +156,16 @@ describe("verification", () => {
         const before = Date.now();
         const response = await submitVerification(challengeId, code).expect(200);
         expect(response.headers["cache-control"]).toBe("no-store");
-        expect(Object.keys(response.body)).toEqual(["verificationToken", "verificationTokenExpiresAt"]);
-        expect(response.body.verificationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-        const expiresAt = Date.parse(response.body.verificationTokenExpiresAt);
+        expect(Object.keys(response.body)).toEqual(["verifiedTargetToken", "verifiedTargetTokenExpiresAt"]);
+        expect(response.body.verifiedTargetToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        const expiresAt = Date.parse(response.body.verifiedTargetTokenExpiresAt);
         expect(expiresAt).toBeGreaterThan(before + 9 * 60 * 1000);
         expect(expiresAt).toBeLessThanOrEqual(Date.now() + 10 * 60 * 1000);
 
         const row = await prisma.targetVerification.findUniqueOrThrow({where: {id: challengeId}});
         expect(row).toMatchObject({channel: "email", target, verified: true, tries: 0});
         expect(row.tokenHash).toMatch(/^[0-9a-f]{64}$/);
-        expect(Object.values(row)).not.toContain(response.body.verificationToken);
+        expect(Object.values(row)).not.toContain(response.body.verifiedTargetToken);
     });
 
     it("should normalize the target (case and whitespace)", async () => {
@@ -289,7 +289,7 @@ describe("verification", () => {
     });
 });
 
-describe("account lookup with a verification token", () => {
+describe("account lookup with a verified-target token", () => {
     it("should list every account registered with the target, across chains, as often as asked", async () => {
         const target = newTarget();
         const [first, second] = [newAccount(), newAccount()].sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : 1);
@@ -344,14 +344,14 @@ describe("account lookup with a verification token", () => {
     });
 });
 
-describe("register with a verification token", () => {
+describe("register with a verified-target token", () => {
     it("should register the target on two chains with one token, sending no further code", async () => {
         const target = newTarget();
         const token = await verify(target);
         const wallet = ethers.Wallet.createRandom();
 
         for (const chainId of [CHAIN_A, CHAIN_B]) {
-            const response = await register({...await registerBody(wallet, chainId, target), verificationToken: token}).expect(200);
+            const response = await register({...await registerBody(wallet, chainId, target), verifiedTargetToken: token}).expect(200);
             expect(Object.keys(response.body)).toEqual(["registrationId", "guardianAddress"]);
             expect(response.body.guardianAddress.toLowerCase()).toBe(mockGuardian.address.toLowerCase());
         }
@@ -366,7 +366,7 @@ describe("register with a verification token", () => {
             });
         });
         // the same registration again
-        await register({...await registerBody(wallet, CHAIN_A, target), verificationToken: token}).expect(409);
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token}).expect(409);
     });
 
     it("should refuse a token before the SIWE check, so the same signed message works without it", async () => {
@@ -379,7 +379,7 @@ describe("register with a verification token", () => {
 
         // another target's token, then the same message without a token: the nonce was not used up
         const body = await registerBody(wallet, CHAIN_A, target);
-        await register({...body, verificationToken: otherToken}).expect(403).then((response) => {
+        await register({...body, verifiedTargetToken: otherToken}).expect(403).then((response) => {
             expect(response.body.message).toBe(REFUSED);
         });
         await register(body).expect(200).then((response) => {
@@ -388,13 +388,13 @@ describe("register with a verification token", () => {
         await latestCode(target, 1, REGISTRATION_SUBJECT);
 
         const expiredBody = await registerBody(wallet, CHAIN_B, expiredTarget);
-        await register({...expiredBody, verificationToken: expiredToken}).expect(403).then((response) => {
+        await register({...expiredBody, verifiedTargetToken: expiredToken}).expect(403).then((response) => {
             expect(response.body.message).toBe(REFUSED);
         });
         await register(expiredBody).expect(200);
 
         const malformedBody = await registerBody(wallet, CHAIN_A, newTarget());
-        await register({...malformedBody, verificationToken: "not a token"}).expect(400).then((response) => {
+        await register({...malformedBody, verifiedTargetToken: "not a token"}).expect(400).then((response) => {
             expect(response.body.message).toBe(MALFORMED);
         });
     });

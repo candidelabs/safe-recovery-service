@@ -1,5 +1,5 @@
 import Joi from "joi";
-import {ethereumAddress, hexString, newOwners, siweMessage, verificationToken} from "./custom.validation";
+import {ethereumAddress, hexString, newOwners, siweMessage, verifiedTargetToken} from "./custom.validation";
 import {Network} from "../models/network";
 
 const channels = ["email", "sms"];
@@ -13,7 +13,7 @@ export const register = {
     message: Joi.custom(siweMessage).required(),
     signature: Joi.custom(hexString).required(),
     // from POST /v1/auth/verification/submit: the registration is created at once, with no second code
-    verificationToken: Joi.custom(verificationToken),
+    verifiedTargetToken: Joi.custom(verifiedTargetToken),
   }),
 };
 
@@ -49,7 +49,7 @@ export const submitVerification = {
 
 export const accounts = {
   body: Joi.object().keys({
-    verificationToken: Joi.custom(verificationToken).required(),
+    verifiedTargetToken: Joi.custom(verifiedTargetToken).required(),
   }),
 };
 

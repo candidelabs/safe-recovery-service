@@ -666,10 +666,10 @@ describe('alerts (counterfactual account)', ()=>{
     });
 });
 
-// Subscribing with a verificationToken from POST /v1/auth/verification/request and /submit: the subscription is active
-// at once and no second code is sent. The owner still signs and is checked on chain (here an undeployed account, in
-// simulation). A refused token is checked before the SIWE message, so the same signed message can be sent again.
-describe('alerts (verification token)', ()=>{
+// Subscribing with a verifiedTargetToken from POST /v1/auth/verification/request and /submit: the subscription is
+// active at once and no second code is sent. The owner still signs and is checked on chain (here an undeployed account,
+// in simulation). A refused token is checked before the SIWE message, so the same signed message can be sent again.
+describe('alerts (verified-target token)', ()=>{
     const erc6492Magic = "0x6492649264926492649264926492649264926492649264926492649264926492";
     const tokenOwner = ethers.Wallet.createRandom();
     const tokenOwners = [tokenOwner.address, ethers.Wallet.createRandom().address];
@@ -703,7 +703,7 @@ describe('alerts (verification token)', ()=>{
         }
     };
 
-    it('should succeed with 200 to subscribe with a verification token, active at once and with no second code', async ()=>{
+    it('should succeed with 200 to subscribe with a verified-target token, active at once and with no second code', async ()=>{
         const requestRes = await supertest(app).post('/v1/auth/verification/request/')
         .send({channel: "email", target})
         .expect(200);
@@ -711,7 +711,7 @@ describe('alerts (verification token)', ()=>{
         const submitRes = await supertest(app).post('/v1/auth/verification/submit/')
         .send({challengeId: requestRes.body.challengeId, challenge: code})
         .expect(200);
-        const verificationToken = submitRes.body.verificationToken;
+        const verifiedTargetToken = submitRes.body.verifiedTargetToken;
 
         const [siweMessage, signature] = await signStatement(tokenOwner, tokenOwner.address, subscribeStatement, chainId_1);
         const body = {
@@ -724,12 +724,12 @@ describe('alerts (verification token)', ()=>{
             signature: wrap(signature),
         };
         await supertest(app).post('/v1/alerts/subscribe/')
-        .send({...body, verificationToken: ethers.utils.hexlify(ethers.utils.randomBytes(32)).slice(2, 45)})
+        .send({...body, verifiedTargetToken: ethers.utils.hexlify(ethers.utils.randomBytes(32)).slice(2, 45)})
         .expect(403).then((response) => {
-            expect(response.body.message).toBe("Invalid or expired verificationToken");
+            expect(response.body.message).toBe("Invalid or expired verifiedTargetToken");
         });
         const subscribeRes = await supertest(app).post('/v1/alerts/subscribe/')
-        .send({...body, verificationToken})
+        .send({...body, verifiedTargetToken})
         .expect(200);
         expect(subscribeRes.body).toEqual({subscriptionId: expect.any(String), active: true});
 

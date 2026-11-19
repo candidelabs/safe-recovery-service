@@ -9,14 +9,14 @@ import {
   INVALID_CHALLENGE,
   TARGET_LOCKED,
   VERIFICATION_MAX_TRIES,
-  VERIFICATION_TOKEN_VALIDITY_MS,
+  VERIFIED_TARGET_TOKEN_VALIDITY_MS,
   VERIFICATION_VALIDITY_MS,
   VerificationRejection,
   VerifiedTarget,
-  hashVerificationToken,
-  newVerificationToken,
+  hashVerifiedTargetToken,
+  newVerifiedTargetToken,
   refusedTry,
-  refusedVerificationToken,
+  refusedVerifiedTargetToken,
   selectVerificationChannel,
   targetCapped,
   targetLocked,
@@ -28,7 +28,7 @@ import {
 import logger from "../utils/logger";
 
 // Verifying an email address or phone number (POST /v1/auth/verification/request and /submit) and checking the
-// verificationToken it yields (requireVerifiedTarget). The rules are in src/utils/target-verification.ts. Neither the
+// verifiedTargetToken it yields (requireVerifiedTarget). The rules are in src/utils/target-verification.ts. Neither the
 // target, the code, the token nor its hash is logged.
 
 const log = logger.child({ component: "verification" });
@@ -149,15 +149,15 @@ export const submitVerification = async (challengeId: string, challenge: string)
   }
   // Single use, and one token per challenge: the update that marks it verified also stores the token's hash, so of
   // two right codes at once only one matches, and the other gets a 400.
-  const verificationToken = newVerificationToken();
-  const verificationTokenExpiresAt = new Date(now.getTime() + VERIFICATION_TOKEN_VALIDITY_MS);
+  const verifiedTargetToken = newVerifiedTargetToken();
+  const verifiedTargetTokenExpiresAt = new Date(now.getTime() + VERIFIED_TARGET_TOKEN_VALIDITY_MS);
   const verified = await prisma.targetVerification.updateMany({
     data: {
       verified: true,
       verifiedAt: now,
       tries: {decrement: 1},
-      tokenHash: hashVerificationToken(verificationToken),
-      tokenExpiresAt: verificationTokenExpiresAt,
+      tokenHash: hashVerifiedTargetToken(verifiedTargetToken),
+      tokenExpiresAt: verifiedTargetTokenExpiresAt,
     },
     where: {id, verified: false},
   });
@@ -166,32 +166,32 @@ export const submitVerification = async (challengeId: string, challenge: string)
     throw verificationRefused(challengeId, channel, ALREADY_VERIFIED);
   }
   log.info({ challengeId, channel }, "target verification completed");
-  return {verificationToken, verificationTokenExpiresAt};
+  return {verifiedTargetToken, verifiedTargetTokenExpiresAt};
 };
 
-export type VerificationTokenUse = "lookup" | "register" | "subscribe";
+export type VerifiedTargetTokenUse = "lookup" | "register" | "subscribe";
 
 /**
- * The target a verificationToken proves, or a 403 when the token is unknown, expired or (when `expected` is given)
+ * The target a verifiedTargetToken proves, or a 403 when the token is unknown, expired or (when `expected` is given)
  * was issued for another channel or target. register and subscribe call it after sanitizeTarget and before the SIWE
  * check, so a refused token leaves the SIWE nonce free and costs no RPC call.
  */
 export const requireVerifiedTarget = async (
-  verificationToken: string,
-  use: VerificationTokenUse,
+  verifiedTargetToken: string,
+  use: VerifiedTargetTokenUse,
   expected?: VerifiedTarget,
 ): Promise<{verificationId: string} & VerifiedTarget> => {
   const verification = await prisma.targetVerification.findUnique({
-    where: {tokenHash: hashVerificationToken(verificationToken)},
+    where: {tokenHash: hashVerifiedTargetToken(verifiedTargetToken)},
     select: {id: true, channel: true, target: true, tokenExpiresAt: true},
   });
-  const reason = refusedVerificationToken(verification, expected, new Date());
+  const reason = refusedVerifiedTargetToken(verification, expected, new Date());
   if (reason || !verification) {
     log.info(
       { use, reason, verificationId: verification?.id, statusCode: httpStatus.FORBIDDEN },
-      "verification token refused"
+      "verified target token refused"
     );
-    throw new ApiError(httpStatus.FORBIDDEN, `Invalid or expired verificationToken`);
+    throw new ApiError(httpStatus.FORBIDDEN, `Invalid or expired verifiedTargetToken`);
   }
   return {verificationId: verification.id, channel: verification.channel, target: verification.target};
 };

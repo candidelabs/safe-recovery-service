@@ -21,11 +21,11 @@ import {
     VERIFICATION_COOLDOWN_MS,
     VERIFICATION_TARGET_MAX_CODES,
     VERIFICATION_TARGET_WINDOW_MS,
-    VERIFICATION_TOKEN_VALIDITY_MS,
-    hashVerificationToken,
-    newVerificationToken,
+    VERIFIED_TARGET_TOKEN_VALIDITY_MS,
+    hashVerifiedTargetToken,
+    newVerifiedTargetToken,
     refusedTry,
-    refusedVerificationToken,
+    refusedVerifiedTargetToken,
     selectVerificationChannel,
     targetCapped,
     targetLocked,
@@ -192,7 +192,7 @@ beforeEach(() => {
 const verifications = () => mockTables.targetVerification ?? [];
 const verificationRow = (id: string) => verifications().find((row) => row.id === id);
 const rowsFor = (target: string) => verifications().filter((row) => row.target === target);
-const tokenRow = (token: string) => verifications().find((row) => row.tokenHash === hashVerificationToken(token));
+const tokenRow = (token: string) => verifications().find((row) => row.tokenHash === hashVerifiedTargetToken(token));
 const registrationsOf = (target: string) => (mockTables.authRegistration ?? [])
     .filter((row) => row.target === target)
     .map(({account, chainId, channel, guardian}) => ({account, chainId, channel, guardian}));
@@ -220,7 +220,7 @@ const wrongCode = (code: string) => code === "000000" ? "111111" : "000000";
 // A token for a target given in its normalized form.
 const verify = async (target: string, channel = "email") => {
     const challengeId = await request(target, channel);
-    return (await submitVerification(challengeId, codeFor(target))).verificationToken;
+    return (await submitVerification(challengeId, codeFor(target))).verifiedTargetToken;
 };
 const fail = async (challengeId: string, target: string, times: number) => {
     for (let i = 0; i < times; i++) await statusOf(submitVerification(challengeId, wrongCode(codeFor(target))));
@@ -234,11 +234,11 @@ const ageAll = (target: string, ms: number) => rowsFor(target).forEach((row) => 
 const expireToken = (token: string) => {
     tokenRow(token).tokenExpiresAt = new Date(Date.now() - 1);
 };
-const registerWith = (account: string, chainId: number, target: string, verificationToken?: string, channel = "email") =>
-    createRegistration(account, chainId, channel, target, "siwe message", "0x1234", verificationToken);
-const subscribeWith = (account: string, target: string, verificationToken?: string, channel = "email") =>
-    createSubscription(account, OWNER, CHAIN_A, channel, target, "siwe message", "0x1234", verificationToken);
-const REFUSED = [403, "Invalid or expired verificationToken"];
+const registerWith = (account: string, chainId: number, target: string, verifiedTargetToken?: string, channel = "email") =>
+    createRegistration(account, chainId, channel, target, "siwe message", "0x1234", verifiedTargetToken);
+const subscribeWith = (account: string, target: string, verifiedTargetToken?: string, channel = "email") =>
+    createSubscription(account, OWNER, CHAIN_A, channel, target, "siwe message", "0x1234", verifiedTargetToken);
+const REFUSED = [403, "Invalid or expired verifiedTargetToken"];
 
 const ACCOUNT_1 = "0x1111111111111111111111111111111111111111";
 const ACCOUNT_2 = "0x2222222222222222222222222222222222222222";
@@ -331,41 +331,41 @@ describe("verification helpers", () => {
     });
 });
 
-describe("verificationToken", () => {
+describe("verifiedTargetToken", () => {
     const now = new Date("2026-11-19T12:00:00Z");
     const row = {channel: "email", target: "user@example.com", tokenExpiresAt: new Date(now.getTime() + 1)};
 
     test("is 32 random bytes in base64url", () => {
-        const token = newVerificationToken();
+        const token = newVerifiedTargetToken();
         expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
         expect(Buffer.from(token, "base64url")).toHaveLength(32);
-        expect(newVerificationToken()).not.toBe(token);
+        expect(newVerifiedTargetToken()).not.toBe(token);
     });
 
     test("is stored as its SHA-256 hash, in hex", () => {
-        expect(hashVerificationToken("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        expect(hashVerifiedTargetToken("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     });
 
     test("is refused when unknown, expired (at exactly now too) or issued for another channel or target", () => {
-        expect(refusedVerificationToken(null, undefined, now)).toBe("unknown");
-        expect(refusedVerificationToken(undefined, {channel: "email", target: "user@example.com"}, now)).toBe("unknown");
-        expect(refusedVerificationToken({...row, tokenExpiresAt: now}, undefined, now)).toBe("expired");
-        expect(refusedVerificationToken({...row, tokenExpiresAt: null}, undefined, now)).toBe("expired");
-        expect(refusedVerificationToken(row, {channel: "sms", target: "user@example.com"}, now)).toBe("mismatch");
-        expect(refusedVerificationToken(row, {channel: "email", target: "other@example.com"}, now)).toBe("mismatch");
+        expect(refusedVerifiedTargetToken(null, undefined, now)).toBe("unknown");
+        expect(refusedVerifiedTargetToken(undefined, {channel: "email", target: "user@example.com"}, now)).toBe("unknown");
+        expect(refusedVerifiedTargetToken({...row, tokenExpiresAt: now}, undefined, now)).toBe("expired");
+        expect(refusedVerifiedTargetToken({...row, tokenExpiresAt: null}, undefined, now)).toBe("expired");
+        expect(refusedVerifiedTargetToken(row, {channel: "sms", target: "user@example.com"}, now)).toBe("mismatch");
+        expect(refusedVerifiedTargetToken(row, {channel: "email", target: "other@example.com"}, now)).toBe("mismatch");
     });
 
     test("is accepted while it lives, with or without an expectation", () => {
-        expect(refusedVerificationToken(row, undefined, now)).toBeUndefined();
-        expect(refusedVerificationToken(row, {channel: "email", target: "user@example.com"}, now)).toBeUndefined();
+        expect(refusedVerifiedTargetToken(row, undefined, now)).toBeUndefined();
+        expect(refusedVerifiedTargetToken(row, {channel: "email", target: "user@example.com"}, now)).toBeUndefined();
     });
 
     test("is redacted from logs by its key name", () => {
-        expect(isSensitiveKey("verificationToken")).toBe(true);
+        expect(isSensitiveKey("verifiedTargetToken")).toBe(true);
     });
 });
 
-describe("verificationToken validation (Joi)", () => {
+describe("verifiedTargetToken validation (Joi)", () => {
     // required here, not imported: the schemas read Network.supportedChainIds when they load
     const authValidation = require("../src/validations/auth.validation");
     const alertsValidation = require("../src/validations/alerts.validation");
@@ -390,22 +390,22 @@ describe("verificationToken validation (Joi)", () => {
         validate(schema)({body} as never, {} as never, ((e?: ApiError) => { error = e; }) as never);
         return error?.message;
     };
-    const token = newVerificationToken();
+    const token = newVerifiedTargetToken();
 
     test.each(cases)("%s accepts a well-formed token", (_name, schema, body) => {
-        expect(validationError(schema, {...body, verificationToken: token})).toBeUndefined();
+        expect(validationError(schema, {...body, verifiedTargetToken: token})).toBeUndefined();
     });
 
     test("register and subscribe accept no token, the lookup requires one", () => {
         expect(validationError(cases[0][1], cases[0][2])).toBeUndefined();
         expect(validationError(cases[1][1], cases[1][2])).toBeUndefined();
-        expect(validationError(cases[2][1], cases[2][2])).toBe(`"verificationToken" is required`);
+        expect(validationError(cases[2][1], cases[2][2])).toBe(`"verifiedTargetToken" is required`);
     });
 
     test.each(cases)("%s refuses anything else with one message that never quotes the value", (_name, schema, body) => {
         for (const value of [token.slice(1), `${token.slice(1)}+`, `${token.slice(1)}/`, `${token.slice(1)}=`, `${token}A`, "", 12345]) {
-            const error = validationError(schema, {...body, verificationToken: value});
-            expect(error).toBe(`"verificationToken" must be a valid verification token`);
+            const error = validationError(schema, {...body, verifiedTargetToken: value});
+            expect(error).toBe(`"verifiedTargetToken" must be a valid token`);
             if (value !== "") expect(error).not.toContain(String(value));
         }
     });
@@ -552,19 +552,19 @@ describe("verification submit (in-memory tables)", () => {
         const target = newTarget();
         const challengeId = await request(target);
         const before = Date.now();
-        const {verificationToken, verificationTokenExpiresAt} = await submitVerification(challengeId, codeFor(target));
-        expect(verificationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-        expect(verificationTokenExpiresAt.getTime()).toBeGreaterThanOrEqual(before + VERIFICATION_TOKEN_VALIDITY_MS);
-        expect(verificationTokenExpiresAt.getTime()).toBeLessThanOrEqual(Date.now() + VERIFICATION_TOKEN_VALIDITY_MS);
+        const {verifiedTargetToken, verifiedTargetTokenExpiresAt} = await submitVerification(challengeId, codeFor(target));
+        expect(verifiedTargetToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        expect(verifiedTargetTokenExpiresAt.getTime()).toBeGreaterThanOrEqual(before + VERIFIED_TARGET_TOKEN_VALIDITY_MS);
+        expect(verifiedTargetTokenExpiresAt.getTime()).toBeLessThanOrEqual(Date.now() + VERIFIED_TARGET_TOKEN_VALIDITY_MS);
         const row = verificationRow(challengeId);
         expect(row).toMatchObject({
             verified: true,
             verifiedAt: expect.any(Date),
             tries: 0,
-            tokenHash: hashVerificationToken(verificationToken),
-            tokenExpiresAt: verificationTokenExpiresAt,
+            tokenHash: hashVerifiedTargetToken(verifiedTargetToken),
+            tokenExpiresAt: verifiedTargetTokenExpiresAt,
         });
-        expect(Object.values(row)).not.toContain(verificationToken);
+        expect(Object.values(row)).not.toContain(verifiedTargetToken);
     });
 
     test("counts a wrong code and locks the challenge after 5", async () => {
@@ -590,9 +590,9 @@ describe("verification submit (in-memory tables)", () => {
     test("refuses a challenge submitted again after success, and an unknown challenge", async () => {
         const target = newTarget();
         const challengeId = await request(target);
-        const {verificationToken} = await submitVerification(challengeId, codeFor(target));
+        const {verifiedTargetToken} = await submitVerification(challengeId, codeFor(target));
         expect(await statusOf(submitVerification(challengeId, codeFor(target)))).toEqual([400, "challengeId already verified"]);
-        expect(verificationRow(challengeId).tokenHash).toBe(hashVerificationToken(verificationToken));
+        expect(verificationRow(challengeId).tokenHash).toBe(hashVerifiedTargetToken(verifiedTargetToken));
         expect(await statusOf(submitVerification("no-such-challenge", "123456"))).toEqual([404, "challengeId not found"]);
     });
 
@@ -617,8 +617,8 @@ describe("verification submit (in-memory tables)", () => {
         // the failures leave the window
         backdate(first, VERIFICATION_TARGET_WINDOW_MS);
         backdate(second, VERIFICATION_TARGET_WINDOW_MS);
-        const {verificationToken} = await submitVerification(third, thirdCode);
-        expect(verificationRow(third).tokenHash).toBe(hashVerificationToken(verificationToken));
+        const {verifiedTargetToken} = await submitVerification(third, thirdCode);
+        expect(verificationRow(third).tokenHash).toBe(hashVerifiedTargetToken(verifiedTargetToken));
     });
 
     test("checks at most 5 codes of a challenge when wrong codes arrive at once", async () => {
@@ -654,13 +654,13 @@ describe("verification submit (in-memory tables)", () => {
         const challengeId = await request(target);
         const code = codeFor(target);
         const results = await Promise.all([1, 2].map(() => submitVerification(challengeId, code).then(
-            ({verificationToken}) => verificationToken,
+            ({verifiedTargetToken}) => verifiedTargetToken,
             (e: ApiError) => [e.statusCode, e.message],
         )));
         const tokens = results.filter((result): result is string => typeof result === "string");
         expect(tokens).toHaveLength(1);
         expect(results).toContainEqual([400, "challengeId already verified"]);
-        expect(verificationRow(challengeId)).toMatchObject({verified: true, tries: 0, tokenHash: hashVerificationToken(tokens[0])});
+        expect(verificationRow(challengeId)).toMatchObject({verified: true, tries: 0, tokenHash: hashVerifiedTargetToken(tokens[0])});
     });
 });
 
@@ -685,13 +685,13 @@ describe("account lookup with a token (in-memory tables)", () => {
     test("finds the target as normalized when it was verified", async () => {
         registerRow("lookup.case@example.com", ACCOUNT_1, CHAIN_A);
         const challengeId = await request("  Lookup.Case@EXAMPLE.com ");
-        const {verificationToken} = await submitVerification(challengeId, codeFor("lookup.case@example.com"));
-        expect(await listAccounts(verificationToken)).toEqual([{account: ACCOUNT_1, chainId: CHAIN_A}]);
+        const {verifiedTargetToken} = await submitVerification(challengeId, codeFor("lookup.case@example.com"));
+        expect(await listAccounts(verifiedTargetToken)).toEqual([{account: ACCOUNT_1, chainId: CHAIN_A}]);
 
         registerRow("+15550100009", ACCOUNT_2, CHAIN_B, "sms");
         const smsChallengeId = await request("+1 555 010 0009", "sms");
         const sms = await submitVerification(smsChallengeId, codeFor("+15550100009"));
-        expect(await listAccounts(sms.verificationToken)).toEqual([{account: ACCOUNT_2, chainId: CHAIN_B}]);
+        expect(await listAccounts(sms.verifiedTargetToken)).toEqual([{account: ACCOUNT_2, chainId: CHAIN_B}]);
     });
 
     test("lists nothing for a target without registrations", async () => {
@@ -707,7 +707,7 @@ describe("account lookup with a token (in-memory tables)", () => {
     });
 
     test("refuses an unknown or expired token", async () => {
-        expect(await statusOf(listAccounts(newVerificationToken()))).toEqual(REFUSED);
+        expect(await statusOf(listAccounts(newVerifiedTargetToken()))).toEqual(REFUSED);
         const token = await verify(newTarget());
         expireToken(token);
         expect(await statusOf(listAccounts(token))).toEqual(REFUSED);
@@ -754,7 +754,7 @@ describe("register with a token (in-memory tables)", () => {
         const smsToken = await verify("+15550100011", "sms");
 
         for (const [token, refusedTarget] of [
-            [newVerificationToken(), target],
+            [newVerifiedTargetToken(), target],
             [expiredToken, expiredTarget],
             [otherToken, target],
             [smsToken, target],
@@ -767,11 +767,11 @@ describe("register with a token (in-memory tables)", () => {
         expect(registrationsOf(expiredTarget)).toEqual([]);
         expect(registrationsOf("+15550100011")).toEqual([]);
         expect(mockLogLines.slice(-5).map(({bindings, fields, message}) => ({...bindings, ...fields, message}))).toEqual([
-            {component: "verification", use: "register", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verification token refused"},
-            {component: "verification", use: "register", reason: "expired", verificationId: tokenRow(expiredToken).id, statusCode: 403, message: "verification token refused"},
-            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verification token refused"},
-            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(smsToken).id, statusCode: 403, message: "verification token refused"},
-            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verification token refused"},
+            {component: "verification", use: "register", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verified target token refused"},
+            {component: "verification", use: "register", reason: "expired", verificationId: tokenRow(expiredToken).id, statusCode: 403, message: "verified target token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verified target token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(smsToken).id, statusCode: 403, message: "verified target token refused"},
+            {component: "verification", use: "register", reason: "mismatch", verificationId: tokenRow(otherToken).id, statusCode: 403, message: "verified target token refused"},
         ]);
     });
 
@@ -839,7 +839,7 @@ describe("subscribe with a token (in-memory tables)", () => {
         const smsToken = await verify("+15550100012", "sms");
 
         for (const [token, refusedTarget] of [
-            [newVerificationToken(), target],
+            [newVerifiedTargetToken(), target],
             [expiredToken, expiredTarget],
             [otherToken, target],
             [smsToken, target],
@@ -887,11 +887,11 @@ describe("log lines", () => {
         const challengeId = await request(target);
         const code = codeFor(target);
         await statusOf(submitVerification(challengeId, wrongCode(code)));
-        const {verificationToken} = await submitVerification(challengeId, code);
-        await listAccounts(verificationToken);
-        await registerWith(ACCOUNT_1, CHAIN_A, target, verificationToken);
-        await subscribeWith(ACCOUNT_1, target, verificationToken);
-        await statusOf(listAccounts(newVerificationToken()));
+        const {verifiedTargetToken} = await submitVerification(challengeId, code);
+        await listAccounts(verifiedTargetToken);
+        await registerWith(ACCOUNT_1, CHAIN_A, target, verifiedTargetToken);
+        await subscribeWith(ACCOUNT_1, target, verifiedTargetToken);
+        await statusOf(listAccounts(newVerifiedTargetToken()));
 
         expect(mockLogLines.map(({level, bindings, fields, message}) => ({level, ...bindings, ...fields, message}))).toEqual([
             {level: "info", component: "verification", challengeId, channel: "email", reused: false, message: "target verification requested"},
@@ -906,10 +906,10 @@ describe("log lines", () => {
                 level: "info", component: "alerts", subscriptionId: expect.any(String), account: ACCOUNT_1, chainId: CHAIN_A, channel: "email",
                 accountDeployed: true, active: true, verification: "token", verificationId: challengeId, message: "alert subscription created",
             },
-            {level: "info", component: "verification", use: "lookup", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verification token refused"},
+            {level: "info", component: "verification", use: "lookup", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verified target token refused"},
         ]);
         const text = JSON.stringify(mockLogLines);
-        for (const secret of [target, code, verificationToken, hashVerificationToken(verificationToken)]) {
+        for (const secret of [target, code, verifiedTargetToken, hashVerifiedTargetToken(verifiedTargetToken)]) {
             expect(text).not.toContain(secret);
         }
     });

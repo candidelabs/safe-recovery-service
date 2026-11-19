@@ -9,7 +9,7 @@ interface SubscribeBody {
   target: string;
   message: string;
   signature: string;
-  verificationToken?: string;
+  verifiedTargetToken?: string;
 }
 
 interface ActivateSubscriptionBody {
@@ -35,7 +35,7 @@ interface UnsubscribeBody {
 
 export const subscribe = catchAsync(async (req, res) => {
   const params = req.body as SubscribeBody;
-  // with a verificationToken {subscriptionId, active: true}, else {subscriptionId}
+  // with a verifiedTargetToken {subscriptionId, active: true}, else {subscriptionId}
   const response = await alertsService.createSubscription(
     params.account,
     params.owner,
@@ -44,7 +44,7 @@ export const subscribe = catchAsync(async (req, res) => {
     params.target,
     params.message,
     params.signature,
-    params.verificationToken,
+    params.verifiedTargetToken,
   );
   res.send(response);
 });

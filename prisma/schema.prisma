@@ -66,8 +66,8 @@ model AuthRegistrationRequest {
 }
 
 // The verification of an email address or phone number (POST /v1/auth/verification/request): the code sent to the
-// target, which /v1/auth/verification/submit checks, then the hash of the verificationToken it returns. alertId is the
-// alert whose channel made the code. tries counts wrong codes. A row is created only when a code is sent.
+// target, which /v1/auth/verification/submit checks, then the hash of the verifiedTargetToken it returns. alertId is
+// the alert whose channel made the code. tries counts wrong codes. A row is created only when a code is sent.
 model TargetVerification {
   id             String    @id @default(uuid())
   channel        String

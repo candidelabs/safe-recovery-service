@@ -10,7 +10,7 @@ interface CreateRegistrationBody {
   target: string;
   message: string;
   signature: string;
-  verificationToken?: string;
+  verifiedTargetToken?: string;
 }
 
 interface SubmitChallengeBody {
@@ -42,7 +42,7 @@ interface SubmitVerificationBody {
 }
 
 interface ListAccountsBody {
-  verificationToken: string;
+  verifiedTargetToken: string;
 }
 
 interface RequestSignatureBody {
@@ -61,7 +61,7 @@ interface SubmitSignatureChallengeBody {
 
 export const createRegistration = catchAsync(async (req, res) => {
   const params = req.body as CreateRegistrationBody;
-  // with a verificationToken {registrationId, guardianAddress}, else {challengeId}
+  // with a verifiedTargetToken {registrationId, guardianAddress}, else {challengeId}
   const response = await authService.createRegistration(
     params.account,
     params.chainId,
@@ -69,7 +69,7 @@ export const createRegistration = catchAsync(async (req, res) => {
     params.target,
     params.message,
     params.signature,
-    params.verificationToken,
+    params.verifiedTargetToken,
   );
   res.send(response);
 });
@@ -115,18 +115,18 @@ export const requestVerification = catchAsync(async (req, res) => {
 
 export const submitVerification = catchAsync(async (req, res) => {
   const params = req.body as SubmitVerificationBody;
-  const {verificationToken, verificationTokenExpiresAt} = await verificationService.submitVerification(
+  const {verifiedTargetToken, verifiedTargetTokenExpiresAt} = await verificationService.submitVerification(
     params.challengeId,
     params.challenge,
   );
   // the token is a bearer secret
   res.set("Cache-Control", "no-store");
-  res.send({verificationToken, verificationTokenExpiresAt: verificationTokenExpiresAt.toISOString()});
+  res.send({verifiedTargetToken, verifiedTargetTokenExpiresAt: verifiedTargetTokenExpiresAt.toISOString()});
 });
 
 export const listAccounts = catchAsync(async (req, res) => {
   const params = req.body as ListAccountsBody;
-  const accounts = await authService.listAccounts(params.verificationToken);
+  const accounts = await authService.listAccounts(params.verifiedTargetToken);
   res.set("Cache-Control", "no-store");
   res.send({accounts});
 });

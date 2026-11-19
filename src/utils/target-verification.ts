@@ -2,7 +2,7 @@ import httpStatus from "http-status";
 import {createHash, randomBytes} from "node:crypto";
 
 // Verifying an email address or phone number (POST /v1/auth/verification/request and /v1/auth/verification/submit),
-// and the verificationToken that proves it to the account lookup, register and subscribe. The rules live here, apart
+// and the verifiedTargetToken that proves it to the account lookup, register and subscribe. The rules live here, apart
 // from the database, so they are tested without one; verification.service.ts applies them.
 
 // A code is valid for 10 minutes, like the other OTPs.
@@ -18,8 +18,8 @@ export const VERIFICATION_TARGET_MAX_FAILURES = 10;
 // Codes sent per channel and target within the window, after which no code is sent until older ones leave it.
 export const VERIFICATION_TARGET_MAX_CODES = 10;
 export const VERIFICATION_TARGET_WINDOW_MS = 24 * 60 * 60 * 1000;
-// How long a verificationToken is accepted after the right code.
-export const VERIFICATION_TOKEN_VALIDITY_MS = 10 * 60 * 1000;
+// How long a verifiedTargetToken is accepted after the right code.
+export const VERIFIED_TARGET_TOKEN_VALIDITY_MS = 10 * 60 * 1000;
 
 export interface VerificationNetwork {
   guardian?: string;
@@ -95,11 +95,11 @@ export function refusedTry(challenge: VerificationChallenge, now: Date): Verific
   return TOO_MANY_TRIES;
 }
 
-// The verificationToken.
+// The verifiedTargetToken.
 //
-// It proves control of a (channel, normalized target) for VERIFICATION_TOKEN_VALIDITY_MS and is a bearer secret: a
+// It proves control of a (channel, normalized target) for VERIFIED_TARGET_TOKEN_VALIDITY_MS and is a bearer secret: a
 // client keeps it in memory, never in a URL, a log or storage. Only its SHA-256 hash is stored (enough for 256
-// random bits), and neither the token nor the hash is ever logged or put in an error message ("verificationToken"
+// random bits), and neither the token nor the hash is ever logged or put in an error message ("verifiedTargetToken"
 // ends in "token", so the log and Sentry redaction also covers it by key name).
 //
 // What it can do: list the accounts registered with the target; register the target for an account that signs for
@@ -111,32 +111,32 @@ export function refusedTry(challenge: VerificationChallenge, now: Date): Verific
 // own with the victim's target or send it that account's alerts, as a phished registration or alerts code allows
 // today. The message says what the code does and to never share it.
 
-export type VerificationTokenRefusal = "unknown" | "expired" | "mismatch";
+export type VerifiedTargetTokenRefusal = "unknown" | "expired" | "mismatch";
 
 export interface VerifiedTarget {
   channel: string;
   target: string;
 }
 
-export interface VerificationTokenRow extends VerifiedTarget {
+export interface VerifiedTargetTokenRow extends VerifiedTarget {
   tokenExpiresAt: Date | null;
 }
 
 // 32 random bytes, base64url: 43 characters of [A-Za-z0-9_-].
-export const newVerificationToken = (): string => randomBytes(32).toString("base64url");
+export const newVerifiedTargetToken = (): string => randomBytes(32).toString("base64url");
 
-export const hashVerificationToken = (token: string): string => createHash("sha256").update(token).digest("hex");
+export const hashVerifiedTargetToken = (token: string): string => createHash("sha256").update(token).digest("hex");
 
 /**
  * Why a token is refused, or undefined when it is accepted: no row has its hash ("unknown"), it has no expiry or
  * expired at or before now ("expired"), or it was issued for another channel or target than the request's
  * ("mismatch"; only when an expectation is given, the account lookup has none).
  */
-export function refusedVerificationToken(
-  verification: VerificationTokenRow | null | undefined,
+export function refusedVerifiedTargetToken(
+  verification: VerifiedTargetTokenRow | null | undefined,
   expected: VerifiedTarget | undefined,
   now: Date,
-): VerificationTokenRefusal | undefined {
+): VerifiedTargetTokenRefusal | undefined {
   if (!verification) return "unknown";
   if (!verification.tokenExpiresAt || verification.tokenExpiresAt <= now) return "expired";
   if (expected && (expected.channel !== verification.channel || expected.target !== verification.target)) return "mismatch";

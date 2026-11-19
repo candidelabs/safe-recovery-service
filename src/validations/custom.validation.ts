@@ -65,10 +65,10 @@ export const hexBigInt: Joi.CustomValidator = (value, helpers) => {
 // A token from POST /v1/auth/verification/submit: 32 random bytes, base64url. Anything else sent, of any type, gets
 // this one fixed message, which never quotes the value (Joi's own pattern message would, and error messages reach the
 // request log).
-export const verificationToken: Joi.CustomValidator = (value, helpers) => {
+export const verifiedTargetToken: Joi.CustomValidator = (value, helpers) => {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
     return helpers.message({
-      custom: "{{#label}} must be a valid verification token",
+      custom: "{{#label}} must be a valid token",
     });
   }
   return value;

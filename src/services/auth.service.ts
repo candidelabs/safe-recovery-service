@@ -13,7 +13,7 @@ import logger from "../utils/logger";
 
 const log = logger.child({ component: "auth" });
 
-// The registration that /submit (after its code) and register (with a verificationToken) create.
+// The registration that /submit (after its code) and register (with a verifiedTargetToken) create.
 const storeRegistration = async (network: Network, account: string, chainId: number, channel: string, target: string) => {
   const signer = Signers.instance().getSigner(network.guardian!)!;
   const guardian = await signer.signer();
@@ -37,7 +37,7 @@ export const createRegistration = async (
   target: string,
   message: string,
   signature: string,
-  verificationToken?: string,
+  verifiedTargetToken?: string,
 ): Promise<{challengeId: string} | {registrationId: string, guardianAddress: string}> => {
   const network = Network.instances.get(chainId.toString())!;
   if (!network.guardian){
@@ -54,9 +54,9 @@ export const createRegistration = async (
   }
   // A token is checked before the SIWE message: a refused token leaves the nonce free (the same signed message can be
   // sent again without the token) and costs no RPC call. It never replaces the account's signature.
-  const verification = verificationToken === undefined
+  const verification = verifiedTargetToken === undefined
     ? undefined
-    : await requireVerifiedTarget(verificationToken, "register", {channel, target: sanitizedTarget});
+    : await requireVerifiedTarget(verifiedTargetToken, "register", {channel, target: sanitizedTarget});
   //
   let statement = MessageStatements["auth-register"];
   statement = statement.replace("{{target}}", target);
@@ -206,11 +206,11 @@ export const deleteRegistration = async (registrationId: string, message: string
   return true;
 };
 
-// The accounts registered with the target a verificationToken proves (POST /v1/auth/accounts); the rule is in
+// The accounts registered with the target a verifiedTargetToken proves (POST /v1/auth/accounts); the rule is in
 // src/utils/account-lookup.ts. It can be called again while the token lives. Neither the target nor the accounts found
 // are logged.
-export const listAccounts = async (verificationToken: string): Promise<LookupAccount[]> => {
-  const {verificationId, channel, target} = await requireVerifiedTarget(verificationToken, "lookup");
+export const listAccounts = async (verifiedTargetToken: string): Promise<LookupAccount[]> => {
+  const {verificationId, channel, target} = await requireVerifiedTarget(verifiedTargetToken, "lookup");
   // Registrations as stored: no on-chain check (the guardian may have been removed since).
   const registrations = await prisma.authRegistration.findMany({
     where: {channel, target, chainId: {in: Network.supportedChainIds}},

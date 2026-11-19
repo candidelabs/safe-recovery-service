@@ -1,5 +1,5 @@
 import Joi from "joi";
-import {ethereumAddress, hexString, siweMessage, verificationToken} from "./custom.validation";
+import {ethereumAddress, hexString, siweMessage, verifiedTargetToken} from "./custom.validation";
 import {Network} from "../models/network";
 
 export const subscribe = {
@@ -12,7 +12,7 @@ export const subscribe = {
     message: Joi.custom(siweMessage).required(),
     signature: Joi.custom(hexString).required(),
     // from POST /v1/auth/verification/submit: the subscription is created active, with no second code
-    verificationToken: Joi.custom(verificationToken),
+    verifiedTargetToken: Joi.custom(verifiedTargetToken),
   }),
 };
 

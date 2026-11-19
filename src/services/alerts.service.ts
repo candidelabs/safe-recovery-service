@@ -28,7 +28,7 @@ export const createSubscription = async (
   target: string,
   message: string,
   signature: string,
-  verificationToken?: string,
+  verifiedTargetToken?: string,
 ): Promise<{subscriptionId: string, active?: true}> => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
@@ -41,9 +41,9 @@ export const createSubscription = async (
   }
   // A token is checked before the SIWE message: a refused token leaves the nonce free (the same signed message can be
   // sent again without the token) and costs no RPC call. It never replaces the owner's signature or the owner check.
-  const verification = verificationToken === undefined
+  const verification = verifiedTargetToken === undefined
     ? undefined
-    : await requireVerifiedTarget(verificationToken, "subscribe", {channel, target: sanitizedTarget});
+    : await requireVerifiedTarget(verifiedTargetToken, "subscribe", {channel, target: sanitizedTarget});
   //
   let statement = MessageStatements["alerts-subscribe"];
   statement = statement.replace("{{account}}", account.toLowerCase());
