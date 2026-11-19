@@ -8,6 +8,7 @@ import {SMSAlertChannel} from "../src/models/alert/sms-alert-channel";
 import {getTemplate} from "../src/models/alert/message-templates";
 import {Signers} from "../src/models/signer/signers";
 import {Signer} from "../src/models/signer/signer";
+import {AccountEventTracker} from "../src/models/events/account-event-tracker";
 import {Configuration} from "../src/config/config-manager";
 import {isSensitiveKey} from "../src/logging";
 import {ApiError} from "../src/utils/error";
@@ -34,11 +35,13 @@ import {
 } from "../src/utils/target-verification";
 import {requestVerification, submitVerification} from "../src/services/verification.service";
 import {createRegistration, listAccounts} from "../src/services/auth.service";
+import {createSubscription} from "../src/services/alerts.service";
 
 // Verifying an email address or phone number (POST /v1/auth/verification/request and /submit) and using the token
-// (POST /v1/auth/accounts, /v1/auth/register) without a database: the rules in src/utils/target-verification.ts, the
-// Joi rule, the message templates, and the services against in-memory tables. The SIWE check is mocked
-// (test/verification.test.ts signs for real on Postgres and Mailpit).
+// (POST /v1/auth/accounts, /v1/auth/register, /v1/alerts/subscribe) without a database: the rules in
+// src/utils/target-verification.ts, the Joi rule, the message templates, and the services against in-memory tables.
+// The SIWE checks and the owner check are mocked (test/verification.test.ts signs for real on Postgres and Mailpit,
+// test/alerts.test.ts subscribes on a chain).
 
 // In-memory tables for the queries the services make (plain values, equals, in, gt/gte/lt; increment and
 // decrement). Each call runs to completion before the next, like one SQL statement, so parallel submits
@@ -106,13 +109,17 @@ jest.mock('../src/config/prisma-client', () => {
     return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
 });
 
-// The account's SIWE check of register.
+// The SIWE checks (self mode for register, owner mode for subscribe) and the owner check.
 const mockSiwe = {
     validateSIWEMessage: jest.fn(),
+    validateOwnerSIWEMessage: jest.fn(),
+    requireAccountOwner: jest.fn(),
 };
 jest.mock("../src/utils", () => ({
     ...jest.requireActual("../src/utils"),
     validateSIWEMessage: (...args: unknown[]) => mockSiwe.validateSIWEMessage(...args),
+    validateOwnerSIWEMessage: (...args: unknown[]) => mockSiwe.validateOwnerSIWEMessage(...args),
+    requireAccountOwner: (...args: unknown[]) => mockSiwe.requireAccountOwner(...args),
 }));
 
 // Every log line, as {level, bindings of the child logger, fields, message}.
@@ -141,9 +148,11 @@ const CHAIN_B = 11155420;
 const CHAIN_DISABLED = 84532;
 const INDEXER_ALERT = "alert-d";
 const GUARDIAN = "0x9999999999999999999999999999999999999999";
+const OWNER = "0x4444444444444444444444444444444444444444";
 
 jest.spyOn(Configuration, "instance").mockReturnValue({indexerAlert: INDEXER_ALERT} as unknown as Configuration);
 Signers.instance().addSigner({id: "signer", signer: async () => GUARDIAN} as unknown as Signer);
+const addSubscription = jest.spyOn(AccountEventTracker.instance(), "addSubscription");
 
 // Enabled networks in config order, without the constructor (which starts an indexer).
 const addNetwork = (chainId: number, guardian: string | undefined, alert: string) => {
@@ -175,6 +184,9 @@ addNetwork(CHAIN_B, "signer", "alert-b");
 
 beforeEach(() => {
     mockSiwe.validateSIWEMessage.mockReset().mockResolvedValue({counterfactual: false});
+    mockSiwe.validateOwnerSIWEMessage.mockReset().mockResolvedValue({deployment: undefined});
+    mockSiwe.requireAccountOwner.mockReset().mockResolvedValue({owners: [OWNER.toLowerCase()], deployed: true});
+    addSubscription.mockClear();
 });
 
 const verifications = () => mockTables.targetVerification ?? [];
@@ -184,6 +196,7 @@ const tokenRow = (token: string) => verifications().find((row) => row.tokenHash 
 const registrationsOf = (target: string) => (mockTables.authRegistration ?? [])
     .filter((row) => row.target === target)
     .map(({account, chainId, channel, guardian}) => ({account, chainId, channel, guardian}));
+const subscriptionsOf = (target: string) => (mockTables.alertSubscription ?? []).filter((row) => row.target === target);
 const sentTo = (target: string) => sent.filter((message) => message.target === target);
 // sendMessage runs after the response (setImmediate)
 const flushSends = () => new Promise((resolve) => setImmediate(resolve));
@@ -223,6 +236,8 @@ const expireToken = (token: string) => {
 };
 const registerWith = (account: string, chainId: number, target: string, verificationToken?: string, channel = "email") =>
     createRegistration(account, chainId, channel, target, "siwe message", "0x1234", verificationToken);
+const subscribeWith = (account: string, target: string, verificationToken?: string, channel = "email") =>
+    createSubscription(account, OWNER, CHAIN_A, channel, target, "siwe message", "0x1234", verificationToken);
 const REFUSED = [403, "Invalid or expired verificationToken"];
 
 const ACCOUNT_1 = "0x1111111111111111111111111111111111111111";
@@ -353,6 +368,7 @@ describe("verificationToken", () => {
 describe("verificationToken validation (Joi)", () => {
     // required here, not imported: the schemas read Network.supportedChainIds when they load
     const authValidation = require("../src/validations/auth.validation");
+    const alertsValidation = require("../src/validations/alerts.validation");
     const wallet = ethers.Wallet.createRandom();
     const message = new SiweMessage({
         domain: "example.com",
@@ -366,6 +382,7 @@ describe("verificationToken validation (Joi)", () => {
     }).prepareMessage();
     const cases: [string, object, Record<string, unknown>][] = [
         ["register", authValidation.register, {account: wallet.address, chainId: CHAIN_A, channel: "email", target: "user@example.com", message, signature: "0x1234"}],
+        ["subscribe", alertsValidation.subscribe, {account: wallet.address, owner: wallet.address, chainId: CHAIN_A, channel: "email", target: "user@example.com", message, signature: "0x1234"}],
         ["accounts", authValidation.accounts, {}],
     ];
     const validationError = (schema: object, body: Record<string, unknown>): string | undefined => {
@@ -379,9 +396,10 @@ describe("verificationToken validation (Joi)", () => {
         expect(validationError(schema, {...body, verificationToken: token})).toBeUndefined();
     });
 
-    test("register accepts no token, the lookup requires one", () => {
+    test("register and subscribe accept no token, the lookup requires one", () => {
         expect(validationError(cases[0][1], cases[0][2])).toBeUndefined();
-        expect(validationError(cases[1][1], cases[1][2])).toBe(`"verificationToken" is required`);
+        expect(validationError(cases[1][1], cases[1][2])).toBeUndefined();
+        expect(validationError(cases[2][1], cases[2][2])).toBe(`"verificationToken" is required`);
     });
 
     test.each(cases)("%s refuses anything else with one message that never quotes the value", (_name, schema, body) => {
@@ -787,6 +805,81 @@ describe("register with a token (in-memory tables)", () => {
     });
 });
 
+describe("subscribe with a token (in-memory tables)", () => {
+    test("creates an active, verified subscription, registers it for delivery, and sends nothing", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const response = await subscribeWith(ACCOUNT_3, `  ${target.toUpperCase()}`, token);
+        expect(response).toEqual({subscriptionId: expect.any(String), active: true});
+
+        expect(subscriptionsOf(target)).toEqual([expect.objectContaining({
+            id: response.subscriptionId,
+            account: ACCOUNT_3.toLowerCase(),
+            owner: OWNER.toLowerCase(),
+            channel: "email",
+            target,
+            active: true,
+            verified: true,
+            verifiedAt: expect.any(Date),
+            challengeHash: "-",
+            tries: 0,
+        })]);
+        expect(addSubscription).toHaveBeenCalledWith(ACCOUNT_3.toLowerCase(), response.subscriptionId, "email", target);
+        expect(sentTo(target)).toHaveLength(1); // the verification code only
+        expect(mockSiwe.validateOwnerSIWEMessage).toHaveBeenCalledTimes(1);
+        expect(mockSiwe.requireAccountOwner).toHaveBeenCalledTimes(1);
+    });
+
+    test("refuses an unknown, expired, other-target or other-channel token before the SIWE check", async () => {
+        const target = newTarget();
+        const expiredTarget = newTarget();
+        const expiredToken = await verify(expiredTarget);
+        expireToken(expiredToken);
+        const otherToken = await verify(newTarget());
+        const smsToken = await verify("+15550100012", "sms");
+
+        for (const [token, refusedTarget] of [
+            [newVerificationToken(), target],
+            [expiredToken, expiredTarget],
+            [otherToken, target],
+            [smsToken, target],
+        ]) {
+            expect(await statusOf(subscribeWith(ACCOUNT_1, refusedTarget, token))).toEqual(REFUSED);
+        }
+        expect(mockSiwe.validateOwnerSIWEMessage).not.toHaveBeenCalled();
+        expect(mockSiwe.requireAccountOwner).not.toHaveBeenCalled();
+        expect(subscriptionsOf(target)).toEqual([]);
+        expect(subscriptionsOf(expiredTarget)).toEqual([]);
+        expect(addSubscription).not.toHaveBeenCalled();
+    });
+
+    test("stores nothing when the owner check fails", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        mockSiwe.requireAccountOwner.mockRejectedValue(new ApiError(403, "Owner must be a valid owner of the account"));
+        expect(await statusOf(subscribeWith(ACCOUNT_1, target, token))).toEqual([403, "Owner must be a valid owner of the account"]);
+        expect(subscriptionsOf(target)).toEqual([]);
+        expect(addSubscription).not.toHaveBeenCalled();
+    });
+
+    test("answers 409 for an active subscription that exists", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        await subscribeWith(ACCOUNT_2, target, token);
+        expect(await statusOf(subscribeWith(ACCOUNT_2, target, token))).toEqual([409, `An active subscription already exists for ${OWNER} in ${ACCOUNT_2} on the 'email' channel`]);
+        expect(subscriptionsOf(target)).toHaveLength(1);
+    });
+
+    test("without a token, sends the subscription code and creates an inactive subscription as before", async () => {
+        const target = newTarget();
+        const response = await subscribeWith(ACCOUNT_1, target);
+        expect(response).toEqual({subscriptionId: expect.any(String)});
+        expect(subscriptionsOf(target)).toEqual([expect.objectContaining({id: response.subscriptionId, active: false, verified: false})]);
+        expect(sentTo(target)).toMatchObject([{templateId: "otpVerification", alertId: INDEXER_ALERT}]);
+        expect(addSubscription).not.toHaveBeenCalled();
+    });
+});
+
 describe("log lines", () => {
     test("say what happened and never carry the target, the code, the token or its hash", async () => {
         mockLogLines.length = 0;
@@ -797,6 +890,7 @@ describe("log lines", () => {
         const {verificationToken} = await submitVerification(challengeId, code);
         await listAccounts(verificationToken);
         await registerWith(ACCOUNT_1, CHAIN_A, target, verificationToken);
+        await subscribeWith(ACCOUNT_1, target, verificationToken);
         await statusOf(listAccounts(newVerificationToken()));
 
         expect(mockLogLines.map(({level, bindings, fields, message}) => ({level, ...bindings, ...fields, message}))).toEqual([
@@ -807,6 +901,10 @@ describe("log lines", () => {
             {
                 level: "info", component: "auth", registrationId: expect.any(String), account: ACCOUNT_1, chainId: CHAIN_A, channel: "email",
                 verification: "token", verificationId: challengeId, accountDeployed: true, message: "auth registration created",
+            },
+            {
+                level: "info", component: "alerts", subscriptionId: expect.any(String), account: ACCOUNT_1, chainId: CHAIN_A, channel: "email",
+                accountDeployed: true, active: true, verification: "token", verificationId: challengeId, message: "alert subscription created",
             },
             {level: "info", component: "verification", use: "lookup", reason: "unknown", verificationId: undefined, statusCode: 403, message: "verification token refused"},
         ]);

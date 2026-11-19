@@ -223,7 +223,7 @@ Nothing is stored about how a registration or subscription was made: the log lin
 
 ## Verifying an email address or phone number
 
-A client can prove that the user controls an email address or phone number once, with a one-time code, and get a short-lived `verificationToken`. The token then lists the accounts registered with the target and replaces the second code of a registration. No wallet signature is needed to verify a target; registering still needs the account's.
+A client can prove that the user controls an email address or phone number once, with a one-time code, and get a short-lived `verificationToken`. The token then replaces the second code of three requests: listing the accounts registered with the target, registering it with the guardian, and subscribing it to alerts. No wallet signature is needed to verify a target; registering and subscribing still need theirs.
 
 ### `POST /v1/auth/verification/request`
 
@@ -274,14 +274,14 @@ A submit counts its try with one atomic conditional update before the code is ch
 
 ### Using the verification token
 
-Wherever it is accepted, a token that is unknown, expired or (for `register`) issued for another channel or target is refused with one answer, and a malformed one fails validation:
+Wherever it is accepted, a token that is unknown, expired or (for `register` and `subscribe`) issued for another channel or target is refused with one answer, and a malformed one fails validation:
 
 | Status | Message | When |
 | --- | --- | --- |
 | 400 | `"verificationToken" must be a valid verification token` | not 43 base64url characters |
 | 403 | `Invalid or expired verificationToken` | unknown, expired, or issued for another channel or target |
 
-`register` checks the token after the target and before the SIWE message. A refused token therefore leaves the message's nonce unused: the client can send the same signed message again without the token, and get the usual code. The token must still be valid when the request arrives, so a client whose signature takes long to collect (a Safe whose owners sign over hours) should sign first and verify last.
+`register` and `subscribe` check the token after the target and before the SIWE message. A refused token therefore leaves the message's nonce unused: the client can send the same signed message again without the token, and get the usual code. The token must still be valid when the request arrives, so a client whose signature takes long to collect (a Safe whose owners sign over hours) should sign first and verify last.
 
 #### Looking up accounts: `POST /v1/auth/accounts`
 
@@ -304,9 +304,13 @@ The response, sent with `Cache-Control: no-store`, lists the accounts registered
 
 The usual body plus `"verificationToken": "<token>"`. The registration is created at once, with no code sent, and the response is the one `POST /v1/auth/submit` gives: `{"registrationId": "<id>", "guardianAddress": "0x..."}`. The account's SIWE signature is still required, with the same statement. One token can register the target for several accounts and chains while it is valid. The checks run in this order: guardian enabled on the network (400), channel offered by the network's alert (400), target (403), token (403), SIWE message (400 / 403), an existing registration (409). Without `verificationToken` nothing changes: a code is sent and the response is `{"challengeId": "<id>"}`.
 
+#### Subscribing to alerts: `POST /v1/alerts/subscribe`
+
+The usual body plus `"verificationToken": "<token>"`. The subscription is created active, with no code sent and no `POST /v1/alerts/activate`, and the response is `{"subscriptionId": "<id>", "active": true}`. The owner's SIWE signature and the owner check are still required. The checks run in this order: channel offered by `options.indexerAlert` (400), target (403), token (403), SIWE message (400 / 403), owner check (400 / 403), an existing active subscription (409). Without `verificationToken` nothing changes: a code is sent and the response is `{"subscriptionId": "<id>"}`.
+
 The token is never accepted by the recovery endpoints: `POST /v1/auth/signature/request` always sends codes of its own, and a token cannot delete a registration or a subscription either.
 
-The log lines are `target verification requested` (`challengeId`, `channel`, `reused`, and `limit`: `locked` or `capped` when nothing was sent), `target verification completed` and `target verification refused` (`challengeId`, `channel`, `statusCode` for a refusal), `verification token refused` (`use`: `lookup` or `register`, `reason`: `unknown`, `expired` or `mismatch`, `verificationId` when the token was found), `account lookup completed` (`verificationId`, `channel`, `accountCount`) and `auth registration created` (`registrationId`, `account`, `chainId`, `channel`, `verification`: `token` or `otp`, and for a token `verificationId` and `accountDeployed`; written by `POST /v1/auth/submit` too). The target, the code, the token, its hash and the accounts found are never logged.
+The log lines are `target verification requested` (`challengeId`, `channel`, `reused`, and `limit`: `locked` or `capped` when nothing was sent), `target verification completed` and `target verification refused` (`challengeId`, `channel`, `statusCode` for a refusal), `verification token refused` (`use`: `lookup`, `register` or `subscribe`, `reason`: `unknown`, `expired` or `mismatch`, `verificationId` when the token was found), `account lookup completed` (`verificationId`, `channel`, `accountCount`), `auth registration created` (`registrationId`, `account`, `chainId`, `channel`, `verification`: `token` or `otp`, and for a token `verificationId` and `accountDeployed`; written by `POST /v1/auth/submit` too) and `alert subscription created` (with `active: true`, `verification: "token"` and `verificationId` for a token). The target, the code, the token, its hash and the accounts found are never logged.
 
 **Operators: sending a code to any target costs money.** `POST /v1/auth/verification/request` needs no signature, so one request makes the service send a message. Each target gets at most 10 codes a day, but rotating targets is only bounded by `options.rateLimit` (per IP, over all routes), as it already is for `register` and `subscribe`. For SMS this is the pattern of SMS pumping. Restrict the destination countries at the SMS provider (Twilio's geo permissions), turn on its fraud protection and usage alerts, set `options.rateLimit` with this endpoint in mind, limit requests per client at whatever fronts the service, and set `options.authentication` when only a backend should call the service. Behind a backend every request comes from the same IP, so the per-IP limit does not limit an end user there. For email, use a provider that handles bounces: codes sent to addresses that never asked for one hurt the sender's reputation.
 

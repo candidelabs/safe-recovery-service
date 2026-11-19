@@ -665,3 +665,91 @@ describe('alerts (counterfactual account)', ()=>{
         .expect(200);
     });
 });
+
+// Subscribing with a verificationToken from POST /v1/auth/verification/request and /submit: the subscription is active
+// at once and no second code is sent. The owner still signs and is checked on chain (here an undeployed account, in
+// simulation). A refused token is checked before the SIWE message, so the same signed message can be sent again.
+describe('alerts (verification token)', ()=>{
+    const erc6492Magic = "0x6492649264926492649264926492649264926492649264926492649264926492";
+    const tokenOwner = ethers.Wallet.createRandom();
+    const tokenOwners = [tokenOwner.address, ethers.Wallet.createRandom().address];
+    const tokenAccount = SafeAccount.initializeNewAccount(tokenOwners, {threshold: 2});
+    const [tokenFactory, tokenFactoryCalldata] = SafeAccount.createFactoryAddressAndData(tokenOwners, {threshold: 2});
+    const target = `token-${Math.random().toString(36).substring(2)}@example.com`;
+    const subscribeStatement = "I agree to receive Social Recovery Module alert notifications for " + tokenAccount.accountAddress.toLowerCase() + " on all supported chains sent to " + target + " (via email)";
+
+    const wrap = (signature: string) => ethers.utils.hexConcat([
+        ethers.utils.defaultAbiCoder.encode(["address", "bytes", "bytes"], [tokenFactory, tokenFactoryCalldata, signature]),
+        erc6492Magic,
+    ]);
+
+    const messagesTo = async (): Promise<{Subject: string, Snippet: string}[]> => {
+        const response = await fetch('http://localhost:8025/api/v1/messages?limit=1000');
+        const {messages} = await response.json() as {messages: {To: {Address: string}[], Subject: string, Snippet: string}[]};
+        return messages.filter((message) => message.To.some((to) => to.Address === target));
+    };
+
+    // the verification code is sent after the response
+    const verificationCode = async (): Promise<string> => {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+            const [message] = await messagesTo();
+            if (message) {
+                expect(message.Subject).toBe("Your Safe Recovery verification code");
+                return /\d{6}/.exec(message.Snippet)![0];
+            }
+            if (Date.now() > deadline) throw new Error(`no verification code reached ${target}`);
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+    };
+
+    it('should succeed with 200 to subscribe with a verification token, active at once and with no second code', async ()=>{
+        const requestRes = await supertest(app).post('/v1/auth/verification/request/')
+        .send({channel: "email", target})
+        .expect(200);
+        const code = await verificationCode();
+        const submitRes = await supertest(app).post('/v1/auth/verification/submit/')
+        .send({challengeId: requestRes.body.challengeId, challenge: code})
+        .expect(200);
+        const verificationToken = submitRes.body.verificationToken;
+
+        const [siweMessage, signature] = await signStatement(tokenOwner, tokenOwner.address, subscribeStatement, chainId_1);
+        const body = {
+            account: tokenAccount.accountAddress,
+            owner: tokenOwner.address,
+            chainId: Number(chainId_1),
+            channel: "email",
+            target,
+            message: siweMessage,
+            signature: wrap(signature),
+        };
+        await supertest(app).post('/v1/alerts/subscribe/')
+        .send({...body, verificationToken: ethers.utils.hexlify(ethers.utils.randomBytes(32)).slice(2, 45)})
+        .expect(403).then((response) => {
+            expect(response.body.message).toBe("Invalid or expired verificationToken");
+        });
+        const subscribeRes = await supertest(app).post('/v1/alerts/subscribe/')
+        .send({...body, verificationToken})
+        .expect(200);
+        expect(subscribeRes.body).toEqual({subscriptionId: expect.any(String), active: true});
+
+        // already active: nothing to activate
+        await supertest(app).post('/v1/alerts/activate/')
+        .send({subscriptionId: subscribeRes.body.subscriptionId, challenge: code})
+        .expect(400);
+
+        const [fetchMessage, fetchSignature] = await signStatement(tokenOwner, tokenOwner.address, fetchStatement, chainId_1);
+        const fetchRes = await supertest(app).get('/v1/alerts/subscriptions/').query({
+            account: tokenAccount.accountAddress,
+            owner: tokenOwner.address,
+            chainId: Number(chainId_1),
+            message: fetchMessage,
+            signature: wrap(fetchSignature),
+        }).expect(200);
+        expect(fetchRes.body.subscriptions.map((s: {id: string}) => s.id)).toEqual([subscribeRes.body.subscriptionId]);
+
+        // the verification code was the only message
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        expect(await messagesTo()).toHaveLength(1);
+    });
+});

@@ -10,7 +10,7 @@ import type {PrismaClient} from "@prisma/client";
 // below (two enabled networks and a disabled one, email through Mailpit) and the boot step that assigns legacy rows
 // never resolves, so the app never listens and no chain is called: register is signed by a random wallet (ECDSA).
 // Registrations for the lookup are also written straight to the database. test/verification-rules.test.ts covers the
-// same rules without Docker.
+// same rules without Docker; subscribing with a token needs a chain and is in test/alerts.test.ts.
 
 jest.setTimeout(180000);
 

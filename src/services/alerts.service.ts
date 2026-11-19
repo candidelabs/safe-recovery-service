@@ -9,6 +9,7 @@ import * as cron from "node-cron";
 import {SummaryMessageData} from "../utils/interfaces";
 import {MessageStatements} from "../utils/constants";
 import {Network} from "../models/network";
+import {requireVerifiedTarget} from "./verification.service";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "alerts" });
@@ -19,7 +20,16 @@ const log = logger.child({ component: "alerts" });
 const canManageSubscription = (subscriptionOwner: string, owner: string, owners: string[]) =>
   subscriptionOwner === owner.toLowerCase() || !owners.includes(subscriptionOwner);
 
-export const createSubscription = async (account: string, owner: string, chainId: number, channel: string, target: string, message: string, signature: string) => {
+export const createSubscription = async (
+  account: string,
+  owner: string,
+  chainId: number,
+  channel: string,
+  target: string,
+  message: string,
+  signature: string,
+  verificationToken?: string,
+): Promise<{subscriptionId: string, active?: true}> => {
   const alertChannel = Alerts.instance().getAlertChannel(Configuration.instance().indexerAlert, channel);
   if (!alertChannel){
     throw new ApiError(httpStatus.BAD_REQUEST, `Target channel '${channel}' is not supported for alerts`);
@@ -29,6 +39,11 @@ export const createSubscription = async (account: string, owner: string, chainId
   if (!sanitizedTarget) {
     throw new ApiError(httpStatus.FORBIDDEN, `Target is not compatible with the '${channel}' channel`);
   }
+  // A token is checked before the SIWE message: a refused token leaves the nonce free (the same signed message can be
+  // sent again without the token) and costs no RPC call. It never replaces the owner's signature or the owner check.
+  const verification = verificationToken === undefined
+    ? undefined
+    : await requireVerifiedTarget(verificationToken, "subscribe", {channel, target: sanitizedTarget});
   //
   let statement = MessageStatements["alerts-subscribe"];
   statement = statement.replace("{{account}}", account.toLowerCase());
@@ -51,6 +66,40 @@ export const createSubscription = async (account: string, owner: string, chainId
   });
   if (existingSubscription){
     throw new ApiError(httpStatus.CONFLICT, `An active subscription already exists for ${owner} in ${account} on the '${channel}' channel`);
+  }
+  //
+  if (verification) {
+    // the target was verified: the subscription is created active, with no second code and no /activate
+    const alertSubscription = await prisma.alertSubscription.create(
+      {
+        data: {
+          account: account.toLowerCase(),
+          owner: owner.toLowerCase(),
+          channel,
+          target,
+          active: true,
+          challengeHash: "-",
+          verified: true,
+          verifiedAt: new Date(),
+          tries: 0,
+          expiresAt: new Date(Date.now() + 10*60*1000)
+        }
+      }
+    );
+    AccountEventTracker.instance().addSubscription(
+      alertSubscription.account,
+      alertSubscription.id,
+      alertSubscription.channel,
+      alertSubscription.target,
+    );
+    log.info(
+      {
+        subscriptionId: alertSubscription.id, account: alertSubscription.account, chainId, channel, accountDeployed: deployed,
+        active: true, verification: "token", verificationId: verification.verificationId,
+      },
+      "alert subscription created"
+    );
+    return {subscriptionId: alertSubscription.id, active: true};
   }
   //
   const [challenge, challengeHash] = await alertChannel.generateChallenge(account.toLowerCase()+owner.toLowerCase());
@@ -79,7 +128,7 @@ export const createSubscription = async (account: string, owner: string, chainId
     { subscriptionId: alertSubscription.id, account: account.toLowerCase(), chainId, channel, accountDeployed: deployed },
     "alert subscription created"
   );
-  return alertSubscription.id;
+  return {subscriptionId: alertSubscription.id};
 };
 
 export const activateSubscription = async (subscriptionId: string, challenge: string) => {
