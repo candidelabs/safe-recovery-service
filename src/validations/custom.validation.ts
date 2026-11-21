@@ -1,5 +1,6 @@
 import Joi from "joi";
 import {SiweMessage} from "siwe";
+import {accountMetadataProblem} from "../utils/account-metadata";
 
 export const ethereumAddress: Joi.CustomValidator = (value, helpers) => {
   if (!value.match(/^0x[a-fA-F0-9]{40}$/)) {
@@ -69,6 +70,19 @@ export const verifiedTargetToken: Joi.CustomValidator = (value, helpers) => {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
     return helpers.message({
       custom: "{{#label}} must be a valid token",
+    });
+  }
+  return value;
+};
+
+// Account metadata (POST /v1/auth/register, POST /v1/auth/metadata), checked by accountMetadataProblem in
+// src/utils/account-metadata.ts: one fixed message per rule, which never quotes a key or a value (Joi's own messages
+// would, and error messages reach the request log).
+export const accountMetadata: Joi.CustomValidator = (value, helpers) => {
+  const problem = accountMetadataProblem(value);
+  if (problem !== undefined) {
+    return helpers.message({
+      custom: "{{#label}} " + problem,
     });
   }
   return value;

@@ -5,12 +5,13 @@ import {randomBytes} from "node:crypto";
 import type {Express} from "express";
 import type {PrismaClient} from "@prisma/client";
 
-// POST /v1/auth/verification/request and /submit, and the verifiedTargetToken on POST /v1/auth/accounts and
-// /v1/auth/register, on the real app, against Postgres and Mailpit (./test.sh). config.json is replaced by the config
-// below (two enabled networks and a disabled one, email through Mailpit) and the boot step that assigns legacy rows
-// never resolves, so the app never listens and no chain is called: register is signed by a random wallet (ECDSA).
-// Registrations for the lookup are also written straight to the database. test/verification-rules.test.ts covers the
-// same rules without Docker; subscribing with a token needs a chain and is in test/alerts.test.ts.
+// POST /v1/auth/verification/request and /submit, the verifiedTargetToken on POST /v1/auth/accounts and
+// /v1/auth/register, and the account metadata, on the real app, against Postgres and Mailpit (./test.sh). config.json
+// is replaced by the config below (two enabled networks and a disabled one, email through Mailpit) and the boot step
+// that assigns legacy rows never resolves, so the app never listens and no chain is called: the signed requests are
+// signed by a random wallet (ECDSA). Registrations for the lookup are also written straight to the database.
+// test/verification-rules.test.ts covers the same rules without Docker; subscribing with a token needs a chain and is
+// in test/alerts.test.ts.
 
 jest.setTimeout(180000);
 
@@ -130,21 +131,37 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const REFUSED = "Invalid or expired verifiedTargetToken";
 const MALFORMED = `"verifiedTargetToken" must be a valid token`;
 
-// POST /v1/auth/register, signed by the account itself (a random wallet: ECDSA, no chain call).
-const registerBody = async (wallet: ethers.Wallet, chainId: number, target: string) => {
+// A request signed by the account itself (a random wallet: ECDSA, no chain call), with the statement of its endpoint.
+const signedBody = async (wallet: ethers.Wallet, chainId: number, statement: string) => {
     const message = new SiweMessage({
         domain: "example.com",
         address: wallet.address,
-        statement: `I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using ${target} (via email)`,
+        statement,
         uri: "https://example.com",
         chainId,
         version: "1",
         nonce: Math.random().toString(36).substring(2),
         issuedAt: new Date().toISOString(),
     }).prepareMessage();
-    return {account: wallet.address, chainId, channel: "email", target, message, signature: await wallet.signMessage(message)};
+    return {account: wallet.address, chainId, message, signature: await wallet.signMessage(message)};
+};
+// POST /v1/auth/register
+const registerBody = async (wallet: ethers.Wallet, chainId: number, target: string) => {
+    const statement = `I authorize Safe Recovery Service to sign a recovery request for my account after I authenticate using ${target} (via email)`;
+    const {account, message, signature} = await signedBody(wallet, chainId, statement);
+    return {account, chainId, channel: "email", target, message, signature};
 };
 const register = (body: object) => supertest(app).post("/v1/auth/register").send(body);
+const FETCH_STATEMENT = "I request to retrieve all authentication methods currently registered to my account with Safe Recovery Service";
+const DELETE_STATEMENT = "I request to remove the authentication method with registration ID {{id}} from my account on Safe Recovery Service";
+const fetchRegistrations = (query: object) => supertest(app).get("/v1/auth/registrations").query(query);
+const deleteBody = async (wallet: ethers.Wallet, chainId: number, registrationId: string) => {
+    const {message, signature} = await signedBody(wallet, chainId, DELETE_STATEMENT.replace("{{id}}", registrationId));
+    return {registrationId, message, signature};
+};
+const deleteRegistration = (body: object) => supertest(app).post("/v1/auth/delete").send(body);
+// An entry of the lookup.
+const entry = (account: string, chainId: number, metadata: Record<string, string> = {}) => ({account, chainId, registeredAt: expect.any(String), metadata});
 
 describe("verification", () => {
     it("should send a code to any target and return a short-lived token for it", async () => {
@@ -304,9 +321,9 @@ describe("account lookup with a verified-target token", () => {
         const token = await verify(target);
         const expected = {
             accounts: [
-                {account: first.toLowerCase(), chainId: CHAIN_A},
-                {account: first.toLowerCase(), chainId: CHAIN_B},
-                {account: second.toLowerCase(), chainId: CHAIN_A},
+                entry(first.toLowerCase(), CHAIN_A),
+                entry(first.toLowerCase(), CHAIN_B),
+                entry(second.toLowerCase(), CHAIN_A),
             ],
         };
         const response = await listAccounts(token).expect(200);
@@ -360,8 +377,8 @@ describe("register with a verified-target token", () => {
         await listAccounts(token).expect(200).then((response) => {
             expect(response.body).toEqual({
                 accounts: [
-                    {account: wallet.address.toLowerCase(), chainId: CHAIN_A},
-                    {account: wallet.address.toLowerCase(), chainId: CHAIN_B},
+                    entry(wallet.address.toLowerCase(), CHAIN_A),
+                    entry(wallet.address.toLowerCase(), CHAIN_B),
                 ],
             });
         });
@@ -397,5 +414,97 @@ describe("register with a verified-target token", () => {
         await register({...malformedBody, verifiedTargetToken: "not a token"}).expect(400).then((response) => {
             expect(response.body.message).toBe(MALFORMED);
         });
+    });
+});
+
+describe("account metadata", () => {
+    const metadataRow = (wallet: ethers.Wallet, chainId: number) =>
+        prisma.authAccountMetadata.findUnique({where: {account_chainId: {account: wallet.address.toLowerCase(), chainId}}});
+
+    it("should store the metadata sent with a token, per chain, and return it with an ISO registeredAt", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token, metadata: {label: "On A"}}).expect(200);
+        await register({...await registerBody(wallet, CHAIN_B, target), verifiedTargetToken: token, metadata: {label: "On B", "app:id": "42"}}).expect(200);
+
+        const response = await listAccounts(token).expect(200);
+        expect(response.body).toEqual({
+            accounts: [
+                entry(wallet.address.toLowerCase(), CHAIN_A, {label: "On A"}),
+                entry(wallet.address.toLowerCase(), CHAIN_B, {label: "On B", "app:id": "42"}),
+            ],
+        });
+        for (const {registeredAt} of response.body.accounts) {
+            expect(new Date(registeredAt).toISOString()).toBe(registeredAt);
+        }
+        expect((await metadataRow(wallet, CHAIN_A))?.metadata).toEqual({label: "On A"});
+    });
+
+    it("should keep the metadata sent with a code on the request until /submit, then store it", async () => {
+        const target = newTarget();
+        const wallet = ethers.Wallet.createRandom();
+        const response = await register({...await registerBody(wallet, CHAIN_A, target), metadata: {label: "Savings"}}).expect(200);
+        const {challengeId} = response.body;
+        expect((await prisma.authRegistrationRequest.findUniqueOrThrow({where: {id: challengeId}})).metadata).toEqual({label: "Savings"});
+        expect(await metadataRow(wallet, CHAIN_A)).toBeNull();
+
+        const code = await latestCode(target, 1, REGISTRATION_SUBJECT);
+        await supertest(app).post("/v1/auth/submit").send({challengeId, challenge: code}).expect(200);
+        expect((await prisma.authRegistrationRequest.findUniqueOrThrow({where: {id: challengeId}})).metadata).toBeNull();
+        await listAccounts(await verify(target, 2)).expect(200).then((lookup) => {
+            expect(lookup.body).toEqual({accounts: [entry(wallet.address.toLowerCase(), CHAIN_A, {label: "Savings"})]});
+        });
+    });
+
+    it("should return the metadata with the registrations", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+        const {body} = await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token, metadata: {label: "Savings"}}).expect(200);
+
+        await fetchRegistrations(await signedBody(wallet, CHAIN_A, FETCH_STATEMENT)).expect(200).then((response) => {
+            expect(response.body).toEqual({registrations: [{id: body.registrationId, channel: "email", target}], metadata: {label: "Savings"}});
+        });
+        await fetchRegistrations(await signedBody(wallet, CHAIN_B, FETCH_STATEMENT)).expect(200).then((response) => {
+            expect(response.body).toEqual({registrations: [], metadata: {}});
+        });
+    });
+
+    it("should delete the metadata with the last registration on the chain", async () => {
+        const [first, second] = [newTarget(), newTarget()];
+        const wallet = ethers.Wallet.createRandom();
+        const firstResponse = await register({...await registerBody(wallet, CHAIN_A, first), verifiedTargetToken: await verify(first), metadata: {label: "Savings"}}).expect(200);
+        const secondResponse = await register({...await registerBody(wallet, CHAIN_A, second), verifiedTargetToken: await verify(second)}).expect(200);
+
+        await deleteRegistration(await deleteBody(wallet, CHAIN_A, firstResponse.body.registrationId)).expect(200);
+        expect((await metadataRow(wallet, CHAIN_A))?.metadata).toEqual({label: "Savings"});
+        await deleteRegistration(await deleteBody(wallet, CHAIN_A, secondResponse.body.registrationId)).expect(200);
+        expect(await metadataRow(wallet, CHAIN_A)).toBeNull();
+    });
+
+    it("should return non-Latin text and emoji sequences unchanged", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+        // built from code points: CJK, Cyrillic, an emoji ZWJ sequence and a flag
+        const metadata = {
+            label: String.fromCodePoint(0x50a8, 0x84c4, 0x8d26, 0x6237),
+            other: String.fromCodePoint(0x0421, 0x0431, 0x0435, 0x0440),
+            emoji: String.fromCodePoint(0x1f469, 0x200d, 0x1f4bb, 0x20, 0x1f1ef, 0x1f1f5),
+        };
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token, metadata}).expect(200);
+        await listAccounts(token).expect(200).then((response) => {
+            expect(response.body.accounts).toEqual([entry(wallet.address.toLowerCase(), CHAIN_A, metadata)]);
+        });
+    });
+
+    it("should refuse invalid metadata on register with a message that quotes nothing", async () => {
+        const target = newTarget();
+        const wallet = ethers.Wallet.createRandom();
+        await register({...await registerBody(wallet, CHAIN_A, target), metadata: {"_Secret-Key": "Secret-Value"}}).expect(400).then((response) => {
+            expect(response.body.message).toBe(`"metadata" keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit`);
+        });
+        expect(await prisma.authRegistrationRequest.count({where: {target}})).toBe(0);
     });
 });

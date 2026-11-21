@@ -1,5 +1,5 @@
 import Joi from "joi";
-import {ethereumAddress, hexString, newOwners, siweMessage, verifiedTargetToken} from "./custom.validation";
+import {accountMetadata, ethereumAddress, hexString, newOwners, siweMessage, verifiedTargetToken} from "./custom.validation";
 import {Network} from "../models/network";
 
 const channels = ["email", "sms"];
@@ -14,6 +14,8 @@ export const register = {
     signature: Joi.custom(hexString).required(),
     // from POST /v1/auth/verification/submit: the registration is created at once, with no second code
     verifiedTargetToken: Joi.custom(verifiedTargetToken),
+    // the account's metadata on this chain, replaced whole ({} removes it); left out, the stored one is kept
+    metadata: Joi.custom(accountMetadata),
   }),
 };
 

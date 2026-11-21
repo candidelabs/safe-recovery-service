@@ -1,5 +1,6 @@
 import httpStatus from "http-status";
 import {BigNumber} from "ethers";
+import {Prisma} from "@prisma/client";
 import {ApiError, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
 import {ModuleSelection, Network} from "../models/network";
@@ -7,17 +8,62 @@ import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
 import {LookupAccount, lookupAccounts} from "../utils/account-lookup";
+import {AccountMetadata, storedAccountMetadata} from "../utils/account-metadata";
 import {checkRecoveryModule} from "./recovery-modules.service";
 import {requireVerifiedTarget} from "./verification.service";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "auth" });
 
-// The registration that /submit (after its code) and register (with a verifiedTargetToken) create.
-const storeRegistration = async (network: Network, account: string, chainId: number, channel: string, target: string) => {
+// The metadata of an account on a chain (src/utils/account-metadata.ts), one AuthAccountMetadata row shared by its
+// registrations there: replaced whole, and removed when empty. The object, its keys and its values are never logged:
+// log lines carry metadataEntries, the number of entries.
+const writeAccountMetadata = async (account: string, chainId: number, metadata: AccountMetadata) => {
+  account = account.toLowerCase();
+  if (Object.keys(metadata).length === 0) {
+    await prisma.authAccountMetadata.deleteMany({where: {account, chainId}});
+    return;
+  }
+  const upsert = () => prisma.authAccountMetadata.upsert({
+    where: {account_chainId: {account, chainId}},
+    create: {account, chainId, metadata},
+    update: {metadata},
+  });
+  try {
+    await upsert();
+  } catch (e) {
+    // Two first writes at once (email and phone registered in parallel): the other one created the row, so this one
+    // becomes an update. Anything else, or a second conflict, propagates.
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002")) throw e;
+    await upsert();
+  }
+};
+
+const readAccountMetadata = async (account: string, chainId: number): Promise<AccountMetadata> => {
+  const row = await prisma.authAccountMetadata.findFirst({
+    where: {account: account.toLowerCase(), chainId},
+    select: {metadata: true},
+  });
+  return storedAccountMetadata(row?.metadata);
+};
+
+// The log field for metadata that was sent or written: its number of entries, never the object.
+const metadataLogFields = (metadata?: AccountMetadata) => metadata === undefined ? {} : {metadataEntries: Object.keys(metadata).length};
+
+// The registration that /submit (after its code) and register (with a verifiedTargetToken) create, then the account's
+// metadata when some was sent (left out, the stored one is kept). The registration comes first: a request that stops in
+// between leaves a registration with its previous metadata, never metadata without a registration.
+const storeRegistration = async (
+  network: Network,
+  account: string,
+  chainId: number,
+  channel: string,
+  target: string,
+  metadata?: AccountMetadata,
+) => {
   const signer = Signers.instance().getSigner(network.guardian!)!;
   const guardian = await signer.signer();
-  return prisma.authRegistration.create(
+  const registration = await prisma.authRegistration.create(
     {
       data: {
         account: account.toLowerCase(),
@@ -28,6 +74,10 @@ const storeRegistration = async (network: Network, account: string, chainId: num
       }
     }
   );
+  if (metadata !== undefined) {
+    await writeAccountMetadata(account, chainId, metadata);
+  }
+  return registration;
 };
 
 export const createRegistration = async (
@@ -38,6 +88,7 @@ export const createRegistration = async (
   message: string,
   signature: string,
   verifiedTargetToken?: string,
+  metadata?: AccountMetadata,
 ): Promise<{challengeId: string} | {registrationId: string, guardianAddress: string}> => {
   const network = Network.instances.get(chainId.toString())!;
   if (!network.guardian){
@@ -79,11 +130,11 @@ export const createRegistration = async (
   //
   if (verification) {
     // the target was verified: no second code
-    const registration = await storeRegistration(network, account, chainId, channel, target);
+    const registration = await storeRegistration(network, account, chainId, channel, target, metadata);
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId, channel, verification: "token",
-        verificationId: verification.verificationId, accountDeployed: !counterfactual,
+        verificationId: verification.verificationId, accountDeployed: !counterfactual, ...metadataLogFields(metadata),
       },
       "auth registration created"
     );
@@ -103,6 +154,8 @@ export const createRegistration = async (
         chainId,
         channel,
         target,
+        // kept until /submit creates the registration (null when none was sent)
+        metadata,
         challengeHash,
         verified: false,
         tries: 0,
@@ -112,7 +165,10 @@ export const createRegistration = async (
   );
   // the target (email / phone number) and the OTP are never logged
   log.info(
-    { challengeId: authRegistrationRequest.id, account: account.toLowerCase(), chainId, channel, accountDeployed: !counterfactual },
+    {
+      challengeId: authRegistrationRequest.id, account: account.toLowerCase(), chainId, channel, accountDeployed: !counterfactual,
+      ...metadataLogFields(metadata),
+    },
     "auth registration requested"
   );
   return {challengeId: authRegistrationRequest.id};
@@ -123,6 +179,9 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   if (!registrationRequest){
     throw new ApiError(httpStatus.NOT_FOUND, `challengeId not found`);
   }
+  // the metadata sent with register, if any (== null: a column that was never written reads as null, or undefined in
+  // the tests' in-memory tables)
+  const pendingMetadata = registrationRequest.metadata == null ? undefined : storedAccountMetadata(registrationRequest.metadata);
   //
   const network = Network.instances.get(registrationRequest.chainId.toString())!;
   if (!network.guardian){
@@ -162,11 +221,26 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     registrationRequest.chainId,
     registrationRequest.channel,
     registrationRequest.target,
+    pendingMetadata,
   );
   log.info(
-    { registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp" },
+    {
+      registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
+      ...metadataLogFields(pendingMetadata),
+    },
     "auth registration created"
   );
+  // Cleared once applied, not before: a failed store keeps it for a retry. The registration exists either way.
+  if (pendingMetadata !== undefined) {
+    try {
+      await prisma.authRegistrationRequest.update({
+        data: {metadata: Prisma.DbNull},
+        where: {id: registrationRequest.id}
+      });
+    } catch (err) {
+      log.warn({ challengeId: registrationRequest.id, err }, "pending registration metadata not cleared");
+    }
+  }
   //
   return [registration.id, registration.guardian];
 };
@@ -187,7 +261,9 @@ export const fetchRegistrations = async (account: string, chainId: number, messa
       target: true
     }
   });
-  return registrations;
+  // read from a registration only: a metadata row left without one is never returned
+  const metadata = registrations.length > 0 ? await readAccountMetadata(account, chainId) : {};
+  return {registrations, metadata};
 };
 
 export const deleteRegistration = async (registrationId: string, message: string, signature: string) => {
@@ -199,6 +275,13 @@ export const deleteRegistration = async (registrationId: string, message: string
   let statement = MessageStatements["auth-delete"];
   statement = statement.replace("{{id}}", authRegistration.id);
   await validateSIWEMessage(message, authRegistration.account, authRegistration.chainId, statement, signature);
+  // The account's metadata on this chain goes with its last registration there, and first: a request that stops in
+  // between leaves a registration without metadata, never metadata without a registration.
+  const account = authRegistration.account.toLowerCase();
+  const registrationCount = await prisma.authRegistration.count({where: {account, chainId: authRegistration.chainId}});
+  if (registrationCount <= 1) {
+    await prisma.authAccountMetadata.deleteMany({where: {account, chainId: authRegistration.chainId}});
+  }
   //
   await prisma.authRegistration.delete({
     where: {id: registrationId}
@@ -206,17 +289,25 @@ export const deleteRegistration = async (registrationId: string, message: string
   return true;
 };
 
-// The accounts registered with the target a verifiedTargetToken proves (POST /v1/auth/accounts); the rule is in
-// src/utils/account-lookup.ts. It can be called again while the token lives. Neither the target nor the accounts found
-// are logged.
+// The accounts registered with the target a verifiedTargetToken proves (POST /v1/auth/accounts), with when each was
+// first registered and its metadata; the rule is in src/utils/account-lookup.ts. It can be called again while the token
+// lives. Neither the target, the accounts found nor their metadata are logged.
 export const listAccounts = async (verifiedTargetToken: string): Promise<LookupAccount[]> => {
   const {verificationId, channel, target} = await requireVerifiedTarget(verifiedTargetToken, "lookup");
   // Registrations as stored: no on-chain check (the guardian may have been removed since).
   const registrations = await prisma.authRegistration.findMany({
     where: {channel, target, chainId: {in: Network.supportedChainIds}},
-    select: {account: true, chainId: true},
+    select: {account: true, chainId: true, createdAt: true},
   });
-  const accounts = lookupAccounts(registrations, Network.supportedChainIds);
+  // the metadata of the accounts found, in one query
+  const metadataRows = registrations.length === 0 ? [] : await prisma.authAccountMetadata.findMany({
+    where: {
+      account: {in: [...new Set(registrations.map(({account}) => account.toLowerCase()))]},
+      chainId: {in: Network.supportedChainIds},
+    },
+    select: {account: true, chainId: true, metadata: true},
+  });
+  const accounts = lookupAccounts(registrations, Network.supportedChainIds, metadataRows);
   log.info({ verificationId, channel, accountCount: accounts.length }, "account lookup completed");
   return accounts;
 };

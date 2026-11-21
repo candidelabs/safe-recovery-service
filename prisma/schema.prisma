@@ -59,10 +59,28 @@ model AuthRegistrationRequest {
   verifiedAt    DateTime?
   tries         Int
   expiresAt     DateTime
+  // The metadata sent with register, applied when /submit creates the registration, then cleared. Null when none
+  // was sent.
+  metadata      Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
   @@index([account])
+}
+
+// The metadata of an account on a chain (POST /v1/auth/register, POST /v1/auth/metadata): a flat object of string
+// values chosen by the account's app, returned by the account lookup and with the registrations. One row per account
+// (lower case) and chain, shared by all its registrations there, deleted with the last of them. Opaque: no query
+// filters on it and nothing reads it to decide anything. Never logged.
+model AuthAccountMetadata {
+  id        String   @id @default(uuid())
+  account   String
+  chainId   Int
+  metadata  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([account, chainId])
 }
 
 // The verification of an email address or phone number (POST /v1/auth/verification/request): the code sent to the

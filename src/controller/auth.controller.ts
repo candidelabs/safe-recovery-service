@@ -2,6 +2,7 @@ import * as authService from "../services/auth.service";
 import * as verificationService from "../services/verification.service";
 import {catchAsync} from "../utils";
 import {selectRecoveryModule} from "../utils/module-fallback";
+import {AccountMetadata} from "../utils/account-metadata";
 
 interface CreateRegistrationBody {
   account: string;
@@ -11,6 +12,7 @@ interface CreateRegistrationBody {
   message: string;
   signature: string;
   verifiedTargetToken?: string;
+  metadata?: AccountMetadata;
 }
 
 interface SubmitChallengeBody {
@@ -70,6 +72,7 @@ export const createRegistration = catchAsync(async (req, res) => {
     params.message,
     params.signature,
     params.verifiedTargetToken,
+    params.metadata,
   );
   res.send(response);
 });
@@ -88,13 +91,13 @@ export const submitRegistrationChallenge = catchAsync(async (req, res) => {
 
 export const fetchRegistrations = catchAsync(async (req, res) => {
   const params = req.query as unknown as FetchRegistrationsBody;
-  const registrations = await authService.fetchRegistrations(
+  const {registrations, metadata} = await authService.fetchRegistrations(
     params.account,
     params.chainId,
     params.message,
     params.signature
   );
-  res.send({registrations});
+  res.send({registrations, metadata});
 });
 
 export const deleteRegistration = catchAsync(async (req, res) => {

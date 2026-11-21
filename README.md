@@ -292,17 +292,19 @@ Wherever it is accepted, a token that is unknown, expired or (for `register` and
 The response, sent with `Cache-Control: no-store`, lists the accounts registered with the token's target on its channel (the registrations made with `POST /v1/auth/register`), for a user who lost the owner key or forgot the Safe address:
 
 ```json
-{"accounts": [{"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111}]}
+{"accounts": [{"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111, "registeredAt": "2026-11-20T10:00:00.000Z", "metadata": {"label": "Savings"}}]}
 ```
 
 * One entry per account and chain, addresses lower-cased, sorted by account then `chainId`. The list can be empty. Alert subscriptions are not included.
+* `registeredAt`: when the token's target was registered for the account on that chain (the earliest, if it was registered twice), in ISO 8601. It is the only hint for accounts registered without metadata.
+* `metadata`: the account's [metadata](#account-metadata) on that chain, `{}` when there is none. It is the same whichever of the account's targets the lookup is made with.
 * Only the networks the service has enabled: registrations on a network that was removed or disabled are left out.
 * The registrations are read as stored, with no on-chain check. A Safe whose owner has since removed the guardian or the module is still listed until its registration is deleted (`POST /v1/auth/delete`), so a client should check the guardian on chain before starting a recovery.
 * It can be called again while the token is valid, e.g. to refresh the list after a registration.
 
 #### Registering: `POST /v1/auth/register`
 
-The usual body plus `"verifiedTargetToken": "<token>"`. The registration is created at once, with no code sent, and the response is the one `POST /v1/auth/submit` gives: `{"registrationId": "<id>", "guardianAddress": "0x..."}`. The account's SIWE signature is still required, with the same statement. One token can register the target for several accounts and chains while it is valid. The checks run in this order: guardian enabled on the network (400), channel offered by the network's alert (400), target (403), token (403), SIWE message (400 / 403), an existing registration (409). Without `verifiedTargetToken` nothing changes: a code is sent and the response is `{"challengeId": "<id>"}`.
+The usual body plus `"verifiedTargetToken": "<token>"`. The registration is created at once, with no code sent, and the response is the one `POST /v1/auth/submit` gives: `{"registrationId": "<id>", "guardianAddress": "0x..."}`. The account's SIWE signature is still required, with the same statement. One token can register the target for several accounts and chains while it is valid. The checks run in this order: guardian enabled on the network (400), channel offered by the network's alert (400), target (403), token (403), SIWE message (400 / 403), an existing registration (409). Without `verifiedTargetToken` nothing changes: a code is sent and the response is `{"challengeId": "<id>"}`. Both paths take the optional `metadata` of [Account metadata](#account-metadata).
 
 #### Subscribing to alerts: `POST /v1/alerts/subscribe`
 
@@ -315,6 +317,57 @@ The log lines are `target verification requested` (`challengeId`, `channel`, `re
 **Operators: sending a code to any target costs money.** `POST /v1/auth/verification/request` needs no signature, so one request makes the service send a message. Each target gets at most 10 codes a day, but rotating targets is only bounded by `options.rateLimit` (per IP, over all routes), as it already is for `register` and `subscribe`. For SMS this is the pattern of SMS pumping. Restrict the destination countries at the SMS provider (Twilio's geo permissions), turn on its fraud protection and usage alerts, set `options.rateLimit` with this endpoint in mind, limit requests per client at whatever fronts the service, and set `options.authentication` when only a backend should call the service. Behind a backend every request comes from the same IP, so the per-IP limit does not limit an end user there. For email, use a provider that handles bounces: codes sent to addresses that never asked for one hurt the sender's reputation.
 
 **Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `TargetVerification` table and an index on `AuthRegistration (channel, target)`.
+
+## Account metadata
+
+An app can store a small object with an account when it registers it with the guardian: the name the user gave the account, a hint, an id of its own. The account lookup (`POST /v1/auth/accounts`) returns it, so that a user who lost the owner key can tell their accounts apart. The service validates it, stores it and returns it, and does nothing else with it.
+
+`metadata` is a JSON object of string keys to string values. It belongs to the account on a chain: one object shared by all the account's registrations there (email address and phone number), whichever registration it was written with.
+
+| Rule | Limit | Message when broken (400) |
+| --- | --- | --- |
+| Type | a JSON object (not `null`, not an array) whose values are all strings; `{}` means none | `"metadata" must be an object of string values` |
+| Entries | at most 10 | `"metadata" must have at most 10 entries` |
+| Key | 1 to 32 ASCII characters (letters, digits, `_`, `.`, `:`, `-`), starting with a letter or a digit | `"metadata" keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit` |
+| Value | a non-empty string | `"metadata" values must be non-empty strings` |
+| Value length | at most 256 UTF-16 code units (JavaScript's `String.length`) | `"metadata" values must be at most 256 characters long` |
+| Value characters | no control characters (tab, CR and LF included), unpaired surrogates, U+2028, U+2029, or bidi embedding, override and isolate controls (U+202A to U+202E, U+2066 to U+2069) | `"metadata" values must not contain control characters` |
+| Whole object | at most 2048 bytes as compact JSON in UTF-8 | `"metadata" must be at most 2048 bytes as JSON` |
+
+The rules are checked in this order and the first one broken is answered. No message quotes a key or a value. Nothing is trimmed, normalized or case-folded, and key order is not kept. A deployment without this feature answers a request with `metadata` with 400 `"metadata" is not allowed`, which is how a client tells.
+
+One key has a documented meaning: `label`, the name the user gave the account. The service never looks at it. Prefix your app's own keys (`myapp.profileId`).
+
+**Writing it.** `POST /v1/auth/register` takes an optional `metadata`:
+
+* With a `verifiedTargetToken`, it is stored with the registration. Without, it is kept with the pending request and stored when `POST /v1/auth/submit` creates the registration. A request that fails (an existing registration, a refused token, a SIWE error) stores nothing.
+* Present, it replaces the account's object on that chain whole (no merge), and `{}` removes it. Left out, the stored object is kept, so adding a phone number to an account keeps its label.
+* The account's SIWE signature authorizes the request, with the `register` statement as before. A `verifiedTargetToken` alone never writes metadata.
+
+**Reading it.** `POST /v1/auth/accounts` returns it in each entry, and `GET /v1/auth/registrations` (signed by the account) next to the registrations: `{"registrations": [...], "metadata": {"label": "Savings"}}`, `{}` when there is none. Nothing else returns it: not `/v1/auth/signature/*`, not a log line.
+
+**Deleting it.** It is deleted with the account's last registration on that chain (`POST /v1/auth/delete`).
+
+Registrations made before this version have `metadata: {}` until their app sets it; there is no backfill.
+
+Guidance for apps and interfaces:
+
+* **Untrusted text.** Whoever can sign for an account and verify an email address or phone number chooses what its metadata says, and whoever proves that target later sees it. Someone talked out of a verification code can therefore find a stranger's account, with a label of the stranger's choosing, in their own lookup. Render values as plain text, never as HTML or a link, truncate them, and present them as a name the app stored, not as a statement by the service.
+* **Not a secret.** Everyone who controls a target registered for the account can read it, and the operator stores it in plaintext. Never put a password, a recovery phrase or anything that grants access in it; a hint is a reminder, not a second factor. An opaque id that only your app can resolve is the safest content.
+* **Not signed.** The SIWE message authorizes the request, not the object. A party holding a signed message can pair it with other metadata while the message is still accepted (5 minutes, up to 24 hours with `expirationTime`) and its nonce is free (the nonce store is per process: on another replica, or after a restart). The worst outcome is a wrong label.
+* **Advisory only.** Metadata never authorizes, selects or filters anything: a recovery is decided by the registrations' codes and the guardian's signature, as before.
+
+Best effort (there is no transaction):
+
+* Two first writes for one account and chain at once (email and phone registered in parallel, both with `metadata`): the second one meets the unique constraint and is retried once as an update.
+* A `register` or `/submit` that fails between creating the registration and writing the metadata answers 500 and leaves the registration with the stored metadata unchanged; sent again, it gets 409.
+* When the account's last registration on the chain is deleted while a `register` of the same account and chain is in flight, the new registration can end up without the metadata it sent.
+* `/submit` called twice with the right code makes two registrations, as before; the second writes no metadata.
+* The copy kept with a pending request whose code is never submitted stays in the database, with the request.
+
+The log lines `auth registration requested` and `auth registration created` carry `metadataEntries` (the number of entries) when metadata was sent, and `pending registration metadata not cleared` (warn, `challengeId`) says that a registration was created but the copy kept with its request could not be cleared. The object, its keys and its values are never logged.
+
+**Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `AuthAccountMetadata` table and a nullable `metadata` column on `AuthRegistrationRequest`. Both are additive, so the migration can be applied while an older version runs.
 
 ## Running
 
