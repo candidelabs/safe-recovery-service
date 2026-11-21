@@ -289,6 +289,33 @@ export const deleteRegistration = async (registrationId: string, message: string
   return true;
 };
 
+// POST /v1/auth/metadata: replaces the metadata of an account on a chain ({} removes it), signed by the account. The
+// SIWE check comes before the registration check, so the endpoint does not tell an unsigned caller whether an account
+// is registered. No guardian check: the metadata stays editable if the network's guardian is removed from the config.
+export const setAccountMetadata = async (
+  account: string,
+  chainId: number,
+  metadata: AccountMetadata,
+  message: string,
+  signature: string,
+): Promise<AccountMetadata> => {
+  const statement = MessageStatements["auth-metadata"];
+  // the account signs; an ERC-6492-wrapped signature of an account that is not deployed yet is verified in simulation
+  const {counterfactual} = await validateSIWEMessage(message, account, chainId, statement, signature);
+  //
+  account = account.toLowerCase();
+  const registrationCount = await prisma.authRegistration.count({where: {account, chainId}});
+  if (registrationCount === 0) {
+    throw new ApiError(httpStatus.NOT_FOUND, `No registrations found for this account on this chainId`);
+  }
+  await writeAccountMetadata(account, chainId, metadata);
+  log.info(
+    { account, chainId, metadataEntries: Object.keys(metadata).length, accountDeployed: !counterfactual },
+    "auth account metadata updated"
+  );
+  return metadata;
+};
+
 // The accounts registered with the target a verifiedTargetToken proves (POST /v1/auth/accounts), with when each was
 // first registered and its metadata; the rule is in src/utils/account-lookup.ts. It can be called again while the token
 // lives. Neither the target, the accounts found nor their metadata are logged.

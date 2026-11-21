@@ -22,6 +22,10 @@ router
   .post(validate(authValidation.deleteRegistration), authController.deleteRegistration);
 
 router
+  .route("/metadata")
+  .post(validate(authValidation.setAccountMetadata), authController.setAccountMetadata);
+
+router
   .route("/verification/request")
   .post(validate(authValidation.requestVerification), authController.requestVerification);
 

@@ -15,6 +15,7 @@ import {isSensitiveKey} from "../src/logging";
 import {ApiError} from "../src/utils/error";
 import {validate} from "../src/middlewares/validate";
 import {AccountMetadata} from "../src/utils/account-metadata";
+import {MessageStatements} from "../src/utils/constants";
 import {
     ALREADY_VERIFIED,
     EXPIRED,
@@ -40,6 +41,7 @@ import {
     deleteRegistration,
     fetchRegistrations,
     listAccounts,
+    setAccountMetadata,
     submitRegistrationChallenge,
 } from "../src/services/auth.service";
 import {createSubscription} from "../src/services/alerts.service";
@@ -47,8 +49,8 @@ import {createSubscription} from "../src/services/alerts.service";
 // Verifying an email address or phone number (POST /v1/auth/verification/request and /submit) and using the token
 // (POST /v1/auth/accounts, /v1/auth/register, /v1/alerts/subscribe) without a database: the rules in
 // src/utils/target-verification.ts, the Joi rule, the message templates, and the services against in-memory tables.
-// Also the account metadata stored with a registration and returned by the lookup and GET /v1/auth/registrations
-// (test/account-metadata.test.ts has its rules). The SIWE checks and the owner check are mocked
+// Also the account metadata stored with a registration or by POST /v1/auth/metadata and returned by the lookup and
+// GET /v1/auth/registrations (test/account-metadata.test.ts has its rules). The SIWE checks and the owner check are mocked
 // (test/verification.test.ts signs for real on Postgres and Mailpit, test/alerts.test.ts subscribes on a chain).
 
 // In-memory tables for the queries the services make (plain values, equals, in, gt/gte/lt; increment and
@@ -906,7 +908,7 @@ describe("subscribe with a token (in-memory tables)", () => {
     });
 });
 
-describe("account metadata with registrations (in-memory tables)", () => {
+describe("account metadata (in-memory tables)", () => {
     const metadataRowsOf = (account: string) => (mockTables.authAccountMetadata ?? []).filter((row) => row.account === account.toLowerCase());
     const metadataOf = (account: string, chainId: number) => metadataRowsOf(account).find((row) => row.chainId === chainId)?.metadata;
     const requestRow = (challengeId: string) => (mockTables.authRegistrationRequest ?? []).find((row) => row.id === challengeId);
@@ -915,6 +917,8 @@ describe("account metadata with registrations (in-memory tables)", () => {
         code: "P2002",
         clientVersion: Prisma.prismaVersion.client,
     });
+    const setMetadata = (account: string, chainId: number, metadata: AccountMetadata) =>
+        setAccountMetadata(account, chainId, metadata, "siwe message", "0x1234");
     afterEach(() => {
         mockFailures.length = 0;
     });
@@ -1147,9 +1151,84 @@ describe("account metadata with registrations (in-memory tables)", () => {
         expect(linesOf("pending registration metadata not cleared")).toEqual([{component: "auth", challengeId, err: error}]);
     });
 
+    test("POST /v1/auth/metadata replaces it whole, signed by the account, and {} removes it", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const token = await verify(target);
+        await registerWith(account, CHAIN_A, target, token, "email", {label: "Savings", "app:id": "1"});
+        mockLogLines.length = 0;
+
+        expect(await setMetadata(account, CHAIN_A, {label: "Spending"})).toEqual({label: "Spending"});
+        expect(mockSiwe.validateSIWEMessage).toHaveBeenLastCalledWith("siwe message", account, CHAIN_A, MessageStatements["auth-metadata"], "0x1234");
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Spending"});
+        expect(await listAccounts(token)).toEqual([entry(account.toLowerCase(), CHAIN_A, {label: "Spending"})]);
+
+        expect(await setMetadata(account, CHAIN_A, {})).toEqual({});
+        expect(metadataRowsOf(account)).toEqual([]);
+        expect(await listAccounts(token)).toEqual([entry(account.toLowerCase(), CHAIN_A)]);
+
+        // and from nothing
+        await setMetadata(account, CHAIN_A, {label: "Again"});
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Again"});
+
+        const line = (metadataEntries: number) => ({component: "auth", account: account.toLowerCase(), chainId: CHAIN_A, metadataEntries, accountDeployed: true});
+        expect(linesOf("auth account metadata updated")).toEqual([line(1), line(0), line(1)]);
+    });
+
+    test("POST /v1/auth/metadata updates the lower-case row for an account sent in another case", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account.toLowerCase(), CHAIN_A, target, await verify(target), "email", {label: "Savings"});
+        mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: true});
+        mockLogLines.length = 0;
+
+        await setMetadata("0x" + account.slice(2).toUpperCase(), CHAIN_A, {label: "Spending"});
+        expect(metadataRowsOf(account)).toEqual([expect.objectContaining({account: account.toLowerCase(), chainId: CHAIN_A, metadata: {label: "Spending"}})]);
+        expect(linesOf("auth account metadata updated")).toEqual([expect.objectContaining({account: account.toLowerCase(), accountDeployed: false})]);
+    });
+
+    test("POST /v1/auth/metadata answers 404 for an account with no registration on the chain, after the SIWE check", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target));
+        const NOT_FOUND = [404, "No registrations found for this account on this chainId"];
+
+        expect(await statusOf(setMetadata(account, CHAIN_B, {label: "x"}))).toEqual(NOT_FOUND);
+        expect(mockSiwe.validateSIWEMessage).toHaveBeenLastCalledWith("siwe message", account, CHAIN_B, MessageStatements["auth-metadata"], "0x1234");
+        const stranger = newAccount();
+        expect(await statusOf(setMetadata(stranger, CHAIN_A, {label: "x"}))).toEqual(NOT_FOUND);
+        expect(mockSiwe.validateSIWEMessage).toHaveBeenCalledTimes(3);
+        expect(metadataRowsOf(account)).toEqual([]);
+        expect(metadataRowsOf(stranger)).toEqual([]);
+    });
+
+    test("POST /v1/auth/metadata stores nothing when the SIWE check fails, registered or not", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target), "email", {label: "Savings"});
+        mockSiwe.validateSIWEMessage.mockRejectedValue(new ApiError(403, "SIWE Message: invalid signature"));
+
+        expect(await statusOf(setMetadata(account, CHAIN_A, {label: "x"}))).toEqual([403, "SIWE Message: invalid signature"]);
+        expect(await statusOf(setMetadata(account, CHAIN_A, {}))).toEqual([403, "SIWE Message: invalid signature"]);
+        // the signature is checked first: no answer tells whether an account is registered
+        expect(await statusOf(setMetadata(newAccount(), CHAIN_A, {label: "x"}))).toEqual([403, "SIWE Message: invalid signature"]);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+    });
+
+    test("POST /v1/auth/metadata retries a unique-constraint conflict once", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target));
+        mockFailures.push({table: "authAccountMetadata", method: "upsert", error: conflict()});
+        expect(await setMetadata(account, CHAIN_A, {label: "Savings"})).toEqual({label: "Savings"});
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(mockFailures).toEqual([]);
+    });
+
     test("log lines carry the number of entries, never the object, a key or a value", async () => {
         // distinctive, so that no id or address in the lines can contain them
         const metadata = {"zq.logTestKey": "Value-Of-The-Log-Test", "zq:otherKey": "Second-Value-Logged-Nowhere"};
+        const third = {...metadata, "zq.third": "Third-Value-Logged-Nowhere"};
         const account = newAccount();
         const target = newTarget();
         const token = await verify(target);
@@ -1160,14 +1239,20 @@ describe("account metadata with registrations (in-memory tables)", () => {
         const {challengeId} = await registerWith(account, CHAIN_B, codeTarget, undefined, "email", metadata) as {challengeId: string};
         await submitRegistrationChallenge(challengeId, codeFor(codeTarget));
         await fetchRegistrations(account, CHAIN_A, "siwe message", "0x1234");
+        await setMetadata(account, CHAIN_B, third);
+        await setMetadata(account, CHAIN_B, {});
 
         expect(linesOf("auth registration created")).toEqual([
             expect.objectContaining({verification: "token", metadataEntries: 2}),
             expect.objectContaining({verification: "otp", metadataEntries: 2}),
         ]);
         expect(linesOf("auth registration requested")).toEqual([expect.objectContaining({challengeId, metadataEntries: 2})]);
+        expect(linesOf("auth account metadata updated")).toEqual([
+            {component: "auth", account: account.toLowerCase(), chainId: CHAIN_B, metadataEntries: 3, accountDeployed: true},
+            {component: "auth", account: account.toLowerCase(), chainId: CHAIN_B, metadataEntries: 0, accountDeployed: true},
+        ]);
         const text = JSON.stringify(mockLogLines);
-        for (const [key, value] of Object.entries(metadata)) {
+        for (const [key, value] of Object.entries(third)) {
             expect(text).not.toContain(key);
             expect(text).not.toContain(value);
         }

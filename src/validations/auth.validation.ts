@@ -63,6 +63,17 @@ export const deleteRegistration = {
   }),
 };
 
+export const setAccountMetadata = {
+  body: Joi.object().keys({
+    account: Joi.custom(ethereumAddress).required(),
+    chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    // replaces the stored metadata whole; {} removes it
+    metadata: Joi.custom(accountMetadata).required(),
+    message: Joi.custom(siweMessage).required(),
+    signature: Joi.custom(hexString).required(),
+  }),
+};
+
 // moduleAddress: see recoveries.validation.ts; signature/submit signs for the module saved on the request.
 export const requestSignature = {
   body: Joi.object().keys({

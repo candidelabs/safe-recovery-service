@@ -172,7 +172,7 @@ An empty signature (`0x`) is accepted on v0.2.0 modules only, where it is checke
 
 A Safe can register auth methods and subscribe to alerts before it is deployed. The client wraps the request's `signature` with [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492): `abi.encode(address factory, bytes factoryCalldata, bytes signature)` followed by the 32-byte magic suffix `0x6492649264926492649264926492649264926492649264926492649264926492`, where `factory` and `factoryCalldata` are the call that deploys the Safe (for a Safe, its `SafeProxyFactory.createProxyWithNonce` call). No other request field changes.
 
-* **Auth** (`POST /v1/auth/register`, `GET /v1/auth/registrations`, `POST /v1/auth/delete`): standard ERC-6492. The SIWE `address` is the Safe, and the inner signature is the Safe signature a deployed Safe would give (the owners' signatures of the SafeMessage, up to the threshold). The service deploys the Safe in simulation and calls its `isValidSignature`, so the Safe's threshold applies.
+* **Auth** (`POST /v1/auth/register`, `GET /v1/auth/registrations`, `POST /v1/auth/delete`, `POST /v1/auth/metadata`): standard ERC-6492. The SIWE `address` is the Safe, and the inner signature is the Safe signature a deployed Safe would give (the owners' signatures of the SafeMessage, up to the threshold). The service deploys the Safe in simulation and calls its `isValidSignature`, so the Safe's threshold applies.
 * **Alerts** (`POST /v1/alerts/subscribe`, `GET /v1/alerts/subscriptions`, `POST /v1/alerts/unsubscribe`): the SIWE `address` is an owner and the inner signature is that owner's SIWE signature, as for a deployed Safe, but the wrapper's deployment data describes the **account** (the request's `account`, or the subscription's for `unsubscribe`), not the signer. The service reads the owners of the simulated deployment and requires the signer to be one of them.
 
 The recovery endpoints (`/v1/recoveries/*`) do not accept wrapped signatures: the module checks guardian signatures on chain with EIP-1271, which needs a deployed contract. `POST /v1/auth/signature/request` and `/submit` carry no signature and need the Safe deployed with the module enabled and the service's guardian added, so a registration made before deployment can be used once that is done.
@@ -219,7 +219,7 @@ const wrapped = ethers.utils.hexConcat([
 
 `GET /v1/auth/registrations` and `GET /v1/alerts/subscriptions` take `signature` in the query string. A wrapped signature for a two-owner Safe with abstractionkit's default setup is about 2 KB of hex, well under the usual header limits (Node's default is 16 KB), but a Safe with a very large initializer may not fit. Accepting `POST` for these two reads is a possible follow-up.
 
-Nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `auth registration created` (with a verified-target token), `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
+Nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `auth registration created` (with a verified-target token), `auth account metadata updated`, `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
 
 ## Verifying an email address or phone number
 
@@ -344,11 +344,32 @@ One key has a documented meaning: `label`, the name the user gave the account. T
 * Present, it replaces the account's object on that chain whole (no merge), and `{}` removes it. Left out, the stored object is kept, so adding a phone number to an account keeps its label.
 * The account's SIWE signature authorizes the request, with the `register` statement as before. A `verifiedTargetToken` alone never writes metadata.
 
+`POST /v1/auth/metadata` changes it later (see below).
+
 **Reading it.** `POST /v1/auth/accounts` returns it in each entry, and `GET /v1/auth/registrations` (signed by the account) next to the registrations: `{"registrations": [...], "metadata": {"label": "Savings"}}`, `{}` when there is none. Nothing else returns it: not `/v1/auth/signature/*`, not a log line.
 
 **Deleting it.** It is deleted with the account's last registration on that chain (`POST /v1/auth/delete`).
 
 Registrations made before this version have `metadata: {}` until their app sets it; there is no backfill.
+
+### `POST /v1/auth/metadata`
+
+```json
+{"account": "0x...", "chainId": 11155111, "metadata": {"label": "Savings"}, "message": "<SIWE message>", "signature": "0x..."}
+```
+
+Replaces the account's metadata on the chain, whole; `{}` removes it. The response is `{"metadata": {"label": "Savings"}}`, the object as stored. The account signs the SIWE message (ERC-6492 accepted, as for the other auth endpoints) with this statement:
+
+`I request to update the metadata stored for my account with Safe Recovery Service`
+
+The checks run in this order: the body (400), the SIWE message (400 / 403), a registration of the account on the chain (404). The signature comes first, so the endpoint does not tell an unsigned caller whether an account is registered. There is no guardian check: the metadata stays editable if the network's guardian is later removed from the config.
+
+| Status | Message | When |
+| --- | --- | --- |
+| 400 | `"metadata" is required` | `metadata` is left out |
+| 400 | `"metadata" <rule>` | see the rules above |
+| 400 / 403 | `SIWE Message: ...` | as for the other signed endpoints |
+| 404 | `No registrations found for this account on this chainId` | the account has no registration on the chain |
 
 Guidance for apps and interfaces:
 
@@ -360,12 +381,13 @@ Guidance for apps and interfaces:
 Best effort (there is no transaction):
 
 * Two first writes for one account and chain at once (email and phone registered in parallel, both with `metadata`): the second one meets the unique constraint and is retried once as an update.
-* A `register` or `/submit` that fails between creating the registration and writing the metadata answers 500 and leaves the registration with the stored metadata unchanged; sent again, it gets 409.
+* A `register` or `/submit` that fails between creating the registration and writing the metadata answers 500 and leaves the registration with the stored metadata unchanged; sent again, it gets 409, and the app sets the metadata with `POST /v1/auth/metadata`.
 * When the account's last registration on the chain is deleted while a `register` of the same account and chain is in flight, the new registration can end up without the metadata it sent.
+* When it is deleted after a `POST /v1/auth/metadata` passed its registration check and before it writes, the metadata is left without a registration. It is never returned (both reads start from a registration), but it reappears if the account registers again on that chain without `metadata`.
 * `/submit` called twice with the right code makes two registrations, as before; the second writes no metadata.
 * The copy kept with a pending request whose code is never submitted stays in the database, with the request.
 
-The log lines `auth registration requested` and `auth registration created` carry `metadataEntries` (the number of entries) when metadata was sent, and `pending registration metadata not cleared` (warn, `challengeId`) says that a registration was created but the copy kept with its request could not be cleared. The object, its keys and its values are never logged.
+The log lines `auth registration requested` and `auth registration created` carry `metadataEntries` (the number of entries) when metadata was sent, `auth account metadata updated` (`account`, `chainId`, `metadataEntries`, 0 when removed, `accountDeployed`) is written by `POST /v1/auth/metadata`, and `pending registration metadata not cleared` (warn, `challengeId`) says that a registration was created but the copy kept with its request could not be cleared. The object, its keys and its values are never logged.
 
 **Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `AuthAccountMetadata` table and a nullable `metadata` column on `AuthRegistrationRequest`. Both are additive, so the migration can be applied while an older version runs.
 

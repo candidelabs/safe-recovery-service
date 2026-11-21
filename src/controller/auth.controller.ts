@@ -33,6 +33,14 @@ interface DeleteRegistrationBody {
   signature: string;
 }
 
+interface SetAccountMetadataBody {
+  account: string;
+  chainId: number;
+  metadata: AccountMetadata;
+  message: string;
+  signature: string;
+}
+
 interface RequestVerificationBody {
   channel: string;
   target: string;
@@ -108,6 +116,18 @@ export const deleteRegistration = catchAsync(async (req, res) => {
     params.signature
   );
   res.send({success});
+});
+
+export const setAccountMetadata = catchAsync(async (req, res) => {
+  const params = req.body as SetAccountMetadataBody;
+  const metadata = await authService.setAccountMetadata(
+    params.account,
+    params.chainId,
+    params.metadata,
+    params.message,
+    params.signature,
+  );
+  res.send({metadata});
 });
 
 export const requestVerification = catchAsync(async (req, res) => {

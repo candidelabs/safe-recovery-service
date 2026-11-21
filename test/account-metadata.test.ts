@@ -149,6 +149,11 @@ describe("metadata validation (Joi)", () => {
         issuedAt: new Date().toISOString(),
     }).prepareMessage();
     const registerBody = {account: wallet.address, chainId: CHAIN_A, channel: "email", target: "user@example.com", message, signature: "0x1234"};
+    const metadataBody = {account: wallet.address, chainId: CHAIN_A, message, signature: "0x1234"};
+    const schemas: [string, object, Record<string, unknown>][] = [
+        ["register", authValidation.register, registerBody],
+        ["setAccountMetadata", authValidation.setAccountMetadata, metadataBody],
+    ];
     const validationError = (schema: object, body: Record<string, unknown>): string | undefined => {
         let error: ApiError | undefined;
         validate(schema)({body} as never, {} as never, ((e?: ApiError) => { error = e; }) as never);
@@ -174,16 +179,22 @@ describe("metadata validation (Joi)", () => {
         expect(validationError(authValidation.register, {...registerBody, metadata: {}})).toBeUndefined();
     });
 
-    test.each(refused)("register refuses %s with a fixed message", (_name, metadata, problem) => {
-        const error = validationError(authValidation.register, {...registerBody, metadata});
-        expect(error).toBe(`"metadata" ${problem}`);
+    test("setAccountMetadata requires metadata, and accepts {}", () => {
+        expect(validationError(authValidation.setAccountMetadata, metadataBody)).toBe(`"metadata" is required`);
+        expect(validationError(authValidation.setAccountMetadata, {...metadataBody, metadata: {}})).toBeUndefined();
+        expect(validationError(authValidation.setAccountMetadata, {...metadataBody, metadata: {label: "Savings"}})).toBeUndefined();
     });
 
-    test("no message quotes a key or a value", () => {
-        for (const [, metadata] of refused) {
-            const error = validationError(authValidation.register, {...registerBody, metadata})!;
-            expect(error).not.toMatch(/Secret/i);
-        }
+    describe.each(schemas)("%s", (_schemaName, schema, body) => {
+        test.each(refused)("refuses %s with a fixed message", (_name, metadata, problem) => {
+            expect(validationError(schema, {...body, metadata})).toBe(`"metadata" ${problem}`);
+        });
+
+        test("no message quotes a key or a value", () => {
+            for (const [, metadata] of refused) {
+                expect(validationError(schema, {...body, metadata})).not.toMatch(/Secret/i);
+            }
+        });
     });
 
     test("register leaves the metadata as sent", () => {
@@ -268,5 +279,16 @@ describe("lookupAccounts", () => {
 describe("logging", () => {
     test("the number of entries is written, not redacted", () => {
         expect(isSensitiveKey("metadataEntries")).toBe(false);
+    });
+});
+
+describe("routes", () => {
+    test("the auth router has POST /metadata", () => {
+        // required here, not imported: the auth schemas read Network.supportedChainIds when they load
+        const router = require("../src/routes/v1/auth.route").default;
+        const routes = router.stack
+            .filter((layer: {route?: unknown}) => layer.route)
+            .map(({route}: {route: {path: string, methods: Record<string, boolean>}}) => `${Object.keys(route.methods).join(",")} ${route.path}`);
+        expect(routes).toContain("post /metadata");
     });
 });

@@ -420,6 +420,8 @@ describe("register with a verified-target token", () => {
 describe("account metadata", () => {
     const metadataRow = (wallet: ethers.Wallet, chainId: number) =>
         prisma.authAccountMetadata.findUnique({where: {account_chainId: {account: wallet.address.toLowerCase(), chainId}}});
+    const METADATA_STATEMENT = "I request to update the metadata stored for my account with Safe Recovery Service";
+    const setMetadata = (body: object) => supertest(app).post("/v1/auth/metadata").send(body);
 
     it("should store the metadata sent with a token, per chain, and return it with an ISO registeredAt", async () => {
         const target = newTarget();
@@ -497,6 +499,50 @@ describe("account metadata", () => {
         await listAccounts(token).expect(200).then((response) => {
             expect(response.body.accounts).toEqual([entry(wallet.address.toLowerCase(), CHAIN_A, metadata)]);
         });
+    });
+
+    it("should replace and clear the metadata at POST /v1/auth/metadata, signed by the account", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token, metadata: {label: "Savings", "app:id": "1"}}).expect(200);
+
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {label: "Spending"}}).expect(200).then((response) => {
+            expect(response.body).toEqual({metadata: {label: "Spending"}});
+        });
+        await listAccounts(token).expect(200).then((response) => {
+            expect(response.body).toEqual({accounts: [entry(wallet.address.toLowerCase(), CHAIN_A, {label: "Spending"})]});
+        });
+
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {}}).expect(200).then((response) => {
+            expect(response.body).toEqual({metadata: {}});
+        });
+        expect(await metadataRow(wallet, CHAIN_A)).toBeNull();
+        await listAccounts(token).expect(200).then((response) => {
+            expect(response.body).toEqual({accounts: [entry(wallet.address.toLowerCase(), CHAIN_A)]});
+        });
+    });
+
+    it("should refuse POST /v1/auth/metadata without a registration (404), invalid metadata (400) and another key's signature (403)", async () => {
+        const wallet = ethers.Wallet.createRandom();
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {label: "x"}}).expect(404).then((response) => {
+            expect(response.body.message).toBe("No registrations found for this account on this chainId");
+        });
+
+        const target = newTarget();
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: await verify(target)}).expect(200);
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {label: "x".repeat(257)}}).expect(400).then((response) => {
+            expect(response.body.message).toBe(`"metadata" values must be at most 256 characters long`);
+        });
+        await setMetadata(await signedBody(wallet, CHAIN_A, METADATA_STATEMENT)).expect(400).then((response) => {
+            expect(response.body.message).toBe(`"metadata" is required`);
+        });
+
+        // a message for the account, signed by another key
+        const forged = await signedBody(wallet, CHAIN_A, METADATA_STATEMENT);
+        forged.signature = await ethers.Wallet.createRandom().signMessage(forged.message);
+        await setMetadata({...forged, metadata: {label: "x"}}).expect(403);
+        expect(await metadataRow(wallet, CHAIN_A)).toBeNull();
     });
 
     it("should refuse invalid metadata on register with a message that quotes nothing", async () => {
