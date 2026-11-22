@@ -14,6 +14,7 @@ import {
   UnwrappedSignature,
   unwrapErc6492Signature,
 } from "./erc6492";
+import {Configuration} from "../config/config-manager";
 
 export const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 export const e164Regex = /^\+?[1-9]\d{1,14}$/;
@@ -360,6 +361,15 @@ const unwrapSIWESignature = (signature: string): UnwrappedSignature => {
   }
 };
 
+// options.counterfactualAccounts.erc6492: with false, every signature that ends with the ERC-6492 suffix is refused,
+// deployed account or not. Called for a wrapped signature only, and the configuration is read then, so unwrapped
+// signatures are checked without a Configuration (test/siwe.test.ts).
+const requireErc6492Accepted = () => {
+  if (!Configuration.instance().counterfactualAccounts.erc6492) {
+    throw new ApiError(httpStatus.BAD_REQUEST, `ERC-6492 signatures are not accepted by this service`);
+  }
+};
+
 export interface SiweVerification {
   counterfactual: boolean; // the account was not deployed: its ERC-6492 signature was verified in simulation
 }
@@ -382,6 +392,7 @@ const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: str
     await verifySIWESignature(siweMessage, signature, network);
     return {counterfactual: false};
   }
+  requireErc6492Accepted();
   const {deployment, signature: innerSignature} = unwrapSIWESignature(signature);
   if (await hasCode(network.jsonRPCProvider, account)) {
     await verifySIWESignature(siweMessage, innerSignature, network);
@@ -416,6 +427,7 @@ export async function validateOwnerSIWEMessage(message: string, owner: string, c
   return releaseNonceOnFailure(reservation, async () => {
     let deployment: AccountDeployment | undefined;
     if (isErc6492Signature(signature)) {
+      requireErc6492Accepted();
       ({deployment, signature} = unwrapSIWESignature(signature));
     }
     await verifySIWESignature(siweMessage, signature, network);

@@ -19,6 +19,11 @@ import {
 import {validateOwnerSIWEMessage, validateSIWEMessage} from "../src/utils/utilities";
 import {fetchAccountOwners, requireAccountOwner} from "../src/utils/account-owners";
 import {Network} from "../src/models/network";
+import {Configuration} from "../src/config/config-manager";
+
+// options.counterfactualAccounts, which a wrapped signature reads (the switch of the ERC-6492 tests below)
+const mockCounterfactualAccounts = {erc6492: true, storeInitData: "never"};
+jest.spyOn(Configuration, "instance").mockReturnValue({counterfactualAccounts: mockCounterfactualAccounts} as unknown as Configuration);
 
 const MULTICALL3 = new ethers.utils.Interface([
   "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)",
@@ -231,6 +236,8 @@ describe("SIWE verification and owner lookup", () => {
     chain.calls = [];
     chain.onCall = async () => "0x";
     (network as unknown as {counterfactualSupport?: Promise<boolean>}).counterfactualSupport = undefined;
+    network.counterfactualSupported = undefined;
+    mockCounterfactualAccounts.erc6492 = true;
   });
 
   const aggregate3Calls = () => chain.calls
@@ -360,6 +367,58 @@ describe("SIWE verification and owner lookup", () => {
     });
   });
 
+  describe("options.counterfactualAccounts.erc6492: false", () => {
+    const REFUSED = {statusCode: 400, message: "ERC-6492 signatures are not accepted by this service"};
+    beforeEach(() => {
+      mockCounterfactualAccounts.erc6492 = false;
+    });
+
+    it("refuses a wrapped signature of an undeployed account in self mode, with no chain call, and frees its nonce", async () => {
+      chain.onCall = async () => aggregate3Result([[true, "0x"], [true, magicResult]]);
+      const getCode = jest.spyOn(chain, "getCode");
+      try {
+        const message = siweMessage(account, fetchStatement);
+        await expect(validateSIWEMessage(
+          message.toMessage(), account, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, innerSignature)
+        )).rejects.toMatchObject(REFUSED);
+        expect(chain.calls).toHaveLength(0);
+        expect(getCode).not.toHaveBeenCalled();
+      } finally {
+        getCode.mockRestore();
+      }
+    });
+
+    it("refuses a wrapped signature of a deployed account too; the same message then passes unwrapped", async () => {
+      const message = siweMessage(owner.address, fetchStatement);
+      const signature = await owner.signMessage(message.prepareMessage());
+      chain.code.set(owner.address.toLowerCase(), "0x6080");
+      await expect(validateSIWEMessage(
+        message.toMessage(), owner.address, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, signature)
+      )).rejects.toMatchObject(REFUSED);
+      expect(chain.calls).toHaveLength(0);
+      // the nonce was freed: the same message is accepted with the unwrapped signature
+      expect(await validateSIWEMessage(message.toMessage(), owner.address, CHAIN_ID, fetchStatement, signature))
+        .toEqual({counterfactual: false});
+    });
+
+    it("refuses a wrapped owner signature in owner mode; the same message then passes unwrapped", async () => {
+      const message = siweMessage(owner.address, fetchStatement);
+      const signature = await owner.signMessage(message.prepareMessage());
+      await expect(validateOwnerSIWEMessage(
+        message.toMessage(), owner.address, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, signature)
+      )).rejects.toMatchObject(REFUSED);
+      expect(await validateOwnerSIWEMessage(message.toMessage(), owner.address, CHAIN_ID, fetchStatement, signature))
+        .toEqual({deployment: undefined});
+      expect(chain.calls).toHaveLength(0);
+    });
+
+    it("refuses a malformed wrapper with the same answer, before decoding it", async () => {
+      const message = siweMessage(account, fetchStatement);
+      await expect(validateSIWEMessage(message.toMessage(), account, CHAIN_ID, fetchStatement, "0x1234" + ERC6492_MAGIC.slice(2)))
+        .rejects.toMatchObject(REFUSED);
+    });
+  });
+
   describe("fetchAccountOwners / requireAccountOwner", () => {
     const owners = [owner.address, ethers.Wallet.createRandom().address];
     const ownersResult = SAFE_OWNERS.encodeFunctionResult("getOwners", [owners]);
@@ -418,7 +477,9 @@ describe("SIWE verification and owner lookup", () => {
     it("checks Multicall3 once, and again after a failed check", async () => {
       const getCode = jest.spyOn(chain, "getCode");
       try {
+        expect(network.counterfactualSupported).toBeUndefined(); // no check yet
         expect(await Promise.all([network.supportsCounterfactual(), network.supportsCounterfactual()])).toEqual([true, true]);
+        expect(network.counterfactualSupported).toBe(true);
         expect(await network.supportsCounterfactual()).toBe(true);
         expect(getCode).toHaveBeenCalledTimes(1);
         expect(getCode).toHaveBeenCalledWith(MULTICALL3_ADDRESS);
@@ -426,8 +487,14 @@ describe("SIWE verification and owner lookup", () => {
         (network as unknown as {counterfactualSupport?: Promise<boolean>}).counterfactualSupport = undefined;
         getCode.mockRejectedValueOnce(new Error("rpc down"));
         await expect(network.supportsCounterfactual()).rejects.toThrow("rpc down");
+        expect(network.counterfactualSupported).toBeUndefined(); // a failed check settles nothing
         expect(await network.supportsCounterfactual()).toBe(true); // retried
         expect(getCode).toHaveBeenCalledTimes(3);
+
+        (network as unknown as {counterfactualSupport?: Promise<boolean>}).counterfactualSupport = undefined;
+        chain.code.delete(MULTICALL3_ADDRESS.toLowerCase());
+        expect(await network.supportsCounterfactual()).toBe(false);
+        expect(network.counterfactualSupported).toBe(false);
       } finally {
         getCode.mockRestore();
       }

@@ -11,6 +11,7 @@ import {
 } from "../src/utils/utilities";
 import {ERC6492_MAGIC, MULTICALL3_ADDRESS} from "../src/utils/erc6492";
 import {Network} from "../src/models/network";
+import {Configuration} from "../src/config/config-manager";
 
 const CHAIN_ID = 11155111;
 const MINUTE = 60 * 1000;
@@ -215,8 +216,16 @@ describe("nonce replay protection", () => {
   it("frees the nonce when the signature check throws", async () => {
     const message = siweMessage({issuedAt: new Date()});
     const [text, signature] = await signed(message);
-    await expect(validateSIWEMessage(text, owner.address, CHAIN_ID, statement, "0x1234" + ERC6492_MAGIC.slice(2)))
-      .rejects.toMatchObject({statusCode: 400, message: "SIWE Message: malformed ERC-6492 signature"});
+    // a wrapped signature reads options.counterfactualAccounts.erc6492
+    const configuration = jest.spyOn(Configuration, "instance").mockReturnValue(
+      {counterfactualAccounts: {erc6492: true, storeInitData: "never"}} as unknown as Configuration
+    );
+    try {
+      await expect(validateSIWEMessage(text, owner.address, CHAIN_ID, statement, "0x1234" + ERC6492_MAGIC.slice(2)))
+        .rejects.toMatchObject({statusCode: 400, message: "SIWE Message: malformed ERC-6492 signature"});
+    } finally {
+      configuration.mockRestore();
+    }
     expect(await validateSIWEMessage(text, owner.address, CHAIN_ID, statement, signature)).toEqual({counterfactual: false});
     await expect(validateSIWEMessage(text, owner.address, CHAIN_ID, statement, signature)).rejects.toMatchObject(nonceUsed);
   });

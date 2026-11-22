@@ -1,11 +1,14 @@
 import {Network} from "../models/network";
+import {Configuration} from "../config/config-manager";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "counterfactual" });
 
 // After boot: a network without Multicall3 rejects ERC-6492 signatures of undeployed accounts (deployed accounts
-// keep working). Warms the per-network check and says so once; never blocks or ends the process.
+// keep working). Warms the per-network check and says so once; never blocks or ends the process. Nothing to check
+// when the service refuses ERC-6492 signatures altogether (options.counterfactualAccounts.erc6492: false).
 export const warnIfCounterfactualUnsupported = async (): Promise<void> => {
+  if (!Configuration.instance().counterfactualAccounts.erc6492) return;
   await Promise.all(Network.instances.instances.map(async (network) => {
     const context = { chainId: network.chainId, network: network.name, multicall3: network.multicall3 };
     try {

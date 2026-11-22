@@ -20,8 +20,10 @@ const V0_1_0_3_MINUTES = "0x949d01d424bE050D09C16025dd007CB59b3A8c66";
 const CHAIN_ID = 11155111;
 const API_KEY = "test-api-key-0123456789abcdef";
 const BEARER_TOKEN = "test-bearer-token-0123456789abcdef";
+// the network's guardian
+const GUARDIAN = ethers.Wallet.createRandom();
 
-const config = (authentication?: unknown): Record<string, any> => ({
+const config = (authentication?: unknown, counterfactualAccounts?: unknown): Record<string, any> => ({
     options: {
         env: "development",
         port: 4337,
@@ -29,8 +31,9 @@ const config = (authentication?: unknown): Record<string, any> => ({
         trustProxy: true,
         rateLimit: 1000,
         ...(authentication === undefined ? {} : {authentication}),
+        ...(counterfactualAccounts === undefined ? {} : {counterfactualAccounts}),
     },
-    signers: [{id: "signer", privateKey: ethers.Wallet.createRandom().privateKey}],
+    signers: [{id: "signer", privateKey: GUARDIAN.privateKey}],
     alerts: [{id: "alert", channels: {email: {webhook: {endpoint: "https://webhook.example.com/"}}}}],
     networks: {
         sepolia: {
@@ -48,16 +51,19 @@ type Loaded = {
     app: Express;
     routePattern: (req: any) => string | undefined;
     sanitizeString: (value: string) => string;
+    network: () => {counterfactualSupported?: boolean};
 };
 
-const load = (authentication?: unknown): Loaded => {
-    mockRawConfig = config(authentication);
+const load = (authentication?: unknown, counterfactualAccounts?: unknown): Loaded => {
+    mockRawConfig = config(authentication, counterfactualAccounts);
     let loaded: Loaded | undefined;
     jest.isolateModules(() => {
+        const {Network} = require("../src/models/network");
         loaded = {
             app: require("../src/index").app,
             routePattern: require("../src/middlewares/request-logger").routePattern,
             sanitizeString: require("../src/logging").sanitizeString,
+            network: () => Network.instances.get(CHAIN_ID.toString()),
         };
     });
     return loaded!;
@@ -125,6 +131,26 @@ describe("without authentication", () => {
     test("logs the request path as it is", () => {
         expect(loaded.routePattern({route: {path: "/getNetworkConfig"}, originalUrl: networkConfig(""), baseUrl: ""}))
             .toBe("/v1/config/getNetworkConfig");
+    });
+});
+
+describe("getNetworkConfig", () => {
+    test("answers the guardian's address, checksummed, and the default counterfactualAccounts", async () => {
+        const loaded = load();
+        const {body} = await supertest(loaded.app).get(networkConfig("")).query({chainId: CHAIN_ID}).expect(200);
+        expect(body.guardianAddress).toBe(GUARDIAN.address);
+        expect(body.counterfactualAccounts).toEqual({erc6492: true, storeInitData: "never"});
+    });
+
+    test("answers the configured counterfactualAccounts, and erc6492 false once Multicall3 is known to be missing", async () => {
+        const loaded = load(undefined, {erc6492: "true", storeInitData: "with-guardian"});
+        const get = async () => (await supertest(loaded.app).get(networkConfig("")).query({chainId: CHAIN_ID}).expect(200)).body;
+        expect((await get()).counterfactualAccounts).toEqual({erc6492: true, storeInitData: "with-guardian"});
+        // the settled check of the network (no RPC call is made by the endpoint)
+        loaded.network().counterfactualSupported = false;
+        expect((await get()).counterfactualAccounts).toEqual({erc6492: false, storeInitData: "never"});
+        loaded.network().counterfactualSupported = true;
+        expect((await get()).counterfactualAccounts).toEqual({erc6492: true, storeInitData: "with-guardian"});
     });
 });
 

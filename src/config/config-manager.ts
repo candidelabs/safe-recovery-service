@@ -35,6 +35,8 @@ type Config = {
     moduleFallbackSunset?: string;
     // who may call the service at all: an API key in the path or a bearer token (see parseAuthentication)
     authentication?: {apiKey?: string; bearerToken?: string} | string;
+    // whether ERC-6492 signatures are accepted, and which init data of undeployed accounts is kept (see parseCounterfactualAccounts)
+    counterfactualAccounts?: {erc6492?: boolean | string; storeInitData?: string} | string | null;
   };
   signers: Array<{
     id: string;
@@ -109,6 +111,7 @@ export class Configuration {
   public moduleFallbackDeprecation?: Date;
   public moduleFallbackSunset?: Date;
   public authentication!: ServiceAuthentication;
+  public counterfactualAccounts!: CounterfactualAccounts;
   private readonly config: Config;
   private static _instance?: Configuration;
 
@@ -246,6 +249,10 @@ export class Configuration {
     this.moduleFallbackSunset = sunset;
 
     this.authentication = parseAuthentication(options.authentication);
+
+    this.counterfactualAccounts = parseCounterfactualAccounts(options.counterfactualAccounts);
+    const {erc6492, storeInitData} = this.counterfactualAccounts;
+    log.info({ erc6492, storeInitData }, "counterfactual accounts configured");
   }
 
   private initializeSigners(signers: Config["signers"]) {
@@ -567,6 +574,51 @@ export const parseAuthentication = (authentication: Config["options"]["authentic
     throw new Error(`Options.authentication.${field} may only contain ${characters}.`);
   }
   return {[field]: value};
+};
+
+// What the service does with accounts that are not deployed yet (ERC-6492 signatures):
+// - erc6492: whether a signature wrapped with ERC-6492 is accepted at all, on any route (src/utils/utilities.ts);
+// - storeInitData: whether a registration of an undeployed account keeps its deployment call under the reserved
+//   metadata keys _factory / _factoryData: "never", "with-guardian" (only when deploying it installs this service's
+//   guardian on a configured module, src/utils/account-init-data.ts) or "always".
+export const STORE_INIT_DATA_POLICIES = ["never", "with-guardian", "always"] as const;
+export type StoreInitDataPolicy = typeof STORE_INIT_DATA_POLICIES[number];
+export type CounterfactualAccounts = {erc6492: boolean; storeInitData: StoreInitDataPolicy};
+
+const COUNTERFACTUAL_ACCOUNTS_KEYS = ["erc6492", "storeInitData"];
+
+// options.counterfactualAccounts: omitted, null or '~' for the defaults (ERC-6492 accepted, no init data kept, what the
+// service did before the option existed). Booleans may be given as "true" / "false" (what ${ENV::VAR} yields).
+export const parseCounterfactualAccounts = (value: unknown): CounterfactualAccounts => {
+  if (value === undefined || value === null || value === "~") return {erc6492: true, storeInitData: "never"};
+  const prototype = typeof value === "object" && !Array.isArray(value) ? Object.getPrototypeOf(value) : undefined;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error("Options.counterfactualAccounts must be an object with 'erc6492' and 'storeInitData', or '~'.");
+  }
+  const section = value as Record<string, unknown>;
+  for (const key of Object.keys(section)) {
+    if (!COUNTERFACTUAL_ACCOUNTS_KEYS.includes(key)) {
+      throw new Error(`Options.counterfactualAccounts has an unknown key '${key}'.`);
+    }
+  }
+  let erc6492: boolean;
+  if (section.erc6492 === undefined) {
+    erc6492 = true;
+  } else if (typeof section.erc6492 === "boolean") {
+    erc6492 = section.erc6492;
+  } else if (typeof section.erc6492 === "string" && ["true", "false"].includes(section.erc6492.toLowerCase())) {
+    erc6492 = section.erc6492.toLowerCase() === "true";
+  } else {
+    throw new Error("Options.counterfactualAccounts.erc6492 must be true or false.");
+  }
+  const storeInitData = section.storeInitData ?? "never";
+  if (!(STORE_INIT_DATA_POLICIES as readonly unknown[]).includes(storeInitData)) {
+    throw new Error("Options.counterfactualAccounts.storeInitData must be 'never', 'with-guardian' or 'always'.");
+  }
+  if (!erc6492 && storeInitData !== "never") {
+    throw new Error("Options.counterfactualAccounts.storeInitData must be 'never' when erc6492 is false.");
+  }
+  return {erc6492, storeInitData: storeInitData as StoreInitDataPolicy};
 };
 
 // 'recoveryModules' lists every module the network serves and indexes, each with its own 'indexer'

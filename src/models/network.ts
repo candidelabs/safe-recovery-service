@@ -37,6 +37,9 @@ export class Network {
   // Multicall3, which simulates the deployment of an undeployed account (ERC-6492 signatures)
   public multicall3: string;
   private counterfactualSupport?: Promise<boolean>;
+  // The settled answer of supportsCounterfactual(): unset until the first check ends, and again after a failed one.
+  // Read where no RPC call may be awaited (getNetworkConfig).
+  public counterfactualSupported?: boolean;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -81,9 +84,17 @@ export class Network {
     if (!this.counterfactualSupport) {
       const check = isMulticall3Deployed(this.jsonRPCProvider, this.multicall3);
       this.counterfactualSupport = check;
-      check.catch(() => {
-        if (this.counterfactualSupport === check) this.counterfactualSupport = undefined;
-      });
+      check.then(
+        (supported) => {
+          if (this.counterfactualSupport === check) this.counterfactualSupported = supported;
+        },
+        () => {
+          if (this.counterfactualSupport === check) {
+            this.counterfactualSupport = undefined;
+            this.counterfactualSupported = undefined;
+          }
+        },
+      );
     }
     return this.counterfactualSupport;
   }
