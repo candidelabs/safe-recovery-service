@@ -1326,6 +1326,39 @@ describe("account metadata (in-memory tables)", () => {
         expect(linesOf("auth registration submitted again")).toEqual([expect.objectContaining({challengeId, registrationId, metadataEntries: 1})]);
     });
 
+    test("a second challenge for a target registered meanwhile answers with that registration, never a second one", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const first = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const firstCode = codeFor(target);
+        // register again before the first code is submitted: no registration yet, so no 409
+        const second = await registerWith(account, CHAIN_A, target, undefined, "email", {label: "Savings"}) as {challengeId: string};
+        const secondCode = codeFor(target);
+        const created = await submitRegistrationChallenge(first.challengeId, firstCode);
+        mockLogLines.length = 0;
+
+        expect(await submitRegistrationChallenge(second.challengeId, secondCode)).toEqual(created);
+        expect(registrationsOf(target)).toHaveLength(1);
+        // its request is verified and its metadata written all the same
+        expect(requestRow(second.challengeId)).toEqual(expect.objectContaining({verified: true, metadata: null}));
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(linesOf("auth registration created")).toEqual([]);
+        expect(linesOf("auth registration already exists")).toEqual([
+            {component: "auth", challengeId: second.challengeId, registrationId: created[0], account: account.toLowerCase(), chainId: CHAIN_A, channel: "email", metadataEntries: 1},
+        ]);
+    });
+
+    test("a code submitted after the target was registered with a token answers with that registration", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const code = codeFor(target);
+        const {registrationId} = await registerWith(account, CHAIN_A, target, await verify(target)) as {registrationId: string};
+
+        expect(await submitRegistrationChallenge(challengeId, code)).toEqual([registrationId, GUARDIAN]);
+        expect(registrationsOf(target)).toHaveLength(1);
+    });
+
     test("a /submit whose registration cannot be created gives the challenge back: the same code sent again creates it", async () => {
         const account = newAccount();
         const target = newTarget();
