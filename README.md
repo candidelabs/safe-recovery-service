@@ -328,6 +328,7 @@ An app can store a small object with an account when it registers it with the gu
 | --- | --- | --- |
 | Type | a JSON object (not `null`, not an array) whose values are all strings; `{}` means none | `"metadata" must be an object of string values` |
 | Entries | at most 10 | `"metadata" must have at most 10 entries` |
+| Reserved keys | no key starting with `_` (reserved for the service) | `"metadata" keys starting with an underscore are reserved` |
 | Key | 1 to 32 ASCII characters (letters, digits, `_`, `.`, `:`, `-`), starting with a letter or a digit | `"metadata" keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit` |
 | Value | a non-empty string | `"metadata" values must be non-empty strings` |
 | Value length | at most 256 UTF-16 code units (JavaScript's `String.length`) | `"metadata" values must be at most 256 characters long` |
@@ -337,6 +338,8 @@ An app can store a small object with an account when it registers it with the gu
 The rules are checked in this order and the first one broken is answered. No message quotes a key or a value. Nothing is trimmed, normalized or case-folded, and key order is not kept. A deployment without this feature answers a request with `metadata` with 400 `"metadata" is not allowed`, which is how a client tells.
 
 One key has a documented meaning: `label`, the name the user gave the account. The service never looks at it. Prefix your app's own keys (`myapp.profileId`).
+
+Keys starting with `_` are reserved for the service, and a request that sends one is refused. The service stores none today. If it ever does, reads will return them as part of the object and writes will keep them. Send only your app's own keys: drop any key starting with `_` before writing an object back.
 
 **Writing it.** `POST /v1/auth/register` takes an optional `metadata`:
 

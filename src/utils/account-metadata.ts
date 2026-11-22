@@ -22,12 +22,19 @@
 //   whose code was never submitted (those rows are kept).
 //
 // Nothing is trimmed, normalized or case-folded, and key order is not kept (jsonb reorders keys).
+//
+// Keys starting with an underscore are reserved for the service, and a request that sends one is refused. None is
+// stored today. If the service ever stores such keys, reads return them as part of the object and writes keep them;
+// relaxing the refusal then (accepting them sent back unchanged, or ignoring them) breaks no client, while tightening
+// a looser rule would.
 
 /** An account's metadata: string keys to string values. `{}` means none. */
 export type AccountMetadata = Record<string, string>;
 
 /** At most this many entries. */
 export const ACCOUNT_METADATA_MAX_ENTRIES = 10;
+/** Keys starting with this are reserved for the service: an app cannot send them. */
+export const ACCOUNT_METADATA_RESERVED_KEY_PREFIX = "_";
 /** A key: 1 to 32 ASCII characters, starting with a letter or a digit (so never `__proto__`). */
 export const ACCOUNT_METADATA_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$/;
 /** A value: a non-empty string of at most this many UTF-16 code units (`String.length`). */
@@ -46,6 +53,7 @@ export const ACCOUNT_METADATA_MAX_BYTES = 2048;
 const PROBLEMS = {
   type: "must be an object of string values",
   entries: `must have at most ${ACCOUNT_METADATA_MAX_ENTRIES} entries`,
+  reservedKey: "keys starting with an underscore are reserved",
   // the length is the one of ACCOUNT_METADATA_KEY_PATTERN
   key: "keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit",
   value: "values must be non-empty strings",
@@ -63,13 +71,14 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 
 /**
  * The first rule `value` breaks, as a fixed text to put after the field's name, or undefined for valid metadata. The
- * rules are checked in this order: type, entries, keys, value type and emptiness, value length, value characters,
- * total size.
+ * rules are checked in this order: type, entries, reserved keys, keys, value type and emptiness, value length, value
+ * characters, total size.
  */
 export function accountMetadataProblem(value: unknown): string | undefined {
   if (!isPlainObject(value)) return PROBLEMS.type;
   const entries = Object.entries(value);
   if (entries.length > ACCOUNT_METADATA_MAX_ENTRIES) return PROBLEMS.entries;
+  if (entries.some(([key]) => key.startsWith(ACCOUNT_METADATA_RESERVED_KEY_PREFIX))) return PROBLEMS.reservedKey;
   if (!entries.every(([key]) => ACCOUNT_METADATA_KEY_PATTERN.test(key))) return PROBLEMS.key;
   const values = entries.map(([, entry]) => entry);
   if (!values.every((entry): entry is string => typeof entry === "string" && entry.length > 0)) return PROBLEMS.value;

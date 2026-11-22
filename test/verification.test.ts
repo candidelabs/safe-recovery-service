@@ -548,8 +548,12 @@ describe("account metadata", () => {
     it("should refuse invalid metadata on register with a message that quotes nothing", async () => {
         const target = newTarget();
         const wallet = ethers.Wallet.createRandom();
-        await register({...await registerBody(wallet, CHAIN_A, target), metadata: {"_Secret-Key": "Secret-Value"}}).expect(400).then((response) => {
+        await register({...await registerBody(wallet, CHAIN_A, target), metadata: {"Secret Key": "Secret-Value"}}).expect(400).then((response) => {
             expect(response.body.message).toBe(`"metadata" keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit`);
+        });
+        // a key reserved for the service
+        await register({...await registerBody(wallet, CHAIN_A, target), metadata: {"_Secret-Key": "Secret-Value"}}).expect(400).then((response) => {
+            expect(response.body.message).toBe(`"metadata" keys starting with an underscore are reserved`);
         });
         expect(await prisma.authRegistrationRequest.count({where: {target}})).toBe(0);
     });

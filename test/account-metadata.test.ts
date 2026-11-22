@@ -8,6 +8,7 @@ import {
     ACCOUNT_METADATA_MAX_BYTES,
     ACCOUNT_METADATA_MAX_ENTRIES,
     ACCOUNT_METADATA_MAX_VALUE_LENGTH,
+    ACCOUNT_METADATA_RESERVED_KEY_PREFIX,
     accountMetadataProblem,
     storedAccountMetadata,
 } from "../src/utils/account-metadata";
@@ -29,6 +30,7 @@ const object = (entries: number, value = "v") => Object.fromEntries(Array.from({
 
 const TYPE = "must be an object of string values";
 const ENTRIES = "must have at most 10 entries";
+const RESERVED = "keys starting with an underscore are reserved";
 const KEYS = "keys must be 1 to 32 characters of letters, digits, underscore, dot, colon or hyphen, and start with a letter or a digit";
 const VALUES = "values must be non-empty strings";
 const VALUE_LENGTH = "values must be at most 256 characters long";
@@ -40,6 +42,7 @@ describe("accountMetadataProblem", () => {
         expect(ACCOUNT_METADATA_MAX_ENTRIES).toBe(10);
         expect(ACCOUNT_METADATA_MAX_VALUE_LENGTH).toBe(256);
         expect(ACCOUNT_METADATA_MAX_BYTES).toBe(2048);
+        expect(ACCOUNT_METADATA_RESERVED_KEY_PREFIX).toBe("_");
     });
 
     test.each([
@@ -73,11 +76,13 @@ describe("accountMetadataProblem", () => {
         ["11 entries", object(11), ENTRIES],
         ["an empty key", {"": "x"}, KEYS],
         ["a 33-character key", {["k".repeat(33)]: "v"}, KEYS],
-        ["a key starting with an underscore", {_label: "x"}, KEYS],
+        ["a key starting with an underscore", {_label: "x"}, RESERVED],
+        ["an underscore alone", {_: "x"}, RESERVED],
+        ["a reserved key that also breaks the key rule", {["_".repeat(40)]: "x"}, RESERVED],
         ["a key starting with a dot", {".label": "x"}, KEYS],
         ["a key with a space", {"my label": "x"}, KEYS],
         ["a non-ASCII key", {["caf" + char(0xe9)]: "x"}, KEYS],
-        ["__proto__ as parsed from JSON", JSON.parse("{\"__proto__\": \"x\"}"), KEYS],
+        ["__proto__ as parsed from JSON", JSON.parse("{\"__proto__\": \"x\"}"), RESERVED],
         ["a 257-character value", {label: "x".repeat(257)}, VALUE_LENGTH],
         ["a line feed", {label: "a" + char(0x0a) + "b"}, VALUE_CHARACTERS],
         ["a tab", {label: "a" + char(0x09) + "b"}, VALUE_CHARACTERS],
@@ -99,7 +104,8 @@ describe("accountMetadataProblem", () => {
 
     test("names the first rule broken, in the order of the rules", () => {
         expect(accountMetadataProblem({...object(11), _bad: ""})).toBe(ENTRIES);
-        expect(accountMetadataProblem({_bad: "", other: 42})).toBe(KEYS);
+        expect(accountMetadataProblem({"": "x", _bad: "", other: 42})).toBe(RESERVED);
+        expect(accountMetadataProblem({"bad key": "", other: 42})).toBe(KEYS);
         expect(accountMetadataProblem({a: "", b: "x".repeat(300)})).toBe(VALUES);
         expect(accountMetadataProblem({a: "x".repeat(300), b: char(0x0a)})).toBe(VALUE_LENGTH);
     });
@@ -125,6 +131,10 @@ describe("storedAccountMetadata", () => {
         expect(storedAccountMetadata({label: "Savings", count: 3, nested: {a: "b"}, none: null})).toEqual({label: "Savings"});
         const long = {["_".repeat(40)]: "x".repeat(1000)};
         expect(storedAccountMetadata(long)).toEqual(long);
+    });
+
+    test("returns a reserved key like any other", () => {
+        expect(storedAccountMetadata({_service: "x", label: "y"})).toEqual({_service: "x", label: "y"});
     });
 
     test("keeps a key named __proto__ as a plain property", () => {
@@ -167,7 +177,8 @@ describe("metadata validation (Joi)", () => {
         ["a nested object", {"Secret-Key": {nested: "Secret-Nested-Value"}}, VALUES],
         ["an empty value", {secretKeyOne: ""}, VALUES],
         ["11 entries", object(11, "Secret-Many-Value"), ENTRIES],
-        ["a key starting with an underscore", {"_Secret-Key-Two": "Secret-Value-Two"}, KEYS],
+        ["a key starting with an underscore", {"_Secret-Key-Two": "Secret-Value-Two"}, RESERVED],
+        ["a key with a space", {"Secret Key Five": "Secret-Value-Five"}, KEYS],
         ["a long value", {secretKeyThree: "Secret-Value-Three-" + "x".repeat(300)}, VALUE_LENGTH],
         ["a line feed", {secretKeyFour: "Secret-Value-Four" + char(0x0a) + "Line"}, VALUE_CHARACTERS],
         ["more than 2048 bytes", object(10, "Secret-Bytes-Value" + char(0x50a8).repeat(200)), BYTES],
