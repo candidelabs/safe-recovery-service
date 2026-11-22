@@ -221,7 +221,7 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     });
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid challenge`);
   }
-  // read before the claim below, so that only the insert stands between the claim and the registration
+  // read before the claim below, so that only the lookup and the insert stand between the claim and the registration
   const guardian = await registrationGuardian(network);
   // Only the submit that turns `verified` from false to true creates the registration (a conditional updateMany, as in
   // verification.service.ts): two submits at once, or the same code sent again after a failed response, never make two.
@@ -232,24 +232,18 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   // The account's registration of this target on the chain, when there is one already: the one this challenge created
   // (its code sent again), or one made meanwhile through another challenge or a verifiedTargetToken (only register
   // checks for a registration, before the code is sent). It is answered, and no second one is created.
-  let registration = await prisma.authRegistration.findFirst({
-    where: {
-      account: registrationRequest.account,
-      chainId: registrationRequest.chainId,
-      channel: registrationRequest.channel,
-      target: registrationRequest.target,
-    }
-  });
-  if (registration) {
-    log.info(
-      {
-        challengeId: registrationRequest.id, registrationId: registration.id, account: registration.account, chainId: registration.chainId,
-        channel: registration.channel, ...metadataLogFields(pendingMetadata),
-      },
-      firstSubmit === 1 ? "auth registration already exists" : "auth registration submitted again"
-    );
-  } else if (firstSubmit === 1) {
-    try {
+  let registration;
+  let created = false;
+  try {
+    registration = await prisma.authRegistration.findFirst({
+      where: {
+        account: registrationRequest.account,
+        chainId: registrationRequest.chainId,
+        channel: registrationRequest.channel,
+        target: registrationRequest.target,
+      }
+    });
+    if (!registration && firstSubmit === 1) {
       registration = await storeRegistration(
         guardian,
         registrationRequest.account,
@@ -257,9 +251,13 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
         registrationRequest.channel,
         registrationRequest.target,
       );
-    } catch (error) {
-      // Not created: the claim is given back, so that the same code can be sent again. If that fails too, the request
-      // stays verified without a registration, and the target is registered again with a new code.
+      created = true;
+    }
+  } catch (error) {
+    // Neither found nor created: the submit that made the claim gives it back, so that the same code can be sent
+    // again. If that fails too, the request stays verified without a registration, and the target is registered again
+    // with a new code.
+    if (firstSubmit === 1) {
       try {
         await prisma.authRegistrationRequest.updateMany({
           data: {verified: false, verifiedAt: null},
@@ -268,8 +266,15 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
       } catch (err) {
         log.warn({ challengeId: registrationRequest.id, err }, "registration challenge not released");
       }
-      throw error;
     }
+    throw error;
+  }
+  if (!registration) {
+    // Submitted before, and no registration: it was deleted since, or the first submit has not created it yet (or
+    // stopped before it did). The target is then registered again, with a new code.
+    throw new ApiError(httpStatus.BAD_REQUEST, `challengeId already verified`);
+  }
+  if (created) {
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
@@ -278,9 +283,13 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
       "auth registration created"
     );
   } else {
-    // Submitted before, and no registration: it was deleted since, or the first submit has not created it yet (or
-    // stopped before it did). The target is then registered again, with a new code.
-    throw new ApiError(httpStatus.BAD_REQUEST, `challengeId already verified`);
+    log.info(
+      {
+        challengeId: registrationRequest.id, registrationId: registration.id, account: registration.account, chainId: registration.chainId,
+        channel: registration.channel, ...metadataLogFields(pendingMetadata),
+      },
+      firstSubmit === 1 ? "auth registration already exists" : "auth registration submitted again"
+    );
   }
   // The metadata sent with register: written after the registration, and cleared once written, not before. A submit
   // that fails here keeps it on the request, and the same code sent again stores it.

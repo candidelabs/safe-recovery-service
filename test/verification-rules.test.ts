@@ -1380,6 +1380,31 @@ describe("account metadata (in-memory tables)", () => {
         expect(linesOf("auth registration created")).toEqual([expect.objectContaining({registrationId, verification: "otp"})]);
     });
 
+    test("a /submit whose registration lookup fails gives the challenge back: the same code sent again creates it", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const code = codeFor(target);
+        const error = new Error("connection lost");
+        mockHooks.push({table: "authRegistration", method: "findFirst", error});
+
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(mockHooks).toEqual([]);
+        expect(requestRow(challengeId)).toEqual(expect.objectContaining({verified: false, verifiedAt: null}));
+        expect(registrationsOf(target)).toEqual([]);
+
+        const [registrationId] = await submitRegistrationChallenge(challengeId, code);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(mockTables.authRegistration.find((row) => row.target === target).id).toBe(registrationId);
+
+        // a later submit made no claim: when its lookup fails, it has none to give back
+        mockHooks.push({table: "authRegistration", method: "findFirst", error});
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(requestRow(challengeId).verified).toBe(true);
+        expect(await submitRegistrationChallenge(challengeId, code)).toEqual([registrationId, GUARDIAN]);
+        expect(registrationsOf(target)).toHaveLength(1);
+    });
+
     test("a challenge that cannot be given back is logged, and the failure answered is the registration's", async () => {
         const account = newAccount();
         const target = newTarget();
