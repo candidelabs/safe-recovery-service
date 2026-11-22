@@ -1326,6 +1326,67 @@ describe("account metadata (in-memory tables)", () => {
         expect(linesOf("auth registration submitted again")).toEqual([expect.objectContaining({challengeId, registrationId, metadataEntries: 1})]);
     });
 
+    test("a /submit whose registration cannot be created gives the challenge back: the same code sent again creates it", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target, undefined, "email", {label: "Savings"}) as {challengeId: string};
+        const code = codeFor(target);
+        const error = new Error("connection lost");
+        mockHooks.push({table: "authRegistration", method: "create", error});
+        mockLogLines.length = 0;
+
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(registrationsOf(target)).toEqual([]);
+        expect(requestRow(challengeId)).toEqual(expect.objectContaining({verified: false, verifiedAt: null, metadata: {label: "Savings"}}));
+        expect(mockLogLines).toEqual([]);
+
+        const [registrationId] = await submitRegistrationChallenge(challengeId, code);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(requestRow(challengeId).verified).toBe(true);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(linesOf("auth registration created")).toEqual([expect.objectContaining({registrationId, verification: "otp"})]);
+    });
+
+    test("a challenge that cannot be given back is logged, and the failure answered is the registration's", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const code = codeFor(target);
+        const error = new Error("connection lost");
+        const releaseError = new Error("still lost");
+        mockHooks.push(
+            {table: "authRegistration", method: "create", error},
+            {table: "authRegistrationRequest", method: "updateMany", matches: ({data}) => data.verified === false, error: releaseError},
+        );
+        mockLogLines.length = 0;
+
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(mockHooks).toEqual([]);
+        expect(linesOf("registration challenge not released")).toEqual([{component: "auth", challengeId, err: releaseError}]);
+        // verified without a registration: the target is registered again, with a new code
+        expect(await statusOf(submitRegistrationChallenge(challengeId, code))).toEqual([400, "challengeId already verified"]);
+        expect(registrationsOf(target)).toEqual([]);
+    });
+
+    test("the guardian's address is read before the challenge is claimed, so a signer that fails leaves it unclaimed", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const code = codeFor(target);
+        const error = new Error("signer unavailable");
+        const lookup = jest.spyOn(Signers.instance().getSigner("signer")!, "signer").mockRejectedValueOnce(error);
+
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(requestRow(challengeId).verified).toBe(false);
+        expect(registrationsOf(target)).toEqual([]);
+        // no claim was made, so none had to be given back
+        expect((mockTables.authRegistrationRequest ?? []).find((row) => row.id === challengeId).verifiedAt).toBeNull();
+
+        await submitRegistrationChallenge(challengeId, code);
+        expect(registrationsOf(target)).toHaveLength(1);
+        lookup.mockRestore();
+    });
+
     test("a register with a token that fails to write the metadata has logged the registration it created", async () => {
         const account = newAccount();
         const target = newTarget();

@@ -67,13 +67,14 @@ const readAccountMetadata = async (account: string, chainId: number): Promise<Ac
 // The log field for metadata that was sent or written: its number of entries, never the object.
 const metadataLogFields = (metadata?: AccountMetadata) => metadata === undefined ? {} : {metadataEntries: Object.keys(metadata).length};
 
+// The address of the network's guardian, which a registration is bound to.
+const registrationGuardian = (network: Network) => Signers.instance().getSigner(network.guardian!)!.signer();
+
 // The registration that /submit (after its code) and register (with a verifiedTargetToken) create. Both then log it and
 // write the account's metadata when some was sent (left out, the stored one is kept). The registration comes first: a
 // request that stops in between leaves a registration with its previous metadata, never metadata without a
 // registration.
-const storeRegistration = async (network: Network, account: string, chainId: number, channel: string, target: string) => {
-  const signer = Signers.instance().getSigner(network.guardian!)!;
-  const guardian = await signer.signer();
+const storeRegistration = (guardian: string, account: string, chainId: number, channel: string, target: string) => {
   return prisma.authRegistration.create(
     {
       data: {
@@ -137,7 +138,7 @@ export const createRegistration = async (
   //
   if (verification) {
     // the target was verified: no second code
-    const registration = await storeRegistration(network, account, chainId, channel, target);
+    const registration = await storeRegistration(await registrationGuardian(network), account, chainId, channel, target);
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId, channel, verification: "token",
@@ -220,6 +221,8 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     });
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid challenge`);
   }
+  // read before the claim below, so that only the insert stands between the claim and the registration
+  const guardian = await registrationGuardian(network);
   // Only the submit that turns `verified` from false to true creates the registration (a conditional updateMany, as in
   // verification.service.ts): two submits at once, or the same code sent again after a failed response, never make two.
   const {count: firstSubmit} = await prisma.authRegistrationRequest.updateMany({
@@ -228,13 +231,27 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   });
   let registration;
   if (firstSubmit === 1) {
-    registration = await storeRegistration(
-      network,
-      registrationRequest.account,
-      registrationRequest.chainId,
-      registrationRequest.channel,
-      registrationRequest.target,
-    );
+    try {
+      registration = await storeRegistration(
+        guardian,
+        registrationRequest.account,
+        registrationRequest.chainId,
+        registrationRequest.channel,
+        registrationRequest.target,
+      );
+    } catch (error) {
+      // Not created: the claim is given back, so that the same code can be sent again. If that fails too, the request
+      // stays verified without a registration, and the target is registered again with a new code.
+      try {
+        await prisma.authRegistrationRequest.updateMany({
+          data: {verified: false, verifiedAt: null},
+          where: {id: registrationRequest.id, verified: true}
+        });
+      } catch (err) {
+        log.warn({ challengeId: registrationRequest.id, err }, "registration challenge not released");
+      }
+      throw error;
+    }
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
