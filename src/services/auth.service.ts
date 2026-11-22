@@ -8,35 +8,51 @@ import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
 import {LookupAccount, lookupAccounts} from "../utils/account-lookup";
-import {AccountMetadata, storedAccountMetadata} from "../utils/account-metadata";
+import {AccountMetadata, mergeAccountMetadata, storedAccountMetadata} from "../utils/account-metadata";
 import {checkRecoveryModule} from "./recovery-modules.service";
 import {requireVerifiedTarget} from "./verification.service";
 import logger from "../utils/logger";
 
 const log = logger.child({ component: "auth" });
 
+// How many times a metadata write reads the row again after finding it changed (or created) by another write.
+const ACCOUNT_METADATA_WRITE_ATTEMPTS = 3;
+
 // The metadata of an account on a chain (src/utils/account-metadata.ts), one AuthAccountMetadata row shared by its
-// registrations there: replaced whole, and removed when empty. The object, its keys and its values are never logged:
-// log lines carry metadataEntries, the number of entries.
-const writeAccountMetadata = async (account: string, chainId: number, metadata: AccountMetadata) => {
+// registrations there. A write replaces the app's keys whole and keeps the service's reserved keys
+// (mergeAccountMetadata); the row is deleted when nothing is left. No transaction: the row is changed only if its
+// updatedAt is still the one read (a conditional updateMany, as in verification.service.ts), so a write made in between
+// is merged, not lost: the row is read again. Returns the object as stored. The object, its keys and its values are
+// never logged: log lines carry metadataEntries, the number of entries sent.
+const writeAccountMetadata = async (account: string, chainId: number, metadata: AccountMetadata): Promise<AccountMetadata> => {
   account = account.toLowerCase();
-  if (Object.keys(metadata).length === 0) {
-    await prisma.authAccountMetadata.deleteMany({where: {account, chainId}});
-    return;
+  for (let attempt = 0; attempt < ACCOUNT_METADATA_WRITE_ATTEMPTS; attempt++) {
+    const row = await prisma.authAccountMetadata.findFirst({
+      where: {account, chainId},
+      select: {metadata: true, updatedAt: true},
+    });
+    const merged = mergeAccountMetadata(storedAccountMetadata(row?.metadata), metadata);
+    const empty = Object.keys(merged).length === 0;
+    if (!row) {
+      if (empty) return merged;
+      try {
+        await prisma.authAccountMetadata.create({data: {account, chainId, metadata: merged}});
+        return merged;
+      } catch (e) {
+        // created by another write in between (email and phone registered in parallel): merge into it
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") continue;
+        throw e;
+      }
+    }
+    const unchanged = {account, chainId, updatedAt: row.updatedAt};
+    // set, and later than the value read even within the same millisecond, so that every write changes it
+    const updatedAt = new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1));
+    const {count} = empty
+      ? await prisma.authAccountMetadata.deleteMany({where: unchanged})
+      : await prisma.authAccountMetadata.updateMany({where: unchanged, data: {metadata: merged, updatedAt}});
+    if (count === 1) return merged;
   }
-  const upsert = () => prisma.authAccountMetadata.upsert({
-    where: {account_chainId: {account, chainId}},
-    create: {account, chainId, metadata},
-    update: {metadata},
-  });
-  try {
-    await upsert();
-  } catch (e) {
-    // Two first writes at once (email and phone registered in parallel): the other one created the row, so this one
-    // becomes an update. Anything else, or a second conflict, propagates.
-    if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002")) throw e;
-    await upsert();
-  }
+  throw new Error("account metadata not written: it kept changing while being written");
 };
 
 const readAccountMetadata = async (account: string, chainId: number): Promise<AccountMetadata> => {
@@ -275,8 +291,8 @@ export const deleteRegistration = async (registrationId: string, message: string
   let statement = MessageStatements["auth-delete"];
   statement = statement.replace("{{id}}", authRegistration.id);
   await validateSIWEMessage(message, authRegistration.account, authRegistration.chainId, statement, signature);
-  // The account's metadata on this chain goes with its last registration there, and first: a request that stops in
-  // between leaves a registration without metadata, never metadata without a registration.
+  // The account's metadata on this chain, reserved keys included, goes with its last registration there, and first: a
+  // request that stops in between leaves a registration without metadata, never metadata without a registration.
   const account = authRegistration.account.toLowerCase();
   const registrationCount = await prisma.authRegistration.count({where: {account, chainId: authRegistration.chainId}});
   if (registrationCount <= 1) {
@@ -289,9 +305,10 @@ export const deleteRegistration = async (registrationId: string, message: string
   return true;
 };
 
-// POST /v1/auth/metadata: replaces the metadata of an account on a chain ({} removes it), signed by the account. The
-// SIWE check comes before the registration check, so the endpoint does not tell an unsigned caller whether an account
-// is registered. No guardian check: the metadata stays editable if the network's guardian is removed from the config.
+// POST /v1/auth/metadata: replaces the app's metadata of an account on a chain ({} removes it; the service's reserved
+// keys stay), signed by the account. The SIWE check comes before the registration check, so the endpoint does not tell
+// an unsigned caller whether an account is registered. No guardian check: the metadata stays editable if the network's
+// guardian is removed from the config.
 export const setAccountMetadata = async (
   account: string,
   chainId: number,
@@ -308,12 +325,13 @@ export const setAccountMetadata = async (
   if (registrationCount === 0) {
     throw new ApiError(httpStatus.NOT_FOUND, `No registrations found for this account on this chainId`);
   }
-  await writeAccountMetadata(account, chainId, metadata);
+  const stored = await writeAccountMetadata(account, chainId, metadata);
   log.info(
     { account, chainId, metadataEntries: Object.keys(metadata).length, accountDeployed: !counterfactual },
     "auth account metadata updated"
   );
-  return metadata;
+  // as stored: with the service's reserved keys, if any
+  return stored;
 };
 
 // The accounts registered with the target a verifiedTargetToken proves (POST /v1/auth/accounts), with when each was

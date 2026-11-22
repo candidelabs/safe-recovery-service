@@ -54,11 +54,12 @@ import {createSubscription} from "../src/services/alerts.service";
 // (test/verification.test.ts signs for real on Postgres and Mailpit, test/alerts.test.ts subscribes on a chain).
 
 // In-memory tables for the queries the services make (plain values, equals, in, gt/gte/lt; increment and
-// decrement; Prisma.DbNull stored as null; a compound unique key in upsert). Each call runs to completion before the
-// next, like one SQL statement, so parallel submits interleave between calls only.
+// decrement; Prisma.DbNull stored as null). Each call runs to completion before the next, like one SQL statement, so
+// parallel submits interleave between calls only.
 const mockTables: Record<string, any[]> = {};
-// Queued failures: the next call of the table's method that matches throws the error (each entry once).
-const mockFailures: {table: string, method: string, matches?: (args: any) => boolean, error: Error}[] = [];
+// Queued hooks: the next call of the table's method that matches first runs `before` (a write made by someone else in
+// between), then throws `error` when there is one (each entry once).
+const mockHooks: {table: string, method: string, matches?: (args: any) => boolean, before?: () => void, error?: Error}[] = [];
 jest.mock('../src/config/prisma-client', () => {
     const {Prisma} = jest.requireActual("@prisma/client");
     const satisfies = (value: any, condition: any): boolean => {
@@ -82,9 +83,6 @@ jest.mock('../src/config/prisma-client', () => {
         const remove = (found: any[]) => {
             mockTables[name] = rows().filter((row) => !found.includes(row));
         };
-        // a compound unique key ({account_chainId: {account, chainId}}) as its fields
-        const unique = (where: Record<string, any>) => Object.fromEntries(Object.entries(where).flatMap(([key, value]) =>
-            key.includes("_") && value !== null && typeof value === "object" ? Object.entries(value) : [[key, value]]));
         const methods: Record<string, (args: any) => Promise<any>> = {
             findFirst: async ({where, orderBy}: any) => {
                 const found = filter(where);
@@ -116,12 +114,6 @@ jest.mock('../src/config/prisma-client', () => {
                 for (const row of found) apply(row, data);
                 return {count: found.length};
             },
-            upsert: async ({where, create, update}: any) => {
-                const row = filter(unique(where))[0];
-                if (!row) return methods.create({data: create});
-                apply(row, {...update, updatedAt: new Date()});
-                return row;
-            },
             delete: async ({where}: any) => {
                 const row = filter(where)[0];
                 if (!row) throw new Error(`no ${name} row to delete`);
@@ -135,8 +127,12 @@ jest.mock('../src/config/prisma-client', () => {
             },
         };
         return Object.fromEntries(Object.entries(methods).map(([method, call]) => [method, async (args: any) => {
-            const failure = mockFailures.findIndex((f) => f.table === name && f.method === method && (f.matches?.(args) ?? true));
-            if (failure >= 0) throw mockFailures.splice(failure, 1)[0].error;
+            const hook = mockHooks.findIndex((h) => h.table === name && h.method === method && (h.matches?.(args) ?? true));
+            if (hook >= 0) {
+                const {before, error} = mockHooks.splice(hook, 1)[0];
+                before?.();
+                if (error) throw error;
+            }
             return call(args);
         }]));
     };
@@ -919,8 +915,9 @@ describe("account metadata (in-memory tables)", () => {
     });
     const setMetadata = (account: string, chainId: number, metadata: AccountMetadata) =>
         setAccountMetadata(account, chainId, metadata, "siwe message", "0x1234");
+    const GAVE_UP = new Error("account metadata not written: it kept changing while being written");
     afterEach(() => {
-        mockFailures.length = 0;
+        mockHooks.length = 0;
     });
 
     test("register with a token stores it for the account (lower case) and chain, and the lookup returns it", async () => {
@@ -1094,40 +1091,93 @@ describe("account metadata (in-memory tables)", () => {
         expect(await listAccounts(token)).toEqual([{account: account.toLowerCase(), chainId: CHAIN_A, registeredAt: createdAt.toISOString(), metadata: {}}]);
     });
 
-    test("a first write that meets the unique constraint is retried once; a second conflict or another error propagates", async () => {
+    test("a first write that meets the unique constraint reads the row again; it gives up after 3 tries; another error propagates", async () => {
         const account = newAccount();
         const target = newTarget();
         const token = await verify(target);
-        mockFailures.push({table: "authAccountMetadata", method: "upsert", error: conflict()});
+        mockHooks.push({table: "authAccountMetadata", method: "create", error: conflict()});
         await registerWith(account, CHAIN_A, target, token, "email", {label: "Savings"});
         expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
-        expect(mockFailures).toEqual([]);
+        expect(mockHooks).toEqual([]);
 
-        // twice: the registration exists, the metadata is unchanged, the request fails (500)
+        // three times: the registration exists, no metadata is written, the request fails (500)
+        const other = newAccount();
         const second = newTarget();
         const secondToken = await verify(second);
-        mockFailures.push(
-            {table: "authAccountMetadata", method: "upsert", error: conflict()},
-            {table: "authAccountMetadata", method: "upsert", error: conflict()},
-        );
-        const failed = await registerWith(account, CHAIN_A, second, secondToken, "email", {label: "Spending"}).catch((e: unknown) => e);
-        expect(failed).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
-        expect((failed as Prisma.PrismaClientKnownRequestError).code).toBe("P2002");
+        mockHooks.push(...[1, 2, 3].map(() => ({table: "authAccountMetadata", method: "create", error: conflict()})));
+        const failed = await registerWith(other, CHAIN_A, second, secondToken, "email", {label: "Spending"}).catch((e: unknown) => e);
+        expect(failed).toEqual(GAVE_UP);
         expect(registrationsOf(second)).toHaveLength(1);
-        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
-        expect(mockFailures).toEqual([]);
+        expect(metadataRowsOf(other)).toEqual([]);
+        expect(mockHooks).toEqual([]);
 
         // any other error is not retried
         const third = newTarget();
         const thirdToken = await verify(third);
         const error = new Error("connection lost");
-        mockFailures.push(
-            {table: "authAccountMetadata", method: "upsert", error},
-            {table: "authAccountMetadata", method: "upsert", error: conflict()},
+        mockHooks.push(
+            {table: "authAccountMetadata", method: "create", error},
+            {table: "authAccountMetadata", method: "create", error: conflict()},
         );
-        expect(await registerWith(account, CHAIN_A, third, thirdToken, "email", {label: "Spending"}).catch((e: unknown) => e)).toBe(error);
-        expect(mockFailures).toHaveLength(1);
-        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(await registerWith(newAccount(), CHAIN_A, third, thirdToken, "email", {label: "Spending"}).catch((e: unknown) => e)).toBe(error);
+        expect(mockHooks).toHaveLength(1);
+    });
+
+    test("a write made between the read and the update is not lost: the row is read again, up to 3 times", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target), "email", {label: "Savings"});
+        const row = metadataRowsOf(account)[0];
+        // the service stores a reserved key in between
+        const serviceWrite = (value: string) => () => {
+            row.metadata = {...row.metadata, _service: value};
+            row.updatedAt = new Date(row.updatedAt.getTime() + 1);
+        };
+        mockHooks.push({table: "authAccountMetadata", method: "updateMany", before: serviceWrite("s")});
+        expect(await setMetadata(account, CHAIN_A, {label: "Spending"})).toEqual({_service: "s", label: "Spending"});
+        expect(metadataOf(account, CHAIN_A)).toEqual({_service: "s", label: "Spending"});
+        expect(mockHooks).toEqual([]);
+
+        // a row that keeps changing: nothing of this write is stored
+        mockHooks.push(...[1, 2, 3].map((i) => ({table: "authAccountMetadata", method: "updateMany", before: serviceWrite(`s${i}`)})));
+        expect(await setMetadata(account, CHAIN_A, {label: "Lost"}).catch((e: unknown) => e)).toEqual(GAVE_UP);
+        expect(metadataOf(account, CHAIN_A)).toEqual({_service: "s3", label: "Spending"});
+        expect(mockHooks).toEqual([]);
+    });
+
+    test("writes keep the service's reserved keys and replace the app's keys; {} removes the app's keys only", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const token = await verify(target);
+        const {registrationId: first} = await registerWith(account, CHAIN_A, target, token, "email", {label: "Savings", "app:id": "1"}) as {registrationId: string};
+        // a key the service stored: returned like any other
+        metadataRowsOf(account)[0].metadata = {label: "Savings", "app:id": "1", _service: "s"};
+        expect(await listAccounts(token)).toEqual([entry(account.toLowerCase(), CHAIN_A, {label: "Savings", "app:id": "1", _service: "s"})]);
+
+        expect(await setMetadata(account, CHAIN_A, {label: "Spending"})).toEqual({_service: "s", label: "Spending"});
+        const otherTarget = newTarget();
+        const {registrationId: second} = await registerWith(account, CHAIN_A, otherTarget, await verify(otherTarget), "email", {label: "Third"}) as {registrationId: string};
+        expect(metadataOf(account, CHAIN_A)).toEqual({_service: "s", label: "Third"});
+
+        // the row stays while it holds a reserved key
+        expect(await setMetadata(account, CHAIN_A, {})).toEqual({_service: "s"});
+        expect(metadataRowsOf(account)).toEqual([expect.objectContaining({metadata: {_service: "s"}})]);
+        expect(await setMetadata(account, CHAIN_A, {})).toEqual({_service: "s"});
+        expect((await fetchRegistrations(account, CHAIN_A, "siwe message", "0x1234")).metadata).toEqual({_service: "s"});
+
+        // and goes with the account's last registration on the chain
+        await deleteRegistration(first, "siwe message", "0x1234");
+        expect(metadataOf(account, CHAIN_A)).toEqual({_service: "s"});
+        await deleteRegistration(second, "siwe message", "0x1234");
+        expect(metadataRowsOf(account)).toEqual([]);
+    });
+
+    test("{} writes nothing for an account without metadata", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target));
+        expect(await setMetadata(account, CHAIN_A, {})).toEqual({});
+        expect(metadataRowsOf(account)).toEqual([]);
     });
 
     test("a pending value that cannot be cleared is logged, and /submit still answers", async () => {
@@ -1135,7 +1185,7 @@ describe("account metadata (in-memory tables)", () => {
         const target = newTarget();
         const {challengeId} = await registerWith(account, CHAIN_A, target, undefined, "email", {label: "Savings"}) as {challengeId: string};
         const error = new Error("connection lost");
-        mockFailures.push({table: "authRegistrationRequest", method: "update", matches: ({data}) => data.metadata === Prisma.DbNull, error});
+        mockHooks.push({table: "authRegistrationRequest", method: "update", matches: ({data}) => data.metadata === Prisma.DbNull, error});
         mockLogLines.length = 0;
 
         const [registrationId, guardianAddress] = await submitRegistrationChallenge(challengeId, codeFor(target));
@@ -1215,14 +1265,14 @@ describe("account metadata (in-memory tables)", () => {
         expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
     });
 
-    test("POST /v1/auth/metadata retries a unique-constraint conflict once", async () => {
+    test("POST /v1/auth/metadata reads the row again after a unique-constraint conflict", async () => {
         const account = newAccount();
         const target = newTarget();
         await registerWith(account, CHAIN_A, target, await verify(target));
-        mockFailures.push({table: "authAccountMetadata", method: "upsert", error: conflict()});
+        mockHooks.push({table: "authAccountMetadata", method: "create", error: conflict()});
         expect(await setMetadata(account, CHAIN_A, {label: "Savings"})).toEqual({label: "Savings"});
         expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
-        expect(mockFailures).toEqual([]);
+        expect(mockHooks).toEqual([]);
     });
 
     test("log lines carry the number of entries, never the object, a key or a value", async () => {

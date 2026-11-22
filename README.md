@@ -339,12 +339,12 @@ The rules are checked in this order and the first one broken is answered. No mes
 
 One key has a documented meaning: `label`, the name the user gave the account. The service never looks at it. Prefix your app's own keys (`myapp.profileId`).
 
-Keys starting with `_` are reserved for the service, and a request that sends one is refused. The service stores none today. If it ever does, reads will return them as part of the object and writes will keep them. Send only your app's own keys: drop any key starting with `_` before writing an object back.
+Keys starting with `_` are reserved for the service, and a request that sends one is refused. The service stores none today. Reads return them as part of the object, and writes keep them: a write replaces the app's keys only, and `{}` removes the app's keys only. They do not count against the limits above, which apply to what an app sends. Send only your app's own keys: drop any key starting with `_` before writing an object back.
 
 **Writing it.** `POST /v1/auth/register` takes an optional `metadata`:
 
 * With a `verifiedTargetToken`, it is stored with the registration. Without, it is kept with the pending request and stored when `POST /v1/auth/submit` creates the registration. A request that fails (an existing registration, a refused token, a SIWE error) stores nothing.
-* Present, it replaces the account's object on that chain whole (no merge), and `{}` removes it. Left out, the stored object is kept, so adding a phone number to an account keeps its label.
+* Present, it replaces the account's object on that chain whole (no merge; the service's reserved keys stay), and `{}` removes it. Left out, the stored object is kept, so adding a phone number to an account keeps its label.
 * The account's SIWE signature authorizes the request, with the `register` statement as before. A `verifiedTargetToken` alone never writes metadata.
 
 `POST /v1/auth/metadata` changes it later (see below).
@@ -361,7 +361,7 @@ Registrations made before this version have `metadata: {}` until their app sets 
 {"account": "0x...", "chainId": 11155111, "metadata": {"label": "Savings"}, "message": "<SIWE message>", "signature": "0x..."}
 ```
 
-Replaces the account's metadata on the chain, whole; `{}` removes it. The response is `{"metadata": {"label": "Savings"}}`, the object as stored. The account signs the SIWE message (ERC-6492 accepted, as for the other auth endpoints) with this statement:
+Replaces the account's metadata on the chain, whole; `{}` removes it. The service's reserved keys stay. The response is `{"metadata": {"label": "Savings"}}`, the object as stored, reserved keys included. The account signs the SIWE message (ERC-6492 accepted, as for the other auth endpoints) with this statement:
 
 `I request to update the metadata stored for my account with Safe Recovery Service`
 
@@ -383,7 +383,7 @@ Guidance for apps and interfaces:
 
 Best effort (there is no transaction):
 
-* Two first writes for one account and chain at once (email and phone registered in parallel, both with `metadata`): the second one meets the unique constraint and is retried once as an update.
+* Writes to one account and chain at once (email and phone registered in parallel, both with `metadata`, or a `POST /v1/auth/metadata` meanwhile): a write changes the row only if it is still as the write read it, and reads it again otherwise, so a write made in between is merged, not lost (the app's keys of the last write win). After 3 tries the request answers 500 and writes nothing.
 * A `register` or `/submit` that fails between creating the registration and writing the metadata answers 500 and leaves the registration with the stored metadata unchanged; sent again, it gets 409, and the app sets the metadata with `POST /v1/auth/metadata`.
 * When the account's last registration on the chain is deleted while a `register` of the same account and chain is in flight, the new registration can end up without the metadata it sent.
 * When it is deleted after a `POST /v1/auth/metadata` passed its registration check and before it writes, the metadata is left without a registration. It is never returned (both reads start from a registration), but it reappears if the account registers again on that chain without `metadata`.

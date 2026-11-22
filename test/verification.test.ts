@@ -523,6 +523,30 @@ describe("account metadata", () => {
         });
     });
 
+    it("should keep the service's reserved keys when the app writes its metadata", async () => {
+        const target = newTarget();
+        const token = await verify(target);
+        const wallet = ethers.Wallet.createRandom();
+        const account = wallet.address.toLowerCase();
+        await register({...await registerBody(wallet, CHAIN_A, target), verifiedTargetToken: token, metadata: {label: "Savings"}}).expect(200);
+        // a key the service stored
+        await prisma.authAccountMetadata.update({
+            where: {account_chainId: {account, chainId: CHAIN_A}},
+            data: {metadata: {label: "Savings", _service: "s"}},
+        });
+
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {label: "Spending"}}).expect(200).then((response) => {
+            expect(response.body).toEqual({metadata: {_service: "s", label: "Spending"}});
+        });
+        await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {}}).expect(200).then((response) => {
+            expect(response.body).toEqual({metadata: {_service: "s"}});
+        });
+        expect((await metadataRow(wallet, CHAIN_A))?.metadata).toEqual({_service: "s"});
+        await listAccounts(token).expect(200).then((response) => {
+            expect(response.body).toEqual({accounts: [entry(account, CHAIN_A, {_service: "s"})]});
+        });
+    });
+
     it("should refuse POST /v1/auth/metadata without a registration (404), invalid metadata (400) and another key's signature (403)", async () => {
         const wallet = ethers.Wallet.createRandom();
         await setMetadata({...await signedBody(wallet, CHAIN_A, METADATA_STATEMENT), metadata: {label: "x"}}).expect(404).then((response) => {

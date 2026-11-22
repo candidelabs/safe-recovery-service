@@ -24,9 +24,10 @@
 // Nothing is trimmed, normalized or case-folded, and key order is not kept (jsonb reorders keys).
 //
 // Keys starting with an underscore are reserved for the service, and a request that sends one is refused. None is
-// stored today. If the service ever stores such keys, reads return them as part of the object and writes keep them;
-// relaxing the refusal then (accepting them sent back unchanged, or ignoring them) breaks no client, while tightening
-// a looser rule would.
+// stored today. Reads return them as part of the object, and a write keeps them (mergeAccountMetadata): it replaces
+// the app's keys only. The limits apply to what an app sends, so reserved keys do not count against them. Relaxing the
+// refusal later (accepting them sent back unchanged, or ignoring them) breaks no client, while tightening a looser rule
+// would.
 
 /** An account's metadata: string keys to string values. `{}` means none. */
 export type AccountMetadata = Record<string, string>;
@@ -62,6 +63,9 @@ const PROBLEMS = {
   bytes: `must be at most ${ACCOUNT_METADATA_MAX_BYTES} bytes as JSON`,
 };
 
+/** Whether a key is reserved for the service. */
+export const isReservedAccountMetadataKey = (key: string) => key.startsWith(ACCOUNT_METADATA_RESERVED_KEY_PREFIX);
+
 // A JSON object: not null, not an array, not a class instance.
 const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -78,7 +82,7 @@ export function accountMetadataProblem(value: unknown): string | undefined {
   if (!isPlainObject(value)) return PROBLEMS.type;
   const entries = Object.entries(value);
   if (entries.length > ACCOUNT_METADATA_MAX_ENTRIES) return PROBLEMS.entries;
-  if (entries.some(([key]) => key.startsWith(ACCOUNT_METADATA_RESERVED_KEY_PREFIX))) return PROBLEMS.reservedKey;
+  if (entries.some(([key]) => isReservedAccountMetadataKey(key))) return PROBLEMS.reservedKey;
   if (!entries.every(([key]) => ACCOUNT_METADATA_KEY_PATTERN.test(key))) return PROBLEMS.key;
   const values = entries.map(([, entry]) => entry);
   if (!values.every((entry): entry is string => typeof entry === "string" && entry.length > 0)) return PROBLEMS.value;
@@ -96,4 +100,16 @@ export function storedAccountMetadata(value: unknown): AccountMetadata {
   if (!isPlainObject(value)) return {};
   // Object.fromEntries defines own properties, whatever the key
   return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+}
+
+/**
+ * The object a write stores: the reserved keys of the stored object, which an app cannot change, and the app's keys
+ * from `sent`, which replace all the app's keys stored before (no merge between them). A reserved key in `sent`, which
+ * validation refuses, is dropped. `{}` as the result means the row is deleted.
+ */
+export function mergeAccountMetadata(stored: AccountMetadata, sent: AccountMetadata): AccountMetadata {
+  return Object.fromEntries([
+    ...Object.entries(stored).filter(([key]) => isReservedAccountMetadataKey(key)),
+    ...Object.entries(sent).filter(([key]) => !isReservedAccountMetadataKey(key)),
+  ]);
 }

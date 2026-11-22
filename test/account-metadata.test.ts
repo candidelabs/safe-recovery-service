@@ -10,6 +10,8 @@ import {
     ACCOUNT_METADATA_MAX_VALUE_LENGTH,
     ACCOUNT_METADATA_RESERVED_KEY_PREFIX,
     accountMetadataProblem,
+    isReservedAccountMetadataKey,
+    mergeAccountMetadata,
     storedAccountMetadata,
 } from "../src/utils/account-metadata";
 import {lookupAccounts} from "../src/utils/account-lookup";
@@ -141,6 +143,29 @@ describe("storedAccountMetadata", () => {
         const stored = storedAccountMetadata(JSON.parse("{\"__proto__\": \"x\", \"label\": \"y\"}"));
         expect(Object.getPrototypeOf(stored)).toBe(Object.prototype);
         expect(Object.keys(stored)).toEqual(["__proto__", "label"]);
+    });
+});
+
+describe("mergeAccountMetadata", () => {
+    test("a key is reserved when it starts with an underscore", () => {
+        expect(isReservedAccountMetadataKey("_service")).toBe(true);
+        expect(isReservedAccountMetadataKey("_")).toBe(true);
+        expect(isReservedAccountMetadataKey("label")).toBe(false);
+        expect(isReservedAccountMetadataKey("a_b")).toBe(false);
+    });
+
+    test("keeps the stored reserved keys and replaces the app's keys whole", () => {
+        expect(mergeAccountMetadata({_service: "s", label: "Old", other: "x"}, {label: "New"})).toEqual({_service: "s", label: "New"});
+        expect(mergeAccountMetadata({}, {label: "New"})).toEqual({label: "New"});
+    });
+
+    test("{} keeps the reserved keys only, and gives {} without them", () => {
+        expect(mergeAccountMetadata({_service: "s", label: "Old"}, {})).toEqual({_service: "s"});
+        expect(mergeAccountMetadata({label: "Old"}, {})).toEqual({});
+    });
+
+    test("an app cannot set or change a reserved key", () => {
+        expect(mergeAccountMetadata({_service: "s"}, {_service: "changed", _other: "x", label: "y"})).toEqual({_service: "s", label: "y"});
     });
 });
 
