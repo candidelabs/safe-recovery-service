@@ -17,6 +17,7 @@ import {isSensitiveKey} from "../src/logging";
 import safeSource from "../src/utils/source/Safe.json";
 import moduleSourceV0_1_0 from "../src/utils/source/SocialRecoveryModule.v0.1.0.json";
 import moduleSourceV0_2_0 from "../src/utils/source/SocialRecoveryModule.v0.2.0.json";
+import {guardianDeployment, plainDeployment, STAND_IN_CONTRACTS} from "./guardian-deployment";
 
 dotenv.config();
 
@@ -209,63 +210,32 @@ describe("resolveInitData", () => {
   });
 });
 
-// Against real contracts (Safe 1.4.1, the recovery modules, Multicall3), read-only: the guardian check sees a deployment
-// that installs the guardian, and not a plain one. A wallet installs it from the initializer (setup() delegate-calls a
-// contract of its choosing), which the service treats like any other deployment: it only reads the state the deployment
-// leaves. This test builds the same state with a stand-in it can sign with ethers alone: the ERC-6492 "factory" is
-// Multicall3, batching createProxyWithNonce and then a Safe transaction, pre-signed by the owner, that enables the
-// module and adds the guardian. No valid SIWE signature is needed: the reads come back when isValidSignature fails.
+/// Against real contracts (Safe 1.4.1, the recovery modules, Multicall3), read-only: the guardian check sees a deployment
+// that installs the guardian, and not a plain one. Both are the stand-ins of test/guardian-deployment.ts, which
+// test/auth.test.ts registers over HTTP. No valid SIWE signature is needed here: the reads come back when
+// isValidSignature fails.
 const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER_1;
 (jsonRpcNodeProvider ? describe : describe.skip)("guardian check on chain (JSON_RPC_NODE_PROVIDER_1)", () => {
   jest.setTimeout(120000);
-  const SAFE_PROXY_FACTORY_1_4_1 = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67";
-  const SAFE_L2_SINGLETON_1_4_1 = "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762";
-  const COMPATIBILITY_FALLBACK_HANDLER_1_4_1 = "0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99";
-  const MULTI_SEND_CALL_ONLY_1_4_1 = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2";
-  const ZERO = ethers.constants.AddressZero;
-  const factoryInterface = new ethers.utils.Interface([
-    "function createProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
-  ]);
-  const safeInterface = new ethers.utils.Interface([
-    "function setup(address[] _owners, uint256 _threshold, address to, bytes data, address fallbackHandler, address paymentToken, uint256 payment, address paymentReceiver)",
-    "function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool)",
-    "function enableModule(address module)",
-  ]);
-  const multiSendInterface = new ethers.utils.Interface(["function multiSend(bytes transactions) payable"]);
-  const moduleInterface = new ethers.utils.Interface(moduleSourceV0_2_0.abi);
-  const multicall3Interface = new ethers.utils.Interface([
-    "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)",
-  ]);
   const modules = [MODULE_A, MODULE_B];
   const provider = new ethers.providers.StaticJsonRpcProvider(jsonRpcNodeProvider);
   const owner = ethers.Wallet.createRandom();
   const guardian = ethers.Wallet.createRandom().address;
   const hash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("not signed by the account"));
-
-  // a one-owner Safe 1.4.1 with the compatibility fallback handler, as abstractionkit-free as it gets
-  const createProxyCall = () => factoryInterface.encodeFunctionData("createProxyWithNonce", [
-    SAFE_L2_SINGLETON_1_4_1,
-    safeInterface.encodeFunctionData("setup", [[owner.address], 1, ZERO, "0x", COMPATIBILITY_FALLBACK_HANDLER_1_4_1, ZERO, 0, ZERO]),
-    ethers.BigNumber.from(ethers.utils.randomBytes(16)),
-  ]);
-  const proxyAddress = async (callData: string) =>
-    factoryInterface.decodeFunctionResult("createProxyWithNonce", await provider.call({to: SAFE_PROXY_FACTORY_1_4_1, data: callData}))[0] as string;
   const guardianCheck = async (account: string, deployment: AccountDeployment) =>
     simulateIsValidSignatureAndReads(
       provider, MULTICALL3_ADDRESS, deployment, account, hash, "0x" + "00".repeat(65), guardianSetupReads(account, guardian, modules)
     );
 
   beforeAll(async () => {
-    for (const address of [SAFE_PROXY_FACTORY_1_4_1, SAFE_L2_SINGLETON_1_4_1, COMPATIBILITY_FALLBACK_HANDLER_1_4_1, MULTI_SEND_CALL_ONLY_1_4_1, MULTICALL3_ADDRESS, ...modules]) {
+    for (const address of [...STAND_IN_CONTRACTS, ...modules]) {
       expect([address, await provider.getCode(address)]).not.toEqual([address, "0x"]);
     }
   });
 
   test("a plain deployment does not install the guardian", async () => {
-    const callData = createProxyCall();
-    const account = await proxyAddress(callData);
+    const {account, deployment} = await plainDeployment(provider, owner.address);
     expect(await provider.getCode(account)).toBe("0x");
-    const deployment = {factory: SAFE_PROXY_FACTORY_1_4_1, factoryCalldata: callData};
     const {valid, reads} = await guardianCheck(account, deployment);
     expect(valid).toBe(false);
     // the Safe exists in the simulation: it answers, with no module enabled
@@ -276,56 +246,8 @@ const jsonRpcNodeProvider = process.env.JSON_RPC_NODE_PROVIDER_1;
   });
 
   test("a deployment that enables the module and adds the guardian is found", async () => {
-    const {chainId} = await provider.getNetwork();
-    const createCall = createProxyCall();
-    const account = await proxyAddress(createCall);
+    const {account, deployment} = await guardianDeployment(provider, owner, MODULE_B, guardian);
     expect(await provider.getCode(account)).toBe("0x");
-    // the Safe transaction: delegatecall MultiSendCallOnly, which calls enableModule on the Safe, then
-    // addGuardianWithThreshold on the module (whose wallet is the caller, the Safe)
-    const packed = (to: string, data: string) => ethers.utils.solidityPack(
-      ["uint8", "address", "uint256", "uint256", "bytes"], [0, to, 0, ethers.utils.hexDataLength(data), data]
-    );
-    const transactions = ethers.utils.hexConcat([
-      packed(account, safeInterface.encodeFunctionData("enableModule", [MODULE_B])),
-      packed(MODULE_B, moduleInterface.encodeFunctionData("addGuardianWithThreshold", [guardian, 1])),
-    ]);
-    const safeTx = {
-      to: MULTI_SEND_CALL_ONLY_1_4_1,
-      value: 0,
-      data: multiSendInterface.encodeFunctionData("multiSend", [transactions]),
-      operation: 1,
-      safeTxGas: 0,
-      baseGas: 0,
-      gasPrice: 0,
-      gasToken: ZERO,
-      refundReceiver: ZERO,
-      nonce: 0,
-    };
-    const signature = await owner._signTypedData({chainId, verifyingContract: account}, {
-      SafeTx: [
-        {name: "to", type: "address"},
-        {name: "value", type: "uint256"},
-        {name: "data", type: "bytes"},
-        {name: "operation", type: "uint8"},
-        {name: "safeTxGas", type: "uint256"},
-        {name: "baseGas", type: "uint256"},
-        {name: "gasPrice", type: "uint256"},
-        {name: "gasToken", type: "address"},
-        {name: "refundReceiver", type: "address"},
-        {name: "nonce", type: "uint256"},
-      ],
-    }, safeTx);
-    const execTransaction = safeInterface.encodeFunctionData("execTransaction", [
-      safeTx.to, safeTx.value, safeTx.data, safeTx.operation, safeTx.safeTxGas, safeTx.baseGas, safeTx.gasPrice,
-      safeTx.gasToken, safeTx.refundReceiver, signature,
-    ]);
-    const deployment = {
-      factory: MULTICALL3_ADDRESS,
-      factoryCalldata: multicall3Interface.encodeFunctionData("aggregate3", [[
-        {target: SAFE_PROXY_FACTORY_1_4_1, allowFailure: false, callData: createCall},
-        {target: account, allowFailure: false, callData: execTransaction},
-      ]]),
-    };
     const {valid, reads} = await guardianCheck(account, deployment);
     expect(valid).toBe(false);
     expect(reads).toEqual([ok(FALSE), ok(FALSE), ok(TRUE), ok(TRUE)]);

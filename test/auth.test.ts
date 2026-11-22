@@ -12,6 +12,8 @@ import {
     getSafeMessageEip712Data,
 } from "abstractionkit";
 import { SiweMessage } from 'siwe';
+import {Configuration, CounterfactualAccounts, StoreInitDataPolicy} from '../src/config/config-manager';
+import {guardianDeployment, STAND_IN_CONTRACTS} from './guardian-deployment';
 
 //get values from .env
 dotenv.config()
@@ -345,49 +347,131 @@ describe('auth (counterfactual account)', ()=>{
         expect(fetchRes.body.registrations).toEqual([]); // the registration is active once its OTP is submitted
     });
 
-    // options.counterfactualAccounts.storeInitData, as getNetworkConfig reports it: "always" keeps the deployment call of
-    // an undeployed account that registers; "with-guardian" keeps it only when deploying installs the service's
-    // guardian, which abstractionkit's default initializer does not (it enables the 4337 module only); "never" skips.
-    it('should keep the init data of an undeployed account that registers, per storeInitData', async ()=>{
-        const config = await supertest(app).get('/v1/config/getNetworkConfig').query({chainId: Number(chainId)}).expect(200);
-        const storeInitData = config.body.counterfactualAccounts.storeInitData;
-        if (storeInitData === "never") return;
+    // options.counterfactualAccounts.storeInitData decides whether the deployment call of an undeployed account that
+    // registers is kept, as _factory and _factoryData in the account's metadata. The service reads the option on each
+    // request, so every case sets the policy itself and none depends on the config.json the suite runs with.
+    describe('init data (storeInitData)', ()=>{
+        type Undeployed = {account: string, owners: ethers.Wallet[], factory: string, factoryCalldata: string};
+        const provider = new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider);
+        let configured: CounterfactualAccounts;
+        beforeAll(()=>{
+            configured = Configuration.instance().counterfactualAccounts;
+        });
+        afterEach(()=>{
+            Configuration.instance().counterfactualAccounts = configured;
+        });
 
-        const owners = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
-        const ownerAddresses = owners.map((wallet) => wallet.address);
-        const account = SafeAccount.initializeNewAccount(ownerAddresses, {threshold: 2});
-        const [factory, factoryCalldata] = SafeAccount.createFactoryAddressAndData(ownerAddresses, {threshold: 2});
-        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider).getCode(account.accountAddress)).toBe("0x");
-        const target = `init-data-${Date.now()}@example.com`;
-        const statement = registerStatement.replace("user@example.com", target);
+        const networkConfig = async () =>
+            (await supertest(app).get('/v1/config/getNetworkConfig').query({chainId: Number(chainId)}).expect(200)).body;
 
-        const [siweMessage, signature] = await signAsSafe(statement, owners, account.accountAddress);
-        const registerRes = await supertest(app).post('/v1/auth/register/').send({
-            "account": account.accountAddress,
-            "chainId": Number(chainId),
-            "channel": "email",
-            "target": target,
-            "message": siweMessage,
-            "signature": wrap(factory, factoryCalldata, signature),
-        }).expect(200);
-        const response = await fetch('http://localhost:8025/api/v1/messages');
-        const {messages} = await response.json() as {messages: {To: {Address: string}[], Snippet: string}[]};
-        const email = messages.find((message) => message.To.some((to) => to.Address === target));
-        const otp = email ? /\d{6}/.exec(email.Snippet) : null;
-        expect(otp).not.toBeNull();
-        await supertest(app).post('/v1/auth/submit/').send({challengeId: registerRes.body.challengeId, challenge: otp![0]}).expect(200);
+        // abstractionkit's default initializer enables the 4337 module only: deploying it does not install the guardian
+        const plainAccount = (): Undeployed => {
+            const owners = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
+            const addresses = owners.map((wallet) => wallet.address);
+            const [factory, factoryCalldata] = SafeAccount.createFactoryAddressAndData(addresses, {threshold: 2});
+            const {accountAddress} = SafeAccount.initializeNewAccount(addresses, {threshold: 2});
+            return {account: accountAddress, owners, factory, factoryCalldata};
+        };
 
-        const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, owners, account.accountAddress);
-        const fetchRes = await supertest(app).get('/v1/auth/registrations/').query({
-            account: account.accountAddress,
-            chainId: Number(chainId),
-            message: fetchMessage,
-            signature: wrap(factory, factoryCalldata, fetchSignature),
-        }).expect(200);
-        expect(fetchRes.body.registrations).toHaveLength(1);
-        expect(fetchRes.body.metadata).toEqual(storeInitData === "always"
-            ? {_factory: ethers.utils.getAddress(factory), _factoryData: factoryCalldata.toLowerCase()}
-            : {});
+        // a deployment that enables the network's first module and adds the service's guardian to it
+        // (test/guardian-deployment.ts)
+        const guardianAccount = async (): Promise<Undeployed> => {
+            for (const address of STAND_IN_CONTRACTS) {
+                expect([address, await provider.getCode(address)]).not.toEqual([address, "0x"]);
+            }
+            const {guardianAddress, modules} = await networkConfig();
+            const owner = ethers.Wallet.createRandom();
+            const {account, deployment} = await guardianDeployment(provider, owner, modules[0].address, guardianAddress);
+            return {account, owners: [owner], factory: deployment.factory, factoryCalldata: deployment.factoryCalldata};
+        };
+
+        const kept = ({factory, factoryCalldata}: Undeployed) =>
+            ({_factory: ethers.utils.getAddress(factory), _factoryData: factoryCalldata.toLowerCase()});
+
+        // the code mailed to an address; a verification code is sent after its response, so this waits for it
+        const codeSentTo = async (target: string): Promise<string> => {
+            const deadline = Date.now() + 15000;
+            for (;;) {
+                const response = await fetch('http://localhost:8025/api/v1/messages?limit=1000');
+                const {messages} = await response.json() as {messages: {To: {Address: string}[], Snippet: string}[]};
+                const email = messages.find((message) => message.To.some((to) => to.Address === target));
+                const code = email ? /\b\d{6}\b/.exec(email.Snippet) : null;
+                if (code) return code[0];
+                if (Date.now() > deadline) throw new Error(`no code reached ${target}`);
+                await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+        };
+
+        const verifyTarget = async (target: string): Promise<string> => {
+            const requested = await supertest(app).post('/v1/auth/verification/request')
+                .send({channel: "email", target}).expect(200);
+            const submitted = await supertest(app).post('/v1/auth/verification/submit')
+                .send({challengeId: requested.body.challengeId, challenge: await codeSentTo(target)}).expect(200);
+            return submitted.body.verifiedTargetToken;
+        };
+
+        // Registers the undeployed account under `policy` with a new email address, verified by the registration's
+        // code or by a verifiedTargetToken, and returns the metadata the service then answers for the account.
+        const registerUnder = async (
+            policy: StoreInitDataPolicy, {account, owners, factory, factoryCalldata}: Undeployed, verification: "otp" | "token" = "otp",
+        ) => {
+            Configuration.instance().counterfactualAccounts = {erc6492: true, storeInitData: policy};
+            expect((await networkConfig()).counterfactualAccounts).toEqual({erc6492: true, storeInitData: policy});
+            expect(await provider.getCode(account)).toBe("0x");
+            const target = `init-data-${ethers.utils.hexlify(ethers.utils.randomBytes(6)).slice(2)}@example.com`;
+            const verifiedTargetToken = verification === "token" ? await verifyTarget(target) : undefined;
+
+            const [siweMessage, signature] = await signAsSafe(registerStatement.replace("user@example.com", target), owners, account);
+            const registerRes = await supertest(app).post('/v1/auth/register/').send({
+                "account": account,
+                "chainId": Number(chainId),
+                "channel": "email",
+                "target": target,
+                "message": siweMessage,
+                "signature": wrap(factory, factoryCalldata, signature),
+                ...(verifiedTargetToken === undefined ? {} : {verifiedTargetToken}),
+            }).expect(200);
+            if (verifiedTargetToken === undefined) {
+                await supertest(app).post('/v1/auth/submit/')
+                    .send({challengeId: registerRes.body.challengeId, challenge: await codeSentTo(target)}).expect(200);
+            } else {
+                // registered at once: no code, no challenge
+                expect(registerRes.body.registrationId).toBeDefined();
+            }
+
+            const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, owners, account);
+            const fetchRes = await supertest(app).get('/v1/auth/registrations/').query({
+                account,
+                chainId: Number(chainId),
+                message: fetchMessage,
+                signature: wrap(factory, factoryCalldata, fetchSignature),
+            }).expect(200);
+            expect(fetchRes.body.registrations).toHaveLength(1);
+            return fetchRes.body.metadata;
+        };
+
+        it('should keep nothing under "never"', async ()=>{
+            expect(await registerUnder("never", plainAccount())).toEqual({});
+        });
+
+        it('should keep the init data under "always"', async ()=>{
+            const undeployed = plainAccount();
+            expect(await registerUnder("always", undeployed)).toEqual(kept(undeployed));
+        });
+
+        it('should keep the init data under "always" when registering with a verifiedTargetToken', async ()=>{
+            const undeployed = plainAccount();
+            expect(await registerUnder("always", undeployed, "token")).toEqual(kept(undeployed));
+        });
+
+        it('should keep nothing under "with-guardian" when deploying does not install the guardian', async ()=>{
+            expect(await registerUnder("with-guardian", plainAccount())).toEqual({});
+        });
+
+        it('should keep the init data under "with-guardian" when deploying installs the guardian', async ()=>{
+            const undeployed = await guardianAccount();
+            expect(await registerUnder("with-guardian", undeployed)).toEqual(kept(undeployed));
+        });
     });
 
     it('should accept plain and still-wrapped signatures once the account is deployed', async ()=>{
