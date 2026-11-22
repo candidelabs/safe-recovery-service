@@ -333,6 +333,7 @@ An app can store a small object with an account when it registers it with the gu
 | Value | a non-empty string | `"metadata" values must be non-empty strings` |
 | Value length | at most 256 UTF-16 code units (JavaScript's `String.length`) | `"metadata" values must be at most 256 characters long` |
 | Value characters | no control characters (tab, CR and LF included), unpaired surrogates, U+2028, U+2029, or bidi embedding, override and isolate controls (U+202A to U+202E, U+2066 to U+2069) | `"metadata" values must not contain control characters` |
+| Visible character | at least one character that is neither white space nor invisible (format characters such as U+200B, U+FEFF and the direction marks, and other default-ignorable code points such as variation selectors); these stay allowed next to a visible one | `"metadata" values must contain a visible character` |
 | Whole object | at most 2048 bytes as compact JSON in UTF-8 | `"metadata" must be at most 2048 bytes as JSON` |
 
 The rules are checked in this order and the first one broken is answered. No message quotes a key or a value. Nothing is trimmed, normalized or case-folded, and key order is not kept. A deployment without this feature answers a request with `metadata` with 400 `"metadata" is not allowed`, which is how a client tells.

@@ -37,6 +37,7 @@ const KEYS = "keys must be 1 to 32 characters of letters, digits, underscore, do
 const VALUES = "values must be non-empty strings";
 const VALUE_LENGTH = "values must be at most 256 characters long";
 const VALUE_CHARACTERS = "values must not contain control characters";
+const VALUE_VISIBLE = "values must contain a visible character";
 const BYTES = "must be at most 2048 bytes as JSON";
 
 describe("accountMetadataProblem", () => {
@@ -59,6 +60,9 @@ describe("accountMetadataProblem", () => {
         ["an emoji ZWJ sequence", {label: char(0x1f469, 0x200d, 0x1f4bb) + " work"}],
         ["a zero-width non-joiner", {label: "a" + char(0x200c) + "b"}],
         ["a value with spaces", {label: "  My savings account  "}],
+        ["one visible character among invisible ones", {label: char(0x200b) + "a" + char(0xfeff)}],
+        ["right-to-left text with a direction mark", {label: char(0x05e9, 0x05dc, 0x05d5, 0x05dd) + char(0x200f) + "!"}],
+        ["an emoji with a variation selector", {label: char(0x2764, 0xfe0f)}],
     ])("accepts %s", (_name, value) => {
         expect(accountMetadataProblem(value)).toBeUndefined();
     });
@@ -98,6 +102,16 @@ describe("accountMetadataProblem", () => {
         ["a left-to-right embedding", {label: "a" + char(0x202a) + "b"}, VALUE_CHARACTERS],
         ["a left-to-right isolate", {label: "a" + char(0x2066) + "b"}, VALUE_CHARACTERS],
         ["a pop directional isolate", {label: "a" + char(0x2069) + "b"}, VALUE_CHARACTERS],
+        ["a space alone", {label: " "}, VALUE_VISIBLE],
+        ["spaces of several kinds", {label: " " + char(0xa0, 0x2003, 0x3000)}, VALUE_VISIBLE],
+        ["a zero-width space alone", {label: char(0x200b)}, VALUE_VISIBLE],
+        ["a zero-width joiner alone", {label: char(0x200d)}, VALUE_VISIBLE],
+        ["a byte order mark alone", {label: char(0xfeff)}, VALUE_VISIBLE],
+        ["a soft hyphen alone", {label: char(0xad)}, VALUE_VISIBLE],
+        ["direction marks alone", {label: char(0x200e, 0x200f, 0x061c)}, VALUE_VISIBLE],
+        ["tag characters alone", {label: char(0xe0041, 0xe0042)}, VALUE_VISIBLE],
+        ["a variation selector alone", {label: char(0xfe0f)}, VALUE_VISIBLE],
+        ["a Hangul filler alone", {label: char(0x3164)}, VALUE_VISIBLE],
         // ten values of 256 three-byte characters: each within its limits, 7.7 KB in all
         ["more than 2048 bytes", object(10, char(0x50a8).repeat(256)), BYTES],
     ])("refuses %s", (_name, value, problem) => {
@@ -110,6 +124,8 @@ describe("accountMetadataProblem", () => {
         expect(accountMetadataProblem({"bad key": "", other: 42})).toBe(KEYS);
         expect(accountMetadataProblem({a: "", b: "x".repeat(300)})).toBe(VALUES);
         expect(accountMetadataProblem({a: "x".repeat(300), b: char(0x0a)})).toBe(VALUE_LENGTH);
+        expect(accountMetadataProblem({a: char(0x0a), b: " "})).toBe(VALUE_CHARACTERS);
+        expect(accountMetadataProblem({...object(9, char(0x50a8).repeat(256)), a: " "})).toBe(VALUE_VISIBLE);
     });
 
     test("counts a value's length in UTF-16 code units and the total in UTF-8 bytes", () => {
@@ -206,6 +222,7 @@ describe("metadata validation (Joi)", () => {
         ["a key with a space", {"Secret Key Five": "Secret-Value-Five"}, KEYS],
         ["a long value", {secretKeyThree: "Secret-Value-Three-" + "x".repeat(300)}, VALUE_LENGTH],
         ["a line feed", {secretKeyFour: "Secret-Value-Four" + char(0x0a) + "Line"}, VALUE_CHARACTERS],
+        ["an invisible value", {secretKeySix: char(0x200b)}, VALUE_VISIBLE],
         ["more than 2048 bytes", object(10, "Secret-Bytes-Value" + char(0x50a8).repeat(200)), BYTES],
     ];
 

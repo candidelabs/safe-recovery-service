@@ -46,6 +46,13 @@ export const ACCOUNT_METADATA_MAX_VALUE_LENGTH = 256;
  * which reorder what is displayed next to an address. The zero-width joiner and non-joiner stay allowed.
  */
 export const ACCOUNT_METADATA_FORBIDDEN = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]/u;
+/**
+ * A visible character, which every value must hold: one that is neither white space nor invisible, i.e. a format
+ * character (U+200B, U+FEFF, a soft hyphen, a direction mark, a tag character) or another default-ignorable code point
+ * (a variation selector, a Hangul filler). A value of such characters alone would be shown as an empty name. They stay
+ * allowed next to a visible one: an emoji sequence needs the joiner and right-to-left text the direction marks.
+ */
+export const ACCOUNT_METADATA_VISIBLE = /[^\p{White_Space}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 /** The whole object: at most this many bytes as compact JSON in UTF-8, the bound for non-Latin text. */
 export const ACCOUNT_METADATA_MAX_BYTES = 2048;
 
@@ -60,6 +67,7 @@ const PROBLEMS = {
   value: "values must be non-empty strings",
   valueLength: `values must be at most ${ACCOUNT_METADATA_MAX_VALUE_LENGTH} characters long`,
   valueCharacters: "values must not contain control characters",
+  valueVisible: "values must contain a visible character",
   bytes: `must be at most ${ACCOUNT_METADATA_MAX_BYTES} bytes as JSON`,
 };
 
@@ -76,7 +84,7 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 /**
  * The first rule `value` breaks, as a fixed text to put after the field's name, or undefined for valid metadata. The
  * rules are checked in this order: type, entries, reserved keys, keys, value type and emptiness, value length, value
- * characters, total size.
+ * characters, visible character, total size.
  */
 export function accountMetadataProblem(value: unknown): string | undefined {
   if (!isPlainObject(value)) return PROBLEMS.type;
@@ -88,6 +96,7 @@ export function accountMetadataProblem(value: unknown): string | undefined {
   if (!values.every((entry): entry is string => typeof entry === "string" && entry.length > 0)) return PROBLEMS.value;
   if (values.some((entry) => entry.length > ACCOUNT_METADATA_MAX_VALUE_LENGTH)) return PROBLEMS.valueLength;
   if (values.some((entry) => ACCOUNT_METADATA_FORBIDDEN.test(entry))) return PROBLEMS.valueCharacters;
+  if (!values.every((entry) => ACCOUNT_METADATA_VISIBLE.test(entry))) return PROBLEMS.valueVisible;
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > ACCOUNT_METADATA_MAX_BYTES) return PROBLEMS.bytes;
   return undefined;
 }
