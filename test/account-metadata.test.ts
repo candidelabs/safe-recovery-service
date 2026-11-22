@@ -63,6 +63,7 @@ describe("accountMetadataProblem", () => {
         ["one visible character among invisible ones", {label: char(0x200b) + "a" + char(0xfeff)}],
         ["right-to-left text with a direction mark", {label: char(0x05e9, 0x05dc, 0x05d5, 0x05dd) + char(0x200f) + "!"}],
         ["an emoji with a variation selector", {label: char(0x2764, 0xfe0f)}],
+        ["braille text with a blank cell", {label: char(0x2811, 0x2800, 0x2803)}],
     ])("accepts %s", (_name, value) => {
         expect(accountMetadataProblem(value)).toBeUndefined();
     });
@@ -112,6 +113,8 @@ describe("accountMetadataProblem", () => {
         ["tag characters alone", {label: char(0xe0041, 0xe0042)}, VALUE_VISIBLE],
         ["a variation selector alone", {label: char(0xfe0f)}, VALUE_VISIBLE],
         ["a Hangul filler alone", {label: char(0x3164)}, VALUE_VISIBLE],
+        ["braille blanks alone", {label: char(0x2800, 0x2800)}, VALUE_VISIBLE],
+        ["a braille blank among invisible characters", {label: " " + char(0x2800, 0x200b)}, VALUE_VISIBLE],
         // ten values of 256 three-byte characters: each within its limits, 7.7 KB in all
         ["more than 2048 bytes", object(10, char(0x50a8).repeat(256)), BYTES],
     ])("refuses %s", (_name, value, problem) => {

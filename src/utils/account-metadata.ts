@@ -49,10 +49,12 @@ export const ACCOUNT_METADATA_FORBIDDEN = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\u202A-\u202
 /**
  * A visible character, which every value must hold: one that is neither white space nor invisible, i.e. a format
  * character (U+200B, U+FEFF, a soft hyphen, a direction mark, a tag character) or another default-ignorable code point
- * (a variation selector, a Hangul filler). A value of such characters alone would be shown as an empty name. They stay
- * allowed next to a visible one: an emoji sequence needs the joiner and right-to-left text the direction marks.
+ * (a variation selector, a Hangul filler), nor the braille blank U+2800, a symbol drawn as a space. A value of such
+ * characters alone would be shown as an empty name. They stay allowed next to a visible one: an emoji sequence needs
+ * the joiner and right-to-left text the direction marks. Best effort: a few rare symbols are drawn blank by most fonts
+ * and still count as visible, so an interface must cope with a name that looks empty.
  */
-export const ACCOUNT_METADATA_VISIBLE = /[^\p{White_Space}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+export const ACCOUNT_METADATA_VISIBLE = /[^\p{White_Space}\p{Cf}\p{Default_Ignorable_Code_Point}⠀]/u;
 /** The whole object: at most this many bytes as compact JSON in UTF-8, the bound for non-Latin text. */
 export const ACCOUNT_METADATA_MAX_BYTES = 2048;
 
