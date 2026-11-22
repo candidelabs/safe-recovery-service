@@ -312,15 +312,24 @@ export const deleteRegistration = async (registrationId: string, message: string
   await validateSIWEMessage(message, authRegistration.account, authRegistration.chainId, statement, signature);
   // The account's metadata on this chain, reserved keys included, goes with its last registration there, and first: a
   // request that stops in between leaves a registration without metadata, never metadata without a registration.
-  const account = authRegistration.account.toLowerCase();
-  const registrationCount = await prisma.authRegistration.count({where: {account, chainId: authRegistration.chainId}});
+  const where = {account: authRegistration.account.toLowerCase(), chainId: authRegistration.chainId};
+  const registrationCount = await prisma.authRegistration.count({where});
   if (registrationCount <= 1) {
-    await prisma.authAccountMetadata.deleteMany({where: {account, chainId: authRegistration.chainId}});
+    await prisma.authAccountMetadata.deleteMany({where});
   }
   //
   await prisma.authRegistration.delete({
     where: {id: registrationId}
   });
+  // And again once it is gone: two deletes at once each count the other's registration above and leave the metadata to
+  // it, and a metadata write can land in between. The registration is deleted either way, so a failure here is logged.
+  try {
+    if (await prisma.authRegistration.count({where}) === 0) {
+      await prisma.authAccountMetadata.deleteMany({where});
+    }
+  } catch (err) {
+    log.warn({ ...where, err }, "account metadata not removed with the last registration");
+  }
   return true;
 };
 

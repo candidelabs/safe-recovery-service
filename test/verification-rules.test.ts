@@ -1082,6 +1082,40 @@ describe("account metadata (in-memory tables)", () => {
         expect(await listAccounts(emailToken)).toEqual([entry(account.toLowerCase(), CHAIN_A, {label: "On A"})]);
     });
 
+    test("deleting the account's last two registrations on a chain at once removes the metadata", async () => {
+        const account = newAccount();
+        const email = newTarget();
+        const phone = newPhone();
+        const {registrationId: first} = await registerWith(account, CHAIN_B, email, await verify(email), "email", {label: "Savings"}) as {registrationId: string};
+        const {registrationId: second} = await registerWith(account, CHAIN_B, phone, await verify(phone, "sms"), "sms") as {registrationId: string};
+
+        // each counts the other's registration before its own delete
+        expect(await Promise.all([first, second].map((id) => deleteRegistration(id, "siwe message", "0x1234")))).toEqual([true, true]);
+        expect(registrationsOf(email)).toEqual([]);
+        expect(registrationsOf(phone)).toEqual([]);
+        expect(metadataRowsOf(account)).toEqual([]);
+    });
+
+    test("a metadata row that cannot be removed after the last registration is logged, and the delete still answers", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {registrationId} = await registerWith(account, CHAIN_A, target, await verify(target), "email", {label: "Savings"}) as {registrationId: string};
+        const error = new Error("connection lost");
+        // the count made after the delete fails
+        mockHooks.push(
+            {table: "authRegistration", method: "count"},
+            {table: "authRegistration", method: "count", error},
+        );
+        mockLogLines.length = 0;
+
+        expect(await deleteRegistration(registrationId, "siwe message", "0x1234")).toBe(true);
+        expect(registrationsOf(target)).toEqual([]);
+        expect(mockHooks).toEqual([]);
+        expect(linesOf("account metadata not removed with the last registration")).toEqual([
+            {component: "auth", account: account.toLowerCase(), chainId: CHAIN_A, err: error},
+        ]);
+    });
+
     test("registeredAt is the registration's createdAt in ISO 8601", async () => {
         const account = newAccount();
         const target = newTarget();

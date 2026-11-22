@@ -351,7 +351,7 @@ Keys starting with `_` are reserved for the service, and a request that sends on
 
 **Reading it.** `POST /v1/auth/accounts` returns it in each entry, and `GET /v1/auth/registrations` (signed by the account) next to the registrations: `{"registrations": [...], "metadata": {"label": "Savings"}}`, `{}` when there is none. Nothing else returns it: not `/v1/auth/signature/*`, not a log line.
 
-**Deleting it.** It is deleted with the account's last registration on that chain (`POST /v1/auth/delete`).
+**Deleting it.** It is deleted with the account's last registration on that chain (`POST /v1/auth/delete`), also when the last two are deleted at once.
 
 Registrations made before this version have `metadata: {}` until their app sets it; there is no backfill.
 
@@ -390,7 +390,7 @@ Best effort (there is no transaction):
 * `/submit` creates one registration per `challengeId`. Called again with the right code while the code is valid, it answers with that registration (`registrationId`, `guardianAddress`) and creates no other. It answers 400 `challengeId already verified` when the registration is not there: deleted since, or still being created by a call made at the same moment.
 * The copy kept with a pending request whose code is never submitted stays in the database, with the request.
 
-The log lines `auth registration requested` and `auth registration created` carry `metadataEntries` (the number of entries) when metadata was sent, `auth account metadata updated` (`account`, `chainId`, `metadataEntries`, 0 when removed, `accountDeployed`) is written by `POST /v1/auth/metadata`, `auth registration submitted again` (`challengeId`, `registrationId`, `account`, `chainId`, `channel`) says that `/submit` answered with a registration already created, and `pending registration metadata not cleared` (warn, `challengeId`) says that a registration was created but the copy kept with its request could not be cleared. The object, its keys and its values are never logged.
+The log lines `auth registration requested` and `auth registration created` carry `metadataEntries` (the number of entries) when metadata was sent, `auth account metadata updated` (`account`, `chainId`, `metadataEntries`, 0 when removed, `accountDeployed`) is written by `POST /v1/auth/metadata`, `auth registration submitted again` (`challengeId`, `registrationId`, `account`, `chainId`, `channel`) says that `/submit` answered with a registration already created, `pending registration metadata not cleared` (warn, `challengeId`) says that a registration was created but the copy kept with its request could not be cleared, and `account metadata not removed with the last registration` (warn, `account`, `chainId`) says that a registration was deleted but the check made after it failed. The object, its keys and its values are never logged.
 
 **Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `AuthAccountMetadata` table and a nullable `metadata` column on `AuthRegistrationRequest`. Both are additive, so the migration can be applied while an older version runs.
 
