@@ -452,8 +452,12 @@ describe("account metadata", () => {
         expect(await metadataRow(wallet, CHAIN_A)).toBeNull();
 
         const code = await latestCode(target, 1, REGISTRATION_SUBJECT);
-        await supertest(app).post("/v1/auth/submit").send({challengeId, challenge: code}).expect(200);
+        const submitted = await supertest(app).post("/v1/auth/submit").send({challengeId, challenge: code}).expect(200);
         expect((await prisma.authRegistrationRequest.findUniqueOrThrow({where: {id: challengeId}})).metadata).toBeNull();
+        // the same code again answers with the same registration, and creates no other
+        const again = await supertest(app).post("/v1/auth/submit").send({challengeId, challenge: code}).expect(200);
+        expect(again.body).toEqual(submitted.body);
+        expect(await prisma.authRegistration.count({where: {target}})).toBe(1);
         await listAccounts(await verify(target, 2)).expect(200).then((lookup) => {
             expect(lookup.body).toEqual({accounts: [entry(wallet.address.toLowerCase(), CHAIN_A, {label: "Savings"})]});
         });

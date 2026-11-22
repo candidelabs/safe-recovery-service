@@ -1201,6 +1201,84 @@ describe("account metadata (in-memory tables)", () => {
         expect(linesOf("pending registration metadata not cleared")).toEqual([{component: "auth", challengeId, err: error}]);
     });
 
+    test("/submit again with the right code answers with the registration already created, never a second one", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target) as {challengeId: string};
+        const code = codeFor(target);
+        const first = await submitRegistrationChallenge(challengeId, code);
+        mockLogLines.length = 0;
+
+        expect(await submitRegistrationChallenge(challengeId, code)).toEqual(first);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(linesOf("auth registration created")).toEqual([]);
+        expect(linesOf("auth registration submitted again")).toEqual([
+            {component: "auth", challengeId, registrationId: first[0], account: account.toLowerCase(), chainId: CHAIN_A, channel: "email"},
+        ]);
+
+        // once the registration is deleted, the code does not bring it back
+        await deleteRegistration(first[0], "siwe message", "0x1234");
+        expect(await statusOf(submitRegistrationChallenge(challengeId, code))).toEqual([400, "challengeId already verified"]);
+        expect(registrationsOf(target)).toEqual([]);
+    });
+
+    test("two /submit at once with the right code create one registration", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target, undefined, "email", {label: "Savings"}) as {challengeId: string};
+        const code = codeFor(target);
+
+        const answers = await Promise.all([1, 2].map(() => submitRegistrationChallenge(challengeId, code).catch((e: ApiError) => [e.statusCode, e.message])));
+        expect(registrationsOf(target)).toHaveLength(1);
+        const registrationId = mockTables.authRegistration.find((row) => row.target === target).id;
+        // the one that did not create it answers with it, or is refused while it is being created
+        for (const answer of answers) {
+            expect([[registrationId, GUARDIAN], [400, "challengeId already verified"]]).toContainEqual(answer);
+        }
+        expect(answers).toContainEqual([registrationId, GUARDIAN]);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+    });
+
+    test("a /submit that fails to write the metadata keeps it on the request, and the same code sent again stores it", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const {challengeId} = await registerWith(account, CHAIN_A, target, undefined, "email", {label: "Savings"}) as {challengeId: string};
+        const code = codeFor(target);
+        const error = new Error("connection lost");
+        mockHooks.push({table: "authAccountMetadata", method: "create", error});
+        mockLogLines.length = 0;
+
+        expect(await submitRegistrationChallenge(challengeId, code).catch((e: unknown) => e)).toBe(error);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(metadataRowsOf(account)).toEqual([]);
+        expect(requestRow(challengeId).metadata).toEqual({label: "Savings"});
+        // the registration exists, so its line is written although the request failed
+        const registrationId = mockTables.authRegistration.find((row) => row.target === target).id;
+        expect(linesOf("auth registration created")).toEqual([expect.objectContaining({registrationId, verification: "otp", metadataEntries: 1})]);
+
+        expect(await submitRegistrationChallenge(challengeId, code)).toEqual([registrationId, GUARDIAN]);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(requestRow(challengeId).metadata).toBeNull();
+        expect(linesOf("auth registration submitted again")).toEqual([expect.objectContaining({challengeId, registrationId, metadataEntries: 1})]);
+    });
+
+    test("a register with a token that fails to write the metadata has logged the registration it created", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const token = await verify(target);
+        const error = new Error("connection lost");
+        mockHooks.push({table: "authAccountMetadata", method: "create", error});
+        mockLogLines.length = 0;
+
+        expect(await registerWith(account, CHAIN_A, target, token, "email", {label: "Savings"}).catch((e: unknown) => e)).toBe(error);
+        const registrationId = mockTables.authRegistration.find((row) => row.target === target).id;
+        expect(linesOf("auth registration created")).toEqual([expect.objectContaining({registrationId, verification: "token", metadataEntries: 1})]);
+        // sent again (with a new SIWE message), it is refused: the metadata is then set with POST /v1/auth/metadata
+        expect(await statusOf(registerWith(account, CHAIN_A, target, token, "email", {label: "Savings"}))).toEqual([409, expect.any(String)]);
+        expect(await setMetadata(account, CHAIN_A, {label: "Savings"})).toEqual({label: "Savings"});
+    });
+
     test("POST /v1/auth/metadata replaces it whole, signed by the account, and {} removes it", async () => {
         const account = newAccount();
         const target = newTarget();

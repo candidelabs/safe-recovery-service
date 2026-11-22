@@ -66,20 +66,14 @@ const readAccountMetadata = async (account: string, chainId: number): Promise<Ac
 // The log field for metadata that was sent or written: its number of entries, never the object.
 const metadataLogFields = (metadata?: AccountMetadata) => metadata === undefined ? {} : {metadataEntries: Object.keys(metadata).length};
 
-// The registration that /submit (after its code) and register (with a verifiedTargetToken) create, then the account's
-// metadata when some was sent (left out, the stored one is kept). The registration comes first: a request that stops in
-// between leaves a registration with its previous metadata, never metadata without a registration.
-const storeRegistration = async (
-  network: Network,
-  account: string,
-  chainId: number,
-  channel: string,
-  target: string,
-  metadata?: AccountMetadata,
-) => {
+// The registration that /submit (after its code) and register (with a verifiedTargetToken) create. Both then log it and
+// write the account's metadata when some was sent (left out, the stored one is kept). The registration comes first: a
+// request that stops in between leaves a registration with its previous metadata, never metadata without a
+// registration.
+const storeRegistration = async (network: Network, account: string, chainId: number, channel: string, target: string) => {
   const signer = Signers.instance().getSigner(network.guardian!)!;
   const guardian = await signer.signer();
-  const registration = await prisma.authRegistration.create(
+  return prisma.authRegistration.create(
     {
       data: {
         account: account.toLowerCase(),
@@ -90,10 +84,6 @@ const storeRegistration = async (
       }
     }
   );
-  if (metadata !== undefined) {
-    await writeAccountMetadata(account, chainId, metadata);
-  }
-  return registration;
 };
 
 export const createRegistration = async (
@@ -146,7 +136,7 @@ export const createRegistration = async (
   //
   if (verification) {
     // the target was verified: no second code
-    const registration = await storeRegistration(network, account, chainId, channel, target, metadata);
+    const registration = await storeRegistration(network, account, chainId, channel, target);
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId, channel, verification: "token",
@@ -154,6 +144,10 @@ export const createRegistration = async (
       },
       "auth registration created"
     );
+    // after the line above: a failed write answers 500, and the registration it leaves is in the log
+    if (metadata !== undefined) {
+      await writeAccountMetadata(account, chainId, metadata);
+    }
     return {registrationId: registration.id, guardianAddress: registration.guardian};
   }
   //
@@ -225,29 +219,54 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     });
     throw new ApiError(httpStatus.FORBIDDEN, `Invalid challenge`);
   }
-  //
-  await prisma.authRegistrationRequest.update({
+  // Only the submit that turns `verified` from false to true creates the registration (a conditional updateMany, as in
+  // verification.service.ts): two submits at once, or the same code sent again after a failed response, never make two.
+  const {count: firstSubmit} = await prisma.authRegistrationRequest.updateMany({
     data: {verified: true, verifiedAt: currentDate},
-    where: {id: registrationRequest.id}
+    where: {id: registrationRequest.id, verified: false}
   });
-  //
-  const registration = await storeRegistration(
-    network,
-    registrationRequest.account,
-    registrationRequest.chainId,
-    registrationRequest.channel,
-    registrationRequest.target,
-    pendingMetadata,
-  );
-  log.info(
-    {
-      registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
-      ...metadataLogFields(pendingMetadata),
-    },
-    "auth registration created"
-  );
-  // Cleared once applied, not before: a failed store keeps it for a retry. The registration exists either way.
+  let registration;
+  if (firstSubmit === 1) {
+    registration = await storeRegistration(
+      network,
+      registrationRequest.account,
+      registrationRequest.chainId,
+      registrationRequest.channel,
+      registrationRequest.target,
+    );
+    log.info(
+      {
+        registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
+        ...metadataLogFields(pendingMetadata),
+      },
+      "auth registration created"
+    );
+  } else {
+    // Submitted before: the registration it created. There is none when it was deleted since, or when the first submit
+    // has not created it yet (or stopped before it did); the target is then registered again, with a new code.
+    registration = await prisma.authRegistration.findFirst({
+      where: {
+        account: registrationRequest.account,
+        chainId: registrationRequest.chainId,
+        channel: registrationRequest.channel,
+        target: registrationRequest.target,
+      }
+    });
+    if (!registration) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `challengeId already verified`);
+    }
+    log.info(
+      {
+        challengeId: registrationRequest.id, registrationId: registration.id, account: registration.account, chainId: registration.chainId,
+        channel: registration.channel, ...metadataLogFields(pendingMetadata),
+      },
+      "auth registration submitted again"
+    );
+  }
+  // The metadata sent with register: written after the registration, and cleared once written, not before. A submit
+  // that fails here keeps it on the request, and the same code sent again stores it.
   if (pendingMetadata !== undefined) {
+    await writeAccountMetadata(registration.account, registration.chainId, pendingMetadata);
     try {
       await prisma.authRegistrationRequest.update({
         data: {metadata: Prisma.DbNull},
