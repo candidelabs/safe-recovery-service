@@ -54,7 +54,7 @@ import {createSubscription} from "../src/services/alerts.service";
 // (test/verification.test.ts signs for real on Postgres and Mailpit, test/alerts.test.ts subscribes on a chain).
 
 // In-memory tables for the queries the services make (plain values, equals, in, gt/gte/lt; increment and
-// decrement; Prisma.DbNull stored as null). Each call runs to completion before the next, like one SQL statement, so
+// decrement of a number; Prisma.DbNull stored as null). Each call runs to completion before the next, like one SQL statement, so
 // parallel submits interleave between calls only.
 const mockTables: Record<string, any[]> = {};
 // Queued hooks: the next call of the table's method that matches first runs `before` (a write made by someone else in
@@ -138,9 +138,11 @@ jest.mock('../src/config/prisma-client', () => {
     };
     const apply = (row: any, data: Record<string, any>) => {
         for (const [key, value] of Object.entries(data)) {
+            // arithmetic on a number column only: a Json column can be given an object with such a key
+            const arithmetic = typeof row[key] === "number" && value !== null && typeof value === "object";
             if (value === Prisma.DbNull) row[key] = null;
-            else if (value !== null && typeof value === "object" && "increment" in value) row[key] += value.increment;
-            else if (value !== null && typeof value === "object" && "decrement" in value) row[key] -= value.decrement;
+            else if (arithmetic && "increment" in value) row[key] += value.increment;
+            else if (arithmetic && "decrement" in value) row[key] -= value.decrement;
             else row[key] = value;
         }
     };
@@ -1221,6 +1223,16 @@ describe("account metadata (in-memory tables)", () => {
         expect(metadataOf(account, CHAIN_A)).toEqual({_service: "s"});
         await deleteRegistration(second, "siwe message", "0x1234");
         expect(metadataRowsOf(account)).toEqual([]);
+    });
+
+    test("keys named increment and decrement are stored like any other", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target), "email", {label: "Savings"});
+        const metadata = {increment: "1", decrement: "2"};
+        // an update of the row, where Prisma reads {increment} as arithmetic for a number column only
+        expect(await setMetadata(account, CHAIN_A, metadata)).toEqual(metadata);
+        expect(metadataOf(account, CHAIN_A)).toEqual(metadata);
     });
 
     test("{} writes nothing for an account without metadata", async () => {
