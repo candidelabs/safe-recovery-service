@@ -1179,6 +1179,23 @@ describe("account metadata (in-memory tables)", () => {
         expect(mockHooks).toEqual([]);
     });
 
+    test("a write does not land on a row created in place of the one it read, even with the same updatedAt", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        await registerWith(account, CHAIN_A, target, await verify(target), "email", {label: "Savings"});
+        const read = metadataRowsOf(account)[0];
+        // between the read and the update, the row is deleted and another is created with the same updatedAt
+        mockHooks.push({table: "authAccountMetadata", method: "updateMany", before: () => {
+            mockTables.authAccountMetadata = mockTables.authAccountMetadata.filter((row) => row !== read);
+            mockTables.authAccountMetadata.push({...read, id: "created-again", metadata: {_service: "s", label: "Other"}});
+        }});
+
+        // it is read again, so the new row's reserved key is kept
+        expect(await setMetadata(account, CHAIN_A, {label: "Spending"})).toEqual({_service: "s", label: "Spending"});
+        expect(metadataRowsOf(account)).toEqual([expect.objectContaining({id: "created-again", metadata: {_service: "s", label: "Spending"}})]);
+        expect(mockHooks).toEqual([]);
+    });
+
     test("writes keep the service's reserved keys and replace the app's keys; {} removes the app's keys only", async () => {
         const account = newAccount();
         const target = newTarget();

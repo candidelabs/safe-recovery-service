@@ -20,16 +20,16 @@ const ACCOUNT_METADATA_WRITE_ATTEMPTS = 3;
 
 // The metadata of an account on a chain (src/utils/account-metadata.ts), one AuthAccountMetadata row shared by its
 // registrations there. A write replaces the app's keys whole and keeps the service's reserved keys
-// (mergeAccountMetadata); the row is deleted when nothing is left. No transaction: the row is changed only if its
-// updatedAt is still the one read (a conditional updateMany, as in verification.service.ts), so a write made in between
-// is merged, not lost: the row is read again. Returns the object as stored. The object, its keys and its values are
-// never logged: log lines carry metadataEntries, the number of entries sent.
+// (mergeAccountMetadata); the row is deleted when nothing is left. No transaction: the row is changed only if it is the
+// row read (its id) and its updatedAt is still the one read (a conditional updateMany, as in verification.service.ts),
+// so a write made in between is merged, not lost: the row is read again. Returns the object as stored. The object, its
+// keys and its values are never logged: log lines carry metadataEntries, the number of entries sent.
 const writeAccountMetadata = async (account: string, chainId: number, metadata: AccountMetadata): Promise<AccountMetadata> => {
   account = account.toLowerCase();
   for (let attempt = 0; attempt < ACCOUNT_METADATA_WRITE_ATTEMPTS; attempt++) {
     const row = await prisma.authAccountMetadata.findFirst({
       where: {account, chainId},
-      select: {metadata: true, updatedAt: true},
+      select: {id: true, metadata: true, updatedAt: true},
     });
     const merged = mergeAccountMetadata(storedAccountMetadata(row?.metadata), metadata);
     const empty = Object.keys(merged).length === 0;
@@ -44,7 +44,8 @@ const writeAccountMetadata = async (account: string, chainId: number, metadata: 
         throw e;
       }
     }
-    const unchanged = {account, chainId, updatedAt: row.updatedAt};
+    // the id too: a row deleted and created again in between can have the same updatedAt
+    const unchanged = {id: row.id, account, chainId, updatedAt: row.updatedAt};
     // set, and later than the value read even within the same millisecond, so that every write changes it
     const updatedAt = new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1));
     const {count} = empty
