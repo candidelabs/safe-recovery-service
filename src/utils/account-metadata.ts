@@ -8,8 +8,9 @@
 // - Untrusted text. Whoever can sign for an account and verify a target chooses what its metadata says, and it is shown
 //   to whoever proves that target later. Someone talked out of a verification code can therefore find a stranger's
 //   account, with a label of the stranger's choosing, in their own lookup. An interface must render values as plain
-//   text, never as HTML or a link, truncate them, and present them as a name the app stored, not as a statement by the
-//   service.
+//   text, never as HTML or a link, truncate them, and present the app's keys as a name the app stored, not as a
+//   statement by the service. The reserved keys the service writes (SERVICE_METADATA_KEYS) are its own; their notes are
+//   in src/utils/account-init-data.ts.
 // - Not a secret. Everyone who controls a target registered for the account can read it, and the operator stores it in
 //   plaintext. It must not hold a password, a recovery phrase or anything that grants access; a hint is a reminder, not
 //   a second factor. An opaque id that only the app can resolve is the safest content.
@@ -23,11 +24,12 @@
 //
 // Nothing is trimmed, normalized or case-folded, and key order is not kept (jsonb reorders keys).
 //
-// Keys starting with an underscore are reserved for the service, and a request that sends one is refused. None is
-// stored today. Reads return them as part of the object, and a write keeps them (mergeAccountMetadata): it replaces
-// the app's keys only. The limits apply to what an app sends, so reserved keys do not count against them. Relaxing the
-// refusal later (accepting them sent back unchanged, or ignoring them) breaks no client, while tightening a looser rule
-// would.
+// Keys starting with an underscore are reserved for the service, and a request that sends one is refused. The service
+// stores two: _factory and _factoryData, the init data of an account that registered before it was deployed
+// (SERVICE_METADATA_KEYS, src/utils/account-init-data.ts). Reads return them as part of the object, and a write of the
+// app's keys keeps them (mergeAccountMetadata): it replaces the app's keys only. The limits apply to what an app sends,
+// so reserved keys do not count against them. Relaxing the refusal later (accepting them sent back unchanged, or
+// ignoring them) breaks no client, while tightening a looser rule would.
 
 /** An account's metadata: string keys to string values. `{}` means none. */
 export type AccountMetadata = Record<string, string>;
@@ -114,13 +116,55 @@ export function storedAccountMetadata(value: unknown): AccountMetadata {
 }
 
 /**
- * The object a write stores: the reserved keys of the stored object, which an app cannot change, and the app's keys
- * from `sent`, which replace all the app's keys stored before (no merge between them). A reserved key in `sent`, which
- * validation refuses, is dropped. `{}` as the result means the row is deleted.
+ * The object a write stores: the reserved keys of the stored object, which an app cannot change, overridden by the
+ * reserved keys of `service` (what the service writes itself), and the app's keys from `sent`, which replace all the
+ * app's keys stored before (no merge between them). `sent` undefined means the app sent nothing: its stored keys are
+ * kept. A reserved key in `sent`, which validation refuses, and a key of `service` that is not reserved are dropped.
+ * `{}` as the result means the row is deleted.
  */
-export function mergeAccountMetadata(stored: AccountMetadata, sent: AccountMetadata): AccountMetadata {
+export function mergeAccountMetadata(stored: AccountMetadata, sent: AccountMetadata | undefined, service: AccountMetadata = {}): AccountMetadata {
   return Object.fromEntries([
     ...Object.entries(stored).filter(([key]) => isReservedAccountMetadataKey(key)),
-    ...Object.entries(sent).filter(([key]) => !isReservedAccountMetadataKey(key)),
+    ...Object.entries(service).filter(([key]) => isReservedAccountMetadataKey(key)),
+    ...Object.entries(sent ?? stored).filter(([key]) => !isReservedAccountMetadataKey(key)),
   ]);
+}
+
+/** The reserved keys the service stores: the init data of an account registered before it was deployed. */
+export const SERVICE_METADATA_KEYS: readonly string[] = ["_factory", "_factoryData"];
+
+/**
+ * An internal marker of the pending copy on AuthRegistrationRequest.metadata: the app sent no metadata with register,
+ * only the service has something to write. It never reaches AuthAccountMetadata or a response.
+ */
+export const PENDING_NO_APP_METADATA_KEY = "_noAppMetadata";
+
+const serviceEntries = (metadata: AccountMetadata): AccountMetadata =>
+  Object.fromEntries(Object.entries(metadata).filter(([key]) => SERVICE_METADATA_KEYS.includes(key)));
+const appEntries = (metadata: AccountMetadata): AccountMetadata =>
+  Object.fromEntries(Object.entries(metadata).filter(([key]) => !isReservedAccountMetadataKey(key)));
+
+/**
+ * What register keeps on the pending AuthRegistrationRequest until /submit: undefined (a null column) when there is
+ * nothing, the app's object as sent when the service has nothing to add, else both, with the marker when the app sent
+ * nothing (without it, init data alone would read as an app that sent `{}`, and its /submit would remove the app's keys).
+ */
+export function pendingRegistrationMetadata(sent: AccountMetadata | undefined, service: AccountMetadata): AccountMetadata | undefined {
+  const kept = serviceEntries(service);
+  if (Object.keys(kept).length === 0) return sent;
+  if (sent === undefined) return {...kept, [PENDING_NO_APP_METADATA_KEY]: "1"};
+  return {...appEntries(sent), ...kept};
+}
+
+/**
+ * The pending copy as /submit reads it: `sent`, the app's object (undefined for a null column or when the marker is
+ * set, so the stored app keys are kept), and `service`, the service's keys only (never the marker). A row written
+ * before the service kept init data has no reserved key and reads as it did then.
+ */
+export function splitPendingRegistrationMetadata(value: unknown): {sent: AccountMetadata | undefined, service: AccountMetadata} {
+  // == null: a column that was never written reads as null, or undefined in the tests' in-memory tables
+  if (value == null) return {sent: undefined, service: {}};
+  const pending = storedAccountMetadata(value);
+  const noAppMetadata = Object.prototype.hasOwnProperty.call(pending, PENDING_NO_APP_METADATA_KEY);
+  return {sent: noAppMetadata ? undefined : appEntries(pending), service: serviceEntries(pending)};
 }

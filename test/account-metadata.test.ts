@@ -12,6 +12,10 @@ import {
     accountMetadataProblem,
     isReservedAccountMetadataKey,
     mergeAccountMetadata,
+    PENDING_NO_APP_METADATA_KEY,
+    pendingRegistrationMetadata,
+    SERVICE_METADATA_KEYS,
+    splitPendingRegistrationMetadata,
     storedAccountMetadata,
 } from "../src/utils/account-metadata";
 import {lookupAccounts} from "../src/utils/account-lookup";
@@ -39,6 +43,8 @@ const VALUE_LENGTH = "values must be at most 256 characters long";
 const VALUE_CHARACTERS = "values must not contain control characters";
 const VALUE_VISIBLE = "values must contain a visible character";
 const BYTES = "must be at most 2048 bytes as JSON";
+// what a registration of an undeployed account keeps (src/utils/account-init-data.ts)
+const INIT_DATA = {_factory: "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67", _factoryData: "0x1688f0b9abcdef"};
 
 describe("accountMetadataProblem", () => {
     test("the limits", () => {
@@ -185,6 +191,86 @@ describe("mergeAccountMetadata", () => {
 
     test("an app cannot set or change a reserved key", () => {
         expect(mergeAccountMetadata({_service: "s"}, {_service: "changed", _other: "x", label: "y"})).toEqual({_service: "s", label: "y"});
+    });
+
+    test("sent undefined keeps the app's stored keys", () => {
+        expect(mergeAccountMetadata({_service: "s", label: "Old", other: "x"}, undefined)).toEqual({_service: "s", label: "Old", other: "x"});
+        expect(mergeAccountMetadata({}, undefined)).toEqual({});
+        expect(mergeAccountMetadata({label: "Old"}, undefined, INIT_DATA)).toEqual({label: "Old", ...INIT_DATA});
+    });
+
+    test("the service's keys are set, and override the stored ones; the app's keys are the ones sent", () => {
+        const stored = {_factory: "0x0000000000000000000000000000000000000001", _factoryData: "0x00", _service: "s", label: "Old"};
+        expect(mergeAccountMetadata(stored, {label: "New"}, INIT_DATA)).toEqual({_service: "s", ...INIT_DATA, label: "New"});
+        expect(mergeAccountMetadata(stored, {}, INIT_DATA)).toEqual({_service: "s", ...INIT_DATA});
+        expect(mergeAccountMetadata({}, {}, INIT_DATA)).toEqual(INIT_DATA);
+    });
+
+    test("a key of the service's that is not reserved is ignored", () => {
+        expect(mergeAccountMetadata({label: "Old"}, undefined, {label: "From the service", ...INIT_DATA})).toEqual({label: "Old", ...INIT_DATA});
+        expect(mergeAccountMetadata({}, {label: "New"}, {other: "x"})).toEqual({label: "New"});
+    });
+
+    test("with two arguments it behaves as before", () => {
+        expect(mergeAccountMetadata({_service: "s", label: "Old"}, {label: "New"})).toEqual({_service: "s", label: "New"});
+        expect(mergeAccountMetadata({_service: "s", label: "Old"}, {label: "New"}, {})).toEqual({_service: "s", label: "New"});
+    });
+});
+
+describe("pending registration metadata", () => {
+    test("the service stores _factory and _factoryData", () => {
+        expect(SERVICE_METADATA_KEYS).toEqual(["_factory", "_factoryData"]);
+        expect(SERVICE_METADATA_KEYS.every(isReservedAccountMetadataKey)).toBe(true);
+        expect(isReservedAccountMetadataKey(PENDING_NO_APP_METADATA_KEY)).toBe(true);
+    });
+
+    test("register keeps nothing, the app's object, both, or the service's keys with the marker", () => {
+        expect(pendingRegistrationMetadata(undefined, {})).toBeUndefined(); // a null column, as before
+        expect(pendingRegistrationMetadata({label: "Savings"}, {})).toEqual({label: "Savings"});
+        expect(pendingRegistrationMetadata({}, {})).toEqual({});
+        expect(pendingRegistrationMetadata({label: "Savings"}, INIT_DATA)).toEqual({label: "Savings", ...INIT_DATA});
+        expect(pendingRegistrationMetadata({}, INIT_DATA)).toEqual(INIT_DATA);
+        expect(pendingRegistrationMetadata(undefined, INIT_DATA)).toEqual({...INIT_DATA, [PENDING_NO_APP_METADATA_KEY]: "1"});
+    });
+
+    test.each([
+        ["nothing", undefined, {}],
+        ["the app's object", {label: "Savings"}, {}],
+        ["the app's {}", {}, {}],
+        ["both", {label: "Savings", "app:id": "1"}, INIT_DATA],
+        ["init data with the app's {}", {}, INIT_DATA],
+        ["init data alone", undefined, INIT_DATA],
+    ])("/submit reads back %s as register sent it", (_name, sent, service) => {
+        // through JSON, as the jsonb column returns it (undefined stands for a null column)
+        const pending = pendingRegistrationMetadata(sent as Record<string, string> | undefined, service);
+        const column = pending === undefined ? null : JSON.parse(JSON.stringify(pending));
+        expect(splitPendingRegistrationMetadata(column)).toEqual({sent, service});
+    });
+
+    test("a pending value written before this version reads as it did", () => {
+        expect(splitPendingRegistrationMetadata(null)).toEqual({sent: undefined, service: {}});
+        expect(splitPendingRegistrationMetadata(undefined)).toEqual({sent: undefined, service: {}});
+        expect(splitPendingRegistrationMetadata({label: "Savings"})).toEqual({sent: {label: "Savings"}, service: {}});
+        expect(splitPendingRegistrationMetadata({})).toEqual({sent: {}, service: {}});
+        expect(splitPendingRegistrationMetadata("not an object")).toEqual({sent: {}, service: {}});
+    });
+
+    test("the marker never reaches sent or service, nor does another reserved key", () => {
+        for (const value of [
+            {...INIT_DATA, [PENDING_NO_APP_METADATA_KEY]: "1"},
+            {...INIT_DATA, [PENDING_NO_APP_METADATA_KEY]: "1", _other: "x", label: "y"},
+            {[PENDING_NO_APP_METADATA_KEY]: "1"},
+            {label: "Savings", _other: "x", ...INIT_DATA},
+        ]) {
+            const {sent, service} = splitPendingRegistrationMetadata(value);
+            for (const object of [sent ?? {}, service]) {
+                expect(object).not.toHaveProperty(PENDING_NO_APP_METADATA_KEY);
+                expect(object).not.toHaveProperty("_other");
+            }
+            expect(Object.keys(service).every((key) => SERVICE_METADATA_KEYS.includes(key))).toBe(true);
+        }
+        // with the marker, the app sent nothing: its stored keys are kept
+        expect(splitPendingRegistrationMetadata({...INIT_DATA, [PENDING_NO_APP_METADATA_KEY]: "1", label: "y"}).sent).toBeUndefined();
     });
 });
 
@@ -335,6 +421,12 @@ describe("lookupAccounts", () => {
 describe("logging", () => {
     test("the number of entries is written, not redacted", () => {
         expect(isSensitiveKey("metadataEntries")).toBe(false);
+    });
+
+    test("the init data fields are written, not redacted", () => {
+        for (const key of ["guardianInstalled", "guardianModule", "initData"]) {
+            expect(isSensitiveKey(key)).toBe(false);
+        }
     });
 });
 

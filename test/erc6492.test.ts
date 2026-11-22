@@ -13,6 +13,7 @@ import {
   MULTICALL3_ADDRESS,
   simulateGetOwners,
   simulateIsValidSignature,
+  simulateIsValidSignatureAndReads,
   unwrapErc6492Signature,
   wrapErc6492Signature,
 } from "../src/utils/erc6492";
@@ -42,6 +43,7 @@ const hash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("message"));
 const aggregate3Result = (calls: [boolean, string][]) =>
   MULTICALL3.encodeFunctionResult("aggregate3", [calls.map(([success, returnData]) => ({success, returnData}))]);
 const magicResult = EIP1271.encodeFunctionResult("isValidSignature", [EIP1271_MAGIC]);
+const trueResult = ethers.utils.defaultAbiCoder.encode(["bool"], [true]);
 
 // a JSON-RPC error answered by the node, as ethers' send() rejects with it
 const nodeError = (message: string) =>
@@ -160,6 +162,61 @@ describe("erc6492 simulation", () => {
     expect(error).not.toBeInstanceOf(Erc6492Error);
   });
 
+  describe("simulateIsValidSignatureAndReads", () => {
+    const reads = [
+      {target: account, callData: "0x2d9ad53d" + "00".repeat(32)},
+      {target: factory, callData: "0x1234"},
+    ];
+    const isValidSignatureData = EIP1271.encodeFunctionData("isValidSignature", [hash, innerSignature]);
+
+    it("runs the reads after isValidSignature in the same eth_call, each allowed to fail", async () => {
+      answer = async () => aggregate3Result([[true, "0x"], [true, magicResult], [true, trueResult], [false, "0x"]]);
+      expect(await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, innerSignature, reads)).toEqual({
+        valid: true,
+        reads: [{success: true, returnData: trueResult}, {success: false, returnData: "0x"}],
+      });
+      expect(sent).toHaveLength(1);
+      const [calls] = MULTICALL3.decodeFunctionData("aggregate3", (sent[0].params[0] as {data: string}).data);
+      expect(calls.map((call: {target: string; allowFailure: boolean; callData: string}) => [call.target, call.allowFailure, call.callData])).toEqual([
+        [factory, false, factoryCalldata],
+        [account, true, isValidSignatureData],
+        [account, true, reads[0].callData],
+        [factory, true, reads[1].callData],
+      ]);
+    });
+
+    it("returns the reads when the account rejects the signature", async () => {
+      answer = async () => aggregate3Result([[true, "0x"], [false, "0x"], [true, trueResult], [true, "0x"]]);
+      expect(await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, innerSignature, reads)).toEqual({
+        valid: false,
+        reads: [{success: true, returnData: trueResult}, {success: true, returnData: "0x"}],
+      });
+    });
+
+    it("reports an account left without code as no-result, reads or not", async () => {
+      answer = async () => aggregate3Result([[true, "0x"], [true, "0x"], [true, trueResult], [true, trueResult]]);
+      await expectErc6492Error(
+        simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, innerSignature, reads), "no-result"
+      );
+    });
+
+    it("throws a plain error when Multicall3 answers another number of results", async () => {
+      answer = async () => aggregate3Result([[true, "0x"], [true, magicResult], [true, trueResult]]);
+      const error = await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, innerSignature, reads)
+        .catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(Erc6492Error);
+      expect(error.message).toBe(`Multicall3 at ${multicall3} returned 3 results for 4 calls`);
+    });
+
+    it("is simulateIsValidSignature with no reads", async () => {
+      expect(await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, innerSignature, []))
+        .toEqual({valid: true, reads: []});
+      const [calls] = MULTICALL3.decodeFunctionData("aggregate3", (sent[0].params[0] as {data: string}).data);
+      expect(calls).toHaveLength(2);
+    });
+  });
+
   it("reads the owners of the deployed account, lower case", async () => {
     const owners = [ethers.Wallet.createRandom().address, ethers.Wallet.createRandom().address];
     answer = async () => aggregate3Result([[true, "0x"], [true, SAFE_OWNERS.encodeFunctionResult("getOwners", [owners])]]);
@@ -264,8 +321,9 @@ describe("SIWE verification and owner lookup", () => {
       const result = await validateSIWEMessage(
         message.toMessage(), account, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, innerSignature)
       );
-      expect(result).toEqual({counterfactual: true});
+      expect(result).toEqual({counterfactual: true, deployment: {factory, factoryCalldata}, reads: []});
       const [calls] = aggregate3Calls();
+      expect(calls).toHaveLength(2);
       expect(calls[0].target).toBe(factory);
       expect(calls[0].callData).toBe(factoryCalldata);
       expect(calls[1].target).toBe(account);
@@ -329,6 +387,45 @@ describe("SIWE verification and owner lookup", () => {
       );
       expect(result).toEqual({counterfactual: false});
       expect(aggregate3Calls()).toHaveLength(0); // no factory call against a deployed account
+    });
+
+    it("runs the reads asked for in the same simulation and returns them with the deployment", async () => {
+      const reads = [{target: account, callData: "0x2d9ad53d" + "00".repeat(32)}, {target: factory, callData: "0x1234"}];
+      chain.onCall = async () => aggregate3Result([[true, "0x"], [true, magicResult], [true, trueResult], [false, "0x"]]);
+      const message = siweMessage(account, fetchStatement);
+      const result = await validateSIWEMessage(
+        message.toMessage(), account, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, innerSignature), reads
+      );
+      expect(result).toEqual({
+        counterfactual: true,
+        deployment: {factory, factoryCalldata},
+        reads: [{success: true, returnData: trueResult}, {success: false, returnData: "0x"}],
+      });
+      expect(chain.calls).toHaveLength(1); // one eth_call for the signature and the reads
+      const [calls] = aggregate3Calls();
+      expect(calls).toHaveLength(4);
+      expect(calls[2].target).toBe(account);
+      expect(calls[2].callData).toBe(reads[0].callData);
+      expect(calls[3].target).toBe(factory);
+      expect(calls[3].callData).toBe(reads[1].callData);
+    });
+
+    it("ignores the reads once the account is deployed, and for an unwrapped signature", async () => {
+      const reads = [{target: account, callData: "0x1234"}];
+      const message = siweMessage(owner.address, fetchStatement);
+      const signature = await owner.signMessage(message.prepareMessage());
+      expect(await validateSIWEMessage(message.toMessage(), owner.address, CHAIN_ID, fetchStatement, signature, reads))
+        .toEqual({counterfactual: false});
+      chain.code.set(owner.address.toLowerCase(), "0x6080");
+      const wrapped = siweMessage(owner.address, fetchStatement);
+      chain.onCall = async (tx) => {
+        const [, inner] = EIP1271.decodeFunctionData("isValidSignature", tx.data);
+        return inner === innerSignature ? magicResult : "0x";
+      };
+      expect(await validateSIWEMessage(
+        wrapped.toMessage(), owner.address, CHAIN_ID, fetchStatement, wrapErc6492Signature(deployment, innerSignature), reads
+      )).toEqual({counterfactual: false});
+      expect(aggregate3Calls()).toHaveLength(0);
     });
 
     it("still checks the SIWE message first", async () => {

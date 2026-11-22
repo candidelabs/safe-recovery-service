@@ -1,14 +1,22 @@
 import httpStatus from "http-status";
 import {BigNumber} from "ethers";
 import {Prisma} from "@prisma/client";
-import {ApiError, validateSIWEMessage,} from "../utils";
+import {ApiError, isErc6492Signature, SimulatedCall, validateSIWEMessage,} from "../utils";
 import {prisma} from "../config/prisma-client";
+import {Configuration} from "../config/config-manager";
 import {ModuleSelection, Network} from "../models/network";
 import {Alerts} from "../models/alert/alerts";
 import {Signers} from "../models/signer/signers";
 import {MessageStatements} from "../utils/constants";
 import {LookupAccount, lookupAccounts} from "../utils/account-lookup";
-import {AccountMetadata, mergeAccountMetadata, storedAccountMetadata} from "../utils/account-metadata";
+import {
+  AccountMetadata,
+  mergeAccountMetadata,
+  pendingRegistrationMetadata,
+  splitPendingRegistrationMetadata,
+  storedAccountMetadata,
+} from "../utils/account-metadata";
+import {guardianSetupReads, resolveInitData} from "../utils/account-init-data";
 import {checkRecoveryModule} from "./recovery-modules.service";
 import {requireVerifiedTarget} from "./verification.service";
 import logger from "../utils/logger";
@@ -19,19 +27,25 @@ const log = logger.child({ component: "auth" });
 const ACCOUNT_METADATA_WRITE_ATTEMPTS = 3;
 
 // The metadata of an account on a chain (src/utils/account-metadata.ts), one AuthAccountMetadata row shared by its
-// registrations there. A write replaces the app's keys whole and keeps the service's reserved keys
+// registrations there. A write replaces the app's keys whole with `sent` (undefined: kept as stored), keeps the
+// service's reserved keys, and sets those of `service` (the init data a registration keeps, src/utils/account-init-data.ts)
 // (mergeAccountMetadata); the row is deleted when nothing is left. No transaction: the row is changed only if it is the
 // row read (its id) and its updatedAt is still the one read (a conditional updateMany, as in verification.service.ts),
 // so a write made in between is merged, not lost: the row is read again. Returns the object as stored. The object, its
-// keys and its values are never logged: log lines carry metadataEntries, the number of entries sent.
-const writeAccountMetadata = async (account: string, chainId: number, metadata: AccountMetadata): Promise<AccountMetadata> => {
+// keys and its values are never logged: log lines carry metadataEntries, the number of entries sent, and initData.
+const writeAccountMetadata = async (
+  account: string,
+  chainId: number,
+  sent: AccountMetadata | undefined,
+  service: AccountMetadata = {},
+): Promise<AccountMetadata> => {
   account = account.toLowerCase();
   for (let attempt = 0; attempt < ACCOUNT_METADATA_WRITE_ATTEMPTS; attempt++) {
     const row = await prisma.authAccountMetadata.findFirst({
       where: {account, chainId},
       select: {id: true, metadata: true, updatedAt: true},
     });
-    const merged = mergeAccountMetadata(storedAccountMetadata(row?.metadata), metadata);
+    const merged = mergeAccountMetadata(storedAccountMetadata(row?.metadata), sent, service);
     const empty = Object.keys(merged).length === 0;
     if (!row) {
       if (empty) return merged;
@@ -71,7 +85,8 @@ const metadataLogFields = (metadata?: AccountMetadata) => metadata === undefined
 const registrationGuardian = (network: Network) => Signers.instance().getSigner(network.guardian!)!.signer();
 
 // The registration that /submit (after its code) and register (with a verifiedTargetToken) create. Both then log it and
-// write the account's metadata when some was sent (left out, the stored one is kept). The registration comes first: a
+// write the account's metadata when some was sent (left out, the stored one is kept) or init data is kept (the reserved
+// keys _factory / _factoryData, src/utils/account-init-data.ts). The registration comes first: a
 // request that stops in between leaves a registration with its previous metadata, never metadata without a
 // registration.
 const storeRegistration = (guardian: string, account: string, chainId: number, channel: string, target: string) => {
@@ -120,8 +135,19 @@ export const createRegistration = async (
   let statement = MessageStatements["auth-register"];
   statement = statement.replace("{{target}}", target);
   statement = statement.replace("{{channel}}", channel);
+  // When init data may be kept (options.counterfactualAccounts.storeInitData), a wrapped signature also asks whether
+  // deploying the account installs the guardian, in the same simulation as the signature check (no extra eth_call).
+  const {storeInitData} = Configuration.instance().counterfactualAccounts;
+  const moduleAddresses = network.modules.map((module) => module.address);
+  let reads: SimulatedCall[] | undefined;
+  if (storeInitData !== "never" && isErc6492Signature(signature)) {
+    reads = guardianSetupReads(account, await registrationGuardian(network), moduleAddresses);
+  }
   // the account signs; an ERC-6492-wrapped signature of an account that is not deployed yet is verified in simulation
-  const {counterfactual} = await validateSIWEMessage(message, account, chainId, statement, signature);
+  const siwe = reads === undefined
+    ? await validateSIWEMessage(message, account, chainId, statement, signature)
+    : await validateSIWEMessage(message, account, chainId, statement, signature, reads);
+  const counterfactual = siwe.counterfactual;
   //
   target = sanitizedTarget;
   const existingRegistration = await prisma.authRegistration.findFirst({
@@ -135,6 +161,9 @@ export const createRegistration = async (
   if (existingRegistration){
     throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} on the '${channel}' channel`);
   }
+  // the deployment call of an undeployed account, when the policy keeps it ({} otherwise; keeping nothing removes nothing)
+  const initData = resolveInitData(storeInitData, siwe, moduleAddresses);
+  const keepsInitData = Object.keys(initData.entries).length > 0;
   //
   if (verification) {
     // the target was verified: no second code
@@ -143,12 +172,13 @@ export const createRegistration = async (
       {
         registrationId: registration.id, account: registration.account, chainId, channel, verification: "token",
         verificationId: verification.verificationId, accountDeployed: !counterfactual, ...metadataLogFields(metadata),
+        ...initData.log,
       },
       "auth registration created"
     );
     // after the line above: a failed write answers 500, and the registration it leaves is in the log
-    if (metadata !== undefined) {
-      await writeAccountMetadata(account, chainId, metadata);
+    if (metadata !== undefined || keepsInitData) {
+      await writeAccountMetadata(account, chainId, metadata, initData.entries);
     }
     return {registrationId: registration.id, guardianAddress: registration.guardian};
   }
@@ -166,8 +196,8 @@ export const createRegistration = async (
         chainId,
         channel,
         target,
-        // kept until /submit creates the registration (null when none was sent)
-        metadata,
+        // kept until /submit creates the registration, with the init data kept (null when there is neither)
+        metadata: pendingRegistrationMetadata(metadata, initData.entries),
         challengeHash,
         verified: false,
         tries: 0,
@@ -179,7 +209,7 @@ export const createRegistration = async (
   log.info(
     {
       challengeId: authRegistrationRequest.id, account: account.toLowerCase(), chainId, channel, accountDeployed: !counterfactual,
-      ...metadataLogFields(metadata),
+      ...metadataLogFields(metadata), ...initData.log,
     },
     "auth registration requested"
   );
@@ -191,9 +221,10 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
   if (!registrationRequest){
     throw new ApiError(httpStatus.NOT_FOUND, `challengeId not found`);
   }
-  // the metadata sent with register, if any (== null: a column that was never written reads as null, or undefined in
-  // the tests' in-memory tables)
-  const pendingMetadata = registrationRequest.metadata == null ? undefined : storedAccountMetadata(registrationRequest.metadata);
+  // the metadata sent with register, if any (undefined: none was sent), and the init data register kept
+  const {sent: pendingMetadata, service: pendingInitData} = splitPendingRegistrationMetadata(registrationRequest.metadata);
+  const initDataPending = Object.keys(pendingInitData).length > 0;
+  const initDataLogFields = initDataPending ? {initData: "kept"} : {};
   //
   const network = Network.instances.get(registrationRequest.chainId.toString())!;
   if (!network.guardian){
@@ -278,7 +309,7 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     log.info(
       {
         registrationId: registration.id, account: registration.account, chainId: registration.chainId, channel: registration.channel, verification: "otp",
-        ...metadataLogFields(pendingMetadata),
+        ...metadataLogFields(pendingMetadata), ...initDataLogFields,
       },
       "auth registration created"
     );
@@ -286,15 +317,15 @@ export const submitRegistrationChallenge = async (challengeId: string, challenge
     log.info(
       {
         challengeId: registrationRequest.id, registrationId: registration.id, account: registration.account, chainId: registration.chainId,
-        channel: registration.channel, ...metadataLogFields(pendingMetadata),
+        channel: registration.channel, ...metadataLogFields(pendingMetadata), ...initDataLogFields,
       },
       firstSubmit === 1 ? "auth registration already exists" : "auth registration submitted again"
     );
   }
-  // The metadata sent with register: written after the registration, and cleared once written, not before. A submit
-  // that fails here keeps it on the request, and the same code sent again stores it.
-  if (pendingMetadata !== undefined) {
-    await writeAccountMetadata(registration.account, registration.chainId, pendingMetadata);
+  // The metadata sent with register and the init data it kept: written after the registration, and cleared once
+  // written, not before. A submit that fails here keeps them on the request, and the same code sent again stores them.
+  if (pendingMetadata !== undefined || initDataPending) {
+    await writeAccountMetadata(registration.account, registration.chainId, pendingMetadata, pendingInitData);
     try {
       await prisma.authRegistrationRequest.update({
         data: {metadata: Prisma.DbNull},

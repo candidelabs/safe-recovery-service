@@ -10,11 +10,13 @@ import {getTemplate} from "../src/models/alert/message-templates";
 import {Signers} from "../src/models/signer/signers";
 import {Signer} from "../src/models/signer/signer";
 import {AccountEventTracker} from "../src/models/events/account-event-tracker";
-import {Configuration} from "../src/config/config-manager";
+import {Configuration, StoreInitDataPolicy} from "../src/config/config-manager";
 import {isSensitiveKey} from "../src/logging";
 import {ApiError} from "../src/utils/error";
 import {validate} from "../src/middlewares/validate";
-import {AccountMetadata} from "../src/utils/account-metadata";
+import {AccountMetadata, PENDING_NO_APP_METADATA_KEY} from "../src/utils/account-metadata";
+import {guardianSetupReads} from "../src/utils/account-init-data";
+import {AccountDeployment, wrapErc6492Signature} from "../src/utils/erc6492";
 import {MessageStatements} from "../src/utils/constants";
 import {
     ALREADY_VERIFIED,
@@ -190,13 +192,21 @@ const INDEXER_ALERT = "alert-d";
 const GUARDIAN = "0x9999999999999999999999999999999999999999";
 const OWNER = "0x4444444444444444444444444444444444444444";
 
-jest.spyOn(Configuration, "instance").mockReturnValue({indexerAlert: INDEXER_ALERT} as unknown as Configuration);
+// options.counterfactualAccounts is changed by the tests of init data, and set back after each
+const mockCounterfactualAccounts: {erc6492: boolean, storeInitData: StoreInitDataPolicy} = {erc6492: true, storeInitData: "never"};
+jest.spyOn(Configuration, "instance").mockReturnValue(
+    {indexerAlert: INDEXER_ALERT, counterfactualAccounts: mockCounterfactualAccounts} as unknown as Configuration
+);
 Signers.instance().addSigner({id: "signer", signer: async () => GUARDIAN} as unknown as Signer);
 const addSubscription = jest.spyOn(AccountEventTracker.instance(), "addSubscription");
 
+// The recovery modules of every network (only their addresses are read here), in config order.
+const MODULE_A = "0x38275826e1933303e508433dd5f289315da2541c";
+const MODULE_B = "0x00480f5ecc008995469fa7e12c70ef3dc9fee7fd";
 // Enabled networks in config order, without the constructor (which starts an indexer).
 const addNetwork = (chainId: number, guardian: string | undefined, alert: string) => {
-    Network.instances.add(Object.assign(Object.create(Network.prototype) as Network, {chainId, name: `chain-${chainId}`, guardian, alert}));
+    const modules = [{address: MODULE_A}, {address: MODULE_B}];
+    Network.instances.add(Object.assign(Object.create(Network.prototype) as Network, {chainId, name: `chain-${chainId}`, guardian, alert, modules}));
     Network.supportedChainIds.push(chainId);
 };
 // email is offered by alert-a (first guardian network), alert-b and alert-d (options.indexerAlert); sms by alert-b
@@ -1565,6 +1575,327 @@ describe("account metadata (in-memory tables)", () => {
         for (const [key, value] of Object.entries(third)) {
             expect(text).not.toContain(key);
             expect(text).not.toContain(value);
+        }
+    });
+});
+
+describe("init data of undeployed accounts (in-memory tables)", () => {
+    // What register keeps of an ERC-6492 deployment (src/utils/account-init-data.ts): the SIWE check is mocked to answer
+    // what validateSIWEMessage answers for an account without code, with the results of the guardian check's reads.
+    const TRUE = ethers.utils.defaultAbiCoder.encode(["bool"], [true]);
+    const FALSE = ethers.utils.defaultAbiCoder.encode(["bool"], [false]);
+    const ok = (returnData: string) => ({success: true, returnData});
+    const FACTORY = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67";
+    const newDeployment = (bytes = 100): AccountDeployment =>
+        ({factory: FACTORY, factoryCalldata: ethers.utils.hexlify(ethers.utils.randomBytes(bytes))});
+    const keysOf = (deployment: AccountDeployment) => ({_factory: deployment.factory, _factoryData: deployment.factoryCalldata.toLowerCase()});
+    // the guardian on MODULE_B (the second of the network's modules), or on none
+    const GUARDIAN_FOUND = [ok(FALSE), ok(FALSE), ok(TRUE), ok(TRUE)];
+    const GUARDIAN_MISSING = [ok(TRUE), ok(FALSE), ok(FALSE), ok(FALSE)];
+    const undeployed = (deployment: AccountDeployment, reads = GUARDIAN_FOUND) => ({counterfactual: true, deployment, reads});
+    const statement = (target: string, channel = "email") =>
+        MessageStatements["auth-register"].replace("{{target}}", target).replace("{{channel}}", channel);
+
+    const metadataRowsOf = (account: string) => (mockTables.authAccountMetadata ?? []).filter((row) => row.account === account.toLowerCase());
+    const metadataOf = (account: string, chainId: number) => metadataRowsOf(account).find((row) => row.chainId === chainId)?.metadata;
+    const requestRow = (challengeId: string) => (mockTables.authRegistrationRequest ?? []).find((row) => row.id === challengeId);
+    const linesOf = (message: string) => mockLogLines.filter((line) => line.message === message).map(({bindings, fields}) => ({...bindings, ...fields}));
+    const signature = (deployment: AccountDeployment) => wrapErc6492Signature(deployment, "0x" + "11".repeat(65));
+    const registerWrapped = (
+        account: string, chainId: number, target: string, deployment: AccountDeployment, verifiedTargetToken?: string,
+        metadata?: AccountMetadata, channel = "email",
+    ) => createRegistration(account, chainId, channel, target, "siwe message", signature(deployment), verifiedTargetToken, metadata);
+    // set up per test: another test restores its own spy of this method, which would take this one with it
+    let guardianSigner: jest.SpyInstance;
+
+    beforeEach(() => {
+        guardianSigner = jest.spyOn(Signers.instance().getSigner("signer")!, "signer");
+        mockLogLines.length = 0;
+    });
+    afterEach(() => {
+        guardianSigner.mockRestore();
+        mockCounterfactualAccounts.erc6492 = true;
+        mockCounterfactualAccounts.storeInitData = "never";
+        mockHooks.length = 0;
+    });
+
+    describe.each([
+        ["with a token", true],
+        ["with a code", false],
+    ])("register %s", (_name, withToken) => {
+        // registers (and submits the code), and returns the registration's log line
+        const register = async (account: string, deployment: AccountDeployment, metadata?: AccountMetadata) => {
+            const target = newTarget();
+            const token = withToken ? await verify(target) : undefined;
+            mockLogLines.length = 0;
+            const response = await registerWrapped(account, CHAIN_A, target, deployment, token, metadata);
+            if (!withToken) {
+                const {challengeId} = response as {challengeId: string};
+                const requested = linesOf("auth registration requested");
+                expect(requested).toEqual([expect.objectContaining({challengeId})]);
+                await submitRegistrationChallenge(challengeId, codeFor(target));
+                expect(requestRow(challengeId).metadata ?? null).toBeNull();
+                return {target, line: requested[0]};
+            }
+            return {target, line: linesOf("auth registration created")[0]};
+        };
+
+        test("keeps the init data when deploying installs the guardian ('with-guardian')", async () => {
+            mockCounterfactualAccounts.storeInitData = "with-guardian";
+            const account = newAccount();
+            const deployment = newDeployment();
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+            const {target, line} = await register(account, deployment);
+
+            expect(registrationsOf(target)).toEqual([{account: account.toLowerCase(), chainId: CHAIN_A, channel: "email", guardian: GUARDIAN}]);
+            expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(deployment));
+            expect(line).toMatchObject({accountDeployed: false, guardianInstalled: true, guardianModule: MODULE_B, initData: "kept"});
+            // the guardian check ran in the SIWE check's simulation, with the guardian read first
+            expect(mockSiwe.validateSIWEMessage).toHaveBeenCalledWith(
+                "siwe message", account, CHAIN_A, statement(target), signature(deployment),
+                guardianSetupReads(account, GUARDIAN, [MODULE_A, MODULE_B]),
+            );
+            expect(guardianSigner.mock.invocationCallOrder[0]).toBeLessThan(mockSiwe.validateSIWEMessage.mock.invocationCallOrder[0]);
+            if (!withToken) {
+                expect(linesOf("auth registration created")).toEqual([expect.objectContaining({verification: "otp", initData: "kept"})]);
+            }
+        });
+
+        test("keeps nothing without the guardian ('with-guardian'), and still registers", async () => {
+            mockCounterfactualAccounts.storeInitData = "with-guardian";
+            const account = newAccount();
+            const deployment = newDeployment();
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment, GUARDIAN_MISSING));
+            const {target, line} = await register(account, deployment);
+
+            expect(registrationsOf(target)).toHaveLength(1);
+            expect(metadataRowsOf(account)).toEqual([]);
+            expect(line).toMatchObject({accountDeployed: false, guardianInstalled: false, initData: "no-guardian"});
+            expect(line).not.toHaveProperty("guardianModule");
+            if (!withToken) {
+                expect(linesOf("auth registration created")[0]).not.toHaveProperty("initData");
+            }
+        });
+
+        test("keeps the init data without the guardian ('always')", async () => {
+            mockCounterfactualAccounts.storeInitData = "always";
+            const account = newAccount();
+            const deployment = newDeployment();
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment, GUARDIAN_MISSING));
+            const {line} = await register(account, deployment, {label: "Savings"});
+
+            expect(metadataOf(account, CHAIN_A)).toEqual({...keysOf(deployment), label: "Savings"});
+            expect(line).toMatchObject({guardianInstalled: false, initData: "kept", metadataEntries: 1});
+            expect(line).not.toHaveProperty("guardianModule");
+        });
+
+        test("keeps nothing over 16 KB of calldata", async () => {
+            mockCounterfactualAccounts.storeInitData = "always";
+            const account = newAccount();
+            const deployment = newDeployment(16385);
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+            const {target, line} = await register(account, deployment);
+
+            expect(registrationsOf(target)).toHaveLength(1);
+            expect(metadataRowsOf(account)).toEqual([]);
+            expect(line).toMatchObject({guardianInstalled: true, initData: "too-large"});
+        });
+
+        test("'never' reads no guardian before the SIWE check, passes no reads and logs no new field", async () => {
+            const account = newAccount();
+            const deployment = newDeployment();
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment, []));
+            const {target, line} = await register(account, deployment);
+
+            expect(mockSiwe.validateSIWEMessage.mock.calls[0]).toEqual(["siwe message", account, CHAIN_A, statement(target), signature(deployment)]);
+            if (guardianSigner.mock.invocationCallOrder.length > 0) {
+                expect(guardianSigner.mock.invocationCallOrder[0]).toBeGreaterThan(mockSiwe.validateSIWEMessage.mock.invocationCallOrder[0]);
+            }
+            expect(metadataRowsOf(account)).toEqual([]);
+            expect(line).toMatchObject({accountDeployed: false});
+            for (const field of ["guardianInstalled", "guardianModule", "initData"]) {
+                expect(line).not.toHaveProperty(field);
+            }
+        });
+
+        test("keeps nothing for a deployed account, whose wrapper is ignored", async () => {
+            mockCounterfactualAccounts.storeInitData = "always";
+            const account = newAccount();
+            const deployment = newDeployment();
+            mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: false});
+            const {line} = await register(account, deployment);
+
+            expect(mockSiwe.validateSIWEMessage.mock.calls[0]).toHaveLength(6); // a wrapped signature: the reads are asked for
+            expect(metadataRowsOf(account)).toEqual([]);
+            expect(line).toMatchObject({accountDeployed: true});
+            expect(line).not.toHaveProperty("initData");
+        });
+
+        test("an unwrapped signature passes no reads, whatever the policy", async () => {
+            mockCounterfactualAccounts.storeInitData = "always";
+            const account = newAccount();
+            const target = newTarget();
+            await registerWith(account, CHAIN_A, target, withToken ? await verify(target) : undefined);
+            expect(mockSiwe.validateSIWEMessage.mock.calls[0]).toHaveLength(5);
+            expect(guardianSigner.mock.invocationCallOrder.every((order) => order > mockSiwe.validateSIWEMessage.mock.invocationCallOrder[0])).toBe(true);
+        });
+    });
+
+    test("the pending column holds nothing, the app's object, both, or the init data with the marker", async () => {
+        mockCounterfactualAccounts.storeInitData = "always";
+        const deployment = newDeployment();
+        const cases: [AccountMetadata | undefined, boolean, unknown][] = [
+            [undefined, false, undefined], // as before: a null column
+            [{label: "Savings"}, false, {label: "Savings"}],
+            [{label: "Savings"}, true, {label: "Savings", ...keysOf(deployment)}],
+            [undefined, true, {...keysOf(deployment), [PENDING_NO_APP_METADATA_KEY]: "1"}],
+        ];
+        for (const [metadata, undeployedAccount, pending] of cases) {
+            mockSiwe.validateSIWEMessage.mockResolvedValue(undeployedAccount ? undeployed(deployment) : {counterfactual: false});
+            const {challengeId} = await registerWrapped(newAccount(), CHAIN_A, newTarget(), deployment, undefined, metadata) as {challengeId: string};
+            expect(requestRow(challengeId).metadata).toEqual(pending);
+        }
+    });
+
+    test("a second registration with a code and no metadata keeps the label and stores the init data", async () => {
+        mockCounterfactualAccounts.storeInitData = "with-guardian";
+        const account = newAccount();
+        const email = newTarget();
+        await registerWith(account, CHAIN_A, email, await verify(email), "email", {label: "Savings"});
+        const deployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        const target = newTarget();
+        const {challengeId} = await registerWrapped(account, CHAIN_A, target, deployment) as {challengeId: string};
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"}); // nothing written before /submit
+        mockLogLines.length = 0;
+        await submitRegistrationChallenge(challengeId, codeFor(target));
+
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings", ...keysOf(deployment)});
+        expect(requestRow(challengeId).metadata).toBeNull();
+        const [created] = linesOf("auth registration created");
+        expect(created).toMatchObject({verification: "otp", initData: "kept"});
+        expect(created).not.toHaveProperty("metadataEntries");
+        expect(JSON.stringify(mockLogLines)).not.toContain(PENDING_NO_APP_METADATA_KEY);
+    });
+
+    test("a registration with a code, {} and init data removes the label and stores the init data", async () => {
+        mockCounterfactualAccounts.storeInitData = "with-guardian";
+        const account = newAccount();
+        const email = newTarget();
+        await registerWith(account, CHAIN_A, email, await verify(email), "email", {label: "Savings"});
+        const deployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        const target = newTarget();
+        const {challengeId} = await registerWrapped(account, CHAIN_A, target, deployment, undefined, {}) as {challengeId: string};
+        await submitRegistrationChallenge(challengeId, codeFor(target));
+        expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(deployment));
+    });
+
+    test("a submit sent again, or one that finds the registration made meanwhile, writes what is still pending", async () => {
+        mockCounterfactualAccounts.storeInitData = "always";
+        const account = newAccount();
+        const deployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        // the first submit cannot clear the column: the second one writes it again
+        const target = newTarget();
+        const {challengeId} = await registerWrapped(account, CHAIN_A, target, deployment) as {challengeId: string};
+        const code = codeFor(target);
+        mockHooks.push({table: "authAccountMetadata", method: "create", error: new Error("connection lost")});
+        expect(await statusOf(submitRegistrationChallenge(challengeId, code))).toEqual([undefined, "connection lost"]);
+        expect(metadataRowsOf(account)).toEqual([]);
+        expect(requestRow(challengeId).metadata).toEqual({...keysOf(deployment), [PENDING_NO_APP_METADATA_KEY]: "1"});
+        mockLogLines.length = 0;
+        await submitRegistrationChallenge(challengeId, code);
+        expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(deployment));
+        expect(requestRow(challengeId).metadata).toBeNull();
+        expect(linesOf("auth registration submitted again")).toEqual([expect.objectContaining({challengeId, initData: "kept"})]);
+
+        // a code submitted after the target was registered with a token
+        const other = newAccount();
+        const otherDeployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(otherDeployment));
+        const email = newTarget();
+        const {challengeId: pending} = await registerWrapped(other, CHAIN_A, email, otherDeployment) as {challengeId: string};
+        const pendingCode = codeFor(email);
+        mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: false});
+        await registerWith(other, CHAIN_A, email, await verify(email));
+        expect(metadataRowsOf(other)).toEqual([]);
+        mockLogLines.length = 0;
+        await submitRegistrationChallenge(pending, pendingCode);
+        expect(metadataOf(other, CHAIN_A)).toEqual(keysOf(otherDeployment));
+        expect(linesOf("auth registration already exists")).toEqual([expect.objectContaining({challengeId: pending, initData: "kept"})]);
+    });
+
+    test("stored keys survive a registration that keeps nothing and POST /v1/auth/metadata, are returned, and go with the last registration", async () => {
+        mockCounterfactualAccounts.storeInitData = "with-guardian";
+        const account = newAccount();
+        const deployment = newDeployment();
+        const email = newTarget();
+        const token = await verify(email);
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        const {registrationId: first} = await registerWrapped(account, CHAIN_A, email, deployment, token, {label: "Savings"}) as {registrationId: string};
+        const kept = keysOf(deployment);
+        expect(metadataOf(account, CHAIN_A)).toEqual({...kept, label: "Savings"});
+
+        // a registration that keeps nothing (no guardian this time) does not remove them
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(newDeployment(), GUARDIAN_MISSING));
+        const other = newTarget();
+        const otherToken = await verify(other);
+        const {registrationId: second} = await registerWrapped(account, CHAIN_A, other, newDeployment(), otherToken, {label: "Spending"}) as {registrationId: string};
+        expect(metadataOf(account, CHAIN_A)).toEqual({...kept, label: "Spending"});
+        // nor does the policy turned to 'never'
+        mockCounterfactualAccounts.storeInitData = "never";
+        const third = newTarget();
+        mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: false});
+        const {registrationId: thirdId} = await registerWith(account, CHAIN_A, third, await verify(third), "email", {label: "Third"}) as {registrationId: string};
+        expect(metadataOf(account, CHAIN_A)).toEqual({...kept, label: "Third"});
+
+        // POST /v1/auth/metadata replaces the app's keys only
+        const setMetadata = (metadata: AccountMetadata) => setAccountMetadata(account, CHAIN_A, metadata, "siwe message", "0x1234");
+        expect(await setMetadata({label: "Renamed"})).toEqual({...kept, label: "Renamed"});
+        expect(await setMetadata({})).toEqual(kept);
+
+        // returned by the lookup and GET /v1/auth/registrations
+        expect(await listAccounts(otherToken)).toEqual([entry(account.toLowerCase(), CHAIN_A, kept)]);
+        expect((await fetchRegistrations(account, CHAIN_A, "siwe message", "0x1234")).metadata).toEqual(kept);
+
+        // and gone with the account's last registration on the chain
+        await deleteRegistration(first, "siwe message", "0x1234");
+        await deleteRegistration(second, "siwe message", "0x1234");
+        expect(metadataOf(account, CHAIN_A)).toEqual(kept);
+        await deleteRegistration(thirdId, "siwe message", "0x1234");
+        expect(metadataRowsOf(account)).toEqual([]);
+    });
+
+    test("a later registration of the still undeployed account replaces the keys with the data it verified", async () => {
+        mockCounterfactualAccounts.storeInitData = "always";
+        const account = newAccount();
+        const first = newDeployment();
+        const second = newDeployment();
+        const email = newTarget();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(first));
+        await registerWrapped(account, CHAIN_A, email, first, await verify(email));
+        const other = newTarget();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(second));
+        await registerWrapped(account, CHAIN_A, other, second, await verify(other));
+        expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(second));
+    });
+
+    test("log lines never carry the factory, the calldata, the signature or the marker", async () => {
+        mockCounterfactualAccounts.storeInitData = "always";
+        const account = newAccount();
+        const deployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        const email = newTarget();
+        await registerWrapped(account, CHAIN_A, email, deployment, await verify(email));
+        const target = newTarget();
+        const {challengeId} = await registerWrapped(account, CHAIN_B, target, deployment) as {challengeId: string};
+        await submitRegistrationChallenge(challengeId, codeFor(target));
+
+        expect(linesOf("auth registration created").map((line) => line.initData)).toEqual(["kept", "kept"]);
+        const text = JSON.stringify(mockLogLines).toLowerCase();
+        for (const secret of [FACTORY, deployment.factoryCalldata.slice(2, 40), signature(deployment).slice(2, 40), PENDING_NO_APP_METADATA_KEY]) {
+            expect(text).not.toContain(secret.toLowerCase());
         }
     });
 });

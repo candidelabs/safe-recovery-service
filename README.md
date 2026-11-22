@@ -55,6 +55,10 @@ This configuration file is used to set up and customize the service. It consists
 * `moduleFallbackDeprecation`: ISO 8601 date (e.g. `"2026-11-15"`) since which a request that names no recovery module is deprecated. Once set, such requests are answered with a `Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)). (optional)
 * `moduleFallbackSunset`: ISO 8601 date announced as the end of requests that name no recovery module. Once set, such requests are answered with a `Sunset` header ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)). The header only announces the date: the service keeps serving such requests after it, until the operator removes `fallback: true` from the network's modules (see [Recovery modules in requests](#recovery-modules-in-requests)). Must be later than `moduleFallbackDeprecation`. (optional)
 * `authentication`: A secret every request must carry: `{"apiKey": "..."}` (in the path) or `{"bearerToken": "..."}` (in the `Authorization` header), never both. Omitted or `~`: no authentication. See [Authentication](#authentication). (optional)
+* `counterfactualAccounts`: What the service does with accounts that are not deployed yet (see [Counterfactual accounts](#counterfactual-accounts-erc-6492)). Omitted, `null` or `~`: `{"erc6492": true, "storeInitData": "never"}`, the behavior before this option existed. (optional)
+	+ `erc6492`: `true` or `false` (also `"true"` / `"false"` in any case). With `false`, every signature wrapped with ERC-6492 is refused, deployed account or not. Default `true`.
+	+ `storeInitData`: `"never"`, `"with-guardian"` or `"always"`: whether a registration of an undeployed account keeps its deployment call (see [Init data of undeployed accounts](#init-data-of-undeployed-accounts)). Default `"never"`.
+	+ Any other key, any other value, or `storeInitData` other than `"never"` with `erc6492: false` fails the boot. The values are logged once at boot (`counterfactual accounts configured`).
 
 #### Signers
 
@@ -180,6 +184,7 @@ The recovery endpoints (`/v1/recoveries/*`) do not accept wrapped signatures: th
 Rules:
 
 * A signature without the suffix is checked exactly as before.
+* `options.counterfactualAccounts.erc6492: false` refuses every signature that ends with the suffix, on every endpoint above, whether or not the account is deployed, before the wrapper is decoded and with no chain call. The SIWE message's nonce stays free, so the same message can be sent again with an unwrapped signature.
 * Once the account has code, the deployment data is ignored and the inner signature is checked against the deployed account, so a client may keep sending wrapped signatures after deployment.
 * The check is one `eth_call` to Multicall3's `aggregate3` (the factory call, then `isValidSignature` or `getOwners` on the account in the state the factory call left). Nothing is broadcast. Multicall3 is expected at `0xcA11bde05977b3631167028862bE2a173976CA11` unless the network sets `multicall3`. On a network where it is not deployed, wrapped signatures of undeployed accounts are rejected (deployed accounts keep working), and a warning is logged after boot (`counterfactual accounts unsupported`).
 * The deployment data is chosen by the client: a factory can only deploy at addresses derived from itself, so deployment data that is not the account's own cannot put code (or owners) at its address, and the request fails.
@@ -195,6 +200,7 @@ Errors:
 
 | Status | Message | When |
 | --- | --- | --- |
+| 400 | `ERC-6492 signatures are not accepted by this service` | the signature ends with the magic suffix and `options.counterfactualAccounts.erc6492` is `false` |
 | 400 | `SIWE Message: malformed ERC-6492 signature` | the signature ends with the magic suffix but does not decode |
 | 400 | `ERC-6492 signatures are not supported on this network (<chainId>): Multicall3 is not deployed at <address>` | the account is not deployed and the network has no Multicall3 |
 | 400 | `SIWE Message: the ERC-6492 deployment data does not deploy <account> on chain <chainId>` | auth: the factory call reverts, or leaves no code at the account |
@@ -219,7 +225,51 @@ const wrapped = ethers.utils.hexConcat([
 
 `GET /v1/auth/registrations` and `GET /v1/alerts/subscriptions` take `signature` in the query string. A wrapped signature for a two-owner Safe with abstractionkit's default setup is about 2 KB of hex, well under the usual header limits (Node's default is 16 KB), but a Safe with a very large initializer may not fit. Accepting `POST` for these two reads is a possible follow-up.
 
-Nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `auth registration created` (with a verified-target token), `auth account metadata updated`, `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
+Apart from the init data below, nothing is stored about how a registration or subscription was made: the log lines `auth registration requested`, `auth registration created` (with a verified-target token), `auth account metadata updated`, `alert subscription created` and `alert subscription removed` carry `accountDeployed`.
+
+### Init data of undeployed accounts
+
+An account that registers before it is deployed has an address nobody can deploy once the wallet that made it is lost: the factory call that creates it is gone with the wallet. When `options.counterfactualAccounts.storeInitData` allows it, `POST /v1/auth/register` keeps the deployment call it just verified in simulation, the `factory` and `factoryCalldata` of the ERC-6492 wrapper, as two reserved keys of the account's [metadata](#account-metadata):
+
+* `_factory`: the factory address, checksummed.
+* `_factoryData`: the calldata of the factory call, lower-case `0x` hex.
+
+They are the ERC-6492 deployment call: calling `_factory` with `_factoryData` deploys the account. For a Safe built as above it is a plain `SafeProxyFactory.createProxyWithNonce` call, which also fits a UserOperation's `factory` / `factoryData`; other deployment data fits a UserOperation only when its factory returns the account's address. The account lookup (`POST /v1/auth/accounts`) and `GET /v1/auth/registrations` return them, so a wallet can deploy the account and start a recovery. No request field is added and no response changes: a wallet sees whether its init data was kept in `GET /v1/auth/registrations` (`metadata._factory`).
+
+What is kept, the first rule that matches winning:
+
+| `storeInitData` | Registration | Kept | Log fields |
+| --- | --- | --- | --- |
+| `never` | any | nothing | none |
+| any | deployed account, or unwrapped signature | nothing | none |
+| any | `factoryCalldata` over 16384 bytes | nothing | `guardianInstalled`, `initData: "too-large"` |
+| `with-guardian` | deploying does not install the guardian | nothing | `guardianInstalled: false`, `initData: "no-guardian"` |
+| `with-guardian` | deploying installs the guardian | the two keys | `guardianInstalled: true`, `guardianModule`, `initData: "kept"` |
+| `always` | either | the two keys | `guardianInstalled` as found, `guardianModule` when found, `initData: "kept"` |
+
+* **The guardian check** runs in the same `eth_call` as the signature check, after the factory call: for each of the network's modules, in config order, the account's `isModuleEnabled(module)` and the module's `isGuardian(account, guardian)`, where the guardian is the address the registration is bound to (`guardianAddress`). The guardian is installed when both answer `true` for one module. The init code is never decoded. It runs only when `storeInitData` is not `"never"`, so under `"never"` the log lines have none of these fields.
+* **The registration is accepted either way.** Init data that is not kept never removes keys stored before. A later registration of the account, still undeployed, replaces both keys with the data it verified. The keys stay after the account is deployed, and go with the account's last registration on the chain, as all metadata does.
+* **With a code**, the init data waits with the pending request (as the app's metadata does) and is written when `POST /v1/auth/submit` answers the registration (`auth registration created` with `verification: "otp"`, `auth registration already exists` and `auth registration submitted again` then carry `initData: "kept"`). An account deployed between `register` and `/submit` still gets its keys written. A request whose code is never submitted keeps its copy in the database, up to about 33 KB of hex.
+* The log lines never carry `_factory`, `_factoryData` or the signature; `guardianModule` is a configured, public module address.
+
+`GET /v1/config/getNetworkConfig` tells a wallet what to expect on a network:
+
+```json
+{"name": "sepolia", "chainId": 11155111, "guardianAddress": "0x...", "counterfactualAccounts": {"erc6492": true, "storeInitData": "with-guardian"}, "...": "..."}
+```
+
+* `guardianAddress`: the address of the network's guardian, checksummed; absent on a network without one. A signer whose address cannot be read answers 500, as `register` does.
+* `counterfactualAccounts.erc6492`: the configured switch, and `false` once the service knows Multicall3 is missing on the network. The endpoint makes no RPC call, so it can read `true` for a moment after boot on such a network.
+* `counterfactualAccounts.storeInitData`: the configured policy when `erc6492` above is `true` and the network has a guardian, else `"never"`.
+
+**Wallets.** To be recoverable before it is deployed, an account's initializer must install the guardian itself: under `"with-guardian"`, nothing else is kept, and an account built with abstractionkit's default initializer (which enables the 4337 module only) registers with `guardianInstalled: false`. The expected way is the delegate call of Safe's `setup()` (`setupModules()`) to a contract of the wallet's choosing that enables the recovery module and adds the guardians for `address(this)`. The service does not provide that contract and does not need to know it: it only reads the state the deployment leaves. The guardian's address, from `getNetworkConfig`, is part of the account's address from then on. Before using the keys:
+
+* Read `eth_getCode` first, and ignore the keys once the account has code. They were verified once, at registration: calling `_factory` with `_factoryData` then put code at this address that accepted the account's signature (and, under `"with-guardian"`, had this guardian on a configured module). Nothing checks it again.
+* Match `_factory` against the factories you know before calling it. CREATE2 binds an address to its factory, so the data can only deploy the registrant's own account, but the factory is the registrant's choice. Only the account can write the keys: the write needs a request signed by the account, verified by simulating that very deployment.
+* The keys are written by the service, unlike the app's keys: the guidance that metadata is a name the app stored, not a statement by the service, holds for the app's keys only.
+* The init data shows the owner set (or a passkey's public key) before it is on chain, to whoever proves a registered target and to the operator, who stores it in plaintext.
+
+**Operators.** The service only stores and returns the data; it never deploys an account (it must never broadcast `_factory` without a factory allowlist). Turning `erc6492` off locks undeployed accounts that already registered out of `registrations`, `delete` and `metadata` until they are deployed. Changing `storeInitData` purges nothing: under `"never"` no new keys are written, and the stored ones stay and are still returned. The guardian's address is part of such an account's init data, so changing a network's guardian signer leaves undeployed accounts installing the old one (they then register with `guardianInstalled: false`), and an account has the same address on two networks only if both use the same guardian. Registrations made before this version have no init data; there is no backfill.
 
 ## Verifying an email address or phone number
 
@@ -292,12 +342,15 @@ Wherever it is accepted, a token that is unknown, expired or (for `register` and
 The response, sent with `Cache-Control: no-store`, lists the accounts registered with the token's target on its channel (the registrations made with `POST /v1/auth/register`), for a user who lost the owner key or forgot the Safe address:
 
 ```json
-{"accounts": [{"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111, "registeredAt": "2026-11-20T10:00:00.000Z", "metadata": {"label": "Savings"}}]}
+{"accounts": [
+  {"account": "0x1111111111111111111111111111111111111111", "chainId": 11155111, "registeredAt": "2026-11-20T10:00:00.000Z", "metadata": {"label": "Savings"}},
+  {"account": "0x2222222222222222222222222222222222222222", "chainId": 11155111, "registeredAt": "2026-11-21T10:00:00.000Z", "metadata": {"label": "Spending", "_factory": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67", "_factoryData": "0x1688f0b9..."}}
+]}
 ```
 
 * One entry per account and chain, addresses lower-cased, sorted by account then `chainId`. The list can be empty. Alert subscriptions are not included.
 * `registeredAt`: when the token's target was registered for the account on that chain (the earliest, if it was registered twice), in ISO 8601. It is the only hint for accounts registered without metadata.
-* `metadata`: the account's [metadata](#account-metadata) on that chain, `{}` when there is none. It is the same whichever of the account's targets the lookup is made with.
+* `metadata`: the account's [metadata](#account-metadata) on that chain, `{}` when there is none. It is the same whichever of the account's targets the lookup is made with. An account that registered before it was deployed may carry its deployment call (`_factory`, `_factoryData`, see [Init data of undeployed accounts](#init-data-of-undeployed-accounts)).
 * Only the networks the service has enabled: registrations on a network that was removed or disabled are left out.
 * The registrations are read as stored, with no on-chain check. A Safe whose owner has since removed the guardian or the module is still listed until its registration is deleted (`POST /v1/auth/delete`), so a client should check the guardian on chain before starting a recovery.
 * It can be called again while the token is valid, e.g. to refresh the list after a registration.
@@ -340,7 +393,7 @@ The rules are checked in this order and the first one broken is answered. No mes
 
 One key has a documented meaning: `label`, the name the user gave the account. The service never looks at it. Prefix your app's own keys (`myapp.profileId`).
 
-Keys starting with `_` are reserved for the service, and a request that sends one is refused. The service stores none today. Reads return them as part of the object, and writes keep them: a write replaces the app's keys only, and `{}` removes the app's keys only. They do not count against the limits above, which apply to what an app sends. Send only your app's own keys: drop any key starting with `_` before writing an object back.
+Keys starting with `_` are reserved for the service, and a request that sends one is refused. The service stores two: `_factory` and `_factoryData`, the deployment call of an account that registered before it was deployed (see [Init data of undeployed accounts](#init-data-of-undeployed-accounts)); unlike the app's keys, they are written by the service. Reads return them as part of the object, and writes keep them: a write replaces the app's keys only, and `{}` removes the app's keys only. They do not count against the limits above, which apply to what an app sends. Send only your app's own keys: drop any key starting with `_` before writing an object back.
 
 **Writing it.** `POST /v1/auth/register` takes an optional `metadata`:
 

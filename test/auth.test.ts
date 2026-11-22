@@ -267,11 +267,11 @@ describe('auth (counterfactual account)', ()=>{
         erc6492Magic,
     ]);
 
-    // a SIWE message for the counterfactual account, with its Safe signature by `signers`
-    const signAsSafe = async (statement: string, signers: ethers.Wallet[]): Promise<[SiweMessage, string]> => {
+    // a SIWE message for the counterfactual account (cfAccount unless another is given), with its Safe signature by `signers`
+    const signAsSafe = async (statement: string, signers: ethers.Wallet[], accountAddress = cfAccount.accountAddress): Promise<[SiweMessage, string]> => {
         const siweMessage = new SiweMessage({
             domain: "example.com",
-            address: cfAccount.accountAddress,
+            address: accountAddress,
             statement,
             uri: "https://example.com",
             chainId: Number(chainId),
@@ -279,7 +279,7 @@ describe('auth (counterfactual account)', ()=>{
             nonce: Math.random().toString(36).substring(2),
             issuedAt: new Date().toISOString(),
         });
-        const safeTypedData = getSafeMessageEip712Data(cfAccount.accountAddress, chainId, siweMessage.prepareMessage());
+        const safeTypedData = getSafeMessageEip712Data(accountAddress, chainId, siweMessage.prepareMessage());
         const pairs = await Promise.all(signers.map(async (signer) => ({
             signer: signer.address,
             signature: await signer._signTypedData(safeTypedData.domain, safeTypedData.types, safeTypedData.messageValue),
@@ -343,6 +343,51 @@ describe('auth (counterfactual account)', ()=>{
         const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, [cfOwner, cfSecondOwner]);
         const fetchRes = await registrations(fetchMessage, wrap(cfFactory, cfFactoryCalldata, fetchSignature)).expect(200);
         expect(fetchRes.body.registrations).toEqual([]); // the registration is active once its OTP is submitted
+    });
+
+    // options.counterfactualAccounts.storeInitData, as getNetworkConfig reports it: "always" keeps the deployment call of
+    // an undeployed account that registers; "with-guardian" keeps it only when deploying installs the service's
+    // guardian, which abstractionkit's default initializer does not (it enables the 4337 module only); "never" skips.
+    it('should keep the init data of an undeployed account that registers, per storeInitData', async ()=>{
+        const config = await supertest(app).get('/v1/config/getNetworkConfig').query({chainId: Number(chainId)}).expect(200);
+        const storeInitData = config.body.counterfactualAccounts.storeInitData;
+        if (storeInitData === "never") return;
+
+        const owners = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
+        const ownerAddresses = owners.map((wallet) => wallet.address);
+        const account = SafeAccount.initializeNewAccount(ownerAddresses, {threshold: 2});
+        const [factory, factoryCalldata] = SafeAccount.createFactoryAddressAndData(ownerAddresses, {threshold: 2});
+        expect(await new ethers.providers.JsonRpcProvider(jsonRpcNodeProvider).getCode(account.accountAddress)).toBe("0x");
+        const target = `init-data-${Date.now()}@example.com`;
+        const statement = registerStatement.replace("user@example.com", target);
+
+        const [siweMessage, signature] = await signAsSafe(statement, owners, account.accountAddress);
+        const registerRes = await supertest(app).post('/v1/auth/register/').send({
+            "account": account.accountAddress,
+            "chainId": Number(chainId),
+            "channel": "email",
+            "target": target,
+            "message": siweMessage,
+            "signature": wrap(factory, factoryCalldata, signature),
+        }).expect(200);
+        const response = await fetch('http://localhost:8025/api/v1/messages');
+        const {messages} = await response.json() as {messages: {To: {Address: string}[], Snippet: string}[]};
+        const email = messages.find((message) => message.To.some((to) => to.Address === target));
+        const otp = email ? /\d{6}/.exec(email.Snippet) : null;
+        expect(otp).not.toBeNull();
+        await supertest(app).post('/v1/auth/submit/').send({challengeId: registerRes.body.challengeId, challenge: otp![0]}).expect(200);
+
+        const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, owners, account.accountAddress);
+        const fetchRes = await supertest(app).get('/v1/auth/registrations/').query({
+            account: account.accountAddress,
+            chainId: Number(chainId),
+            message: fetchMessage,
+            signature: wrap(factory, factoryCalldata, fetchSignature),
+        }).expect(200);
+        expect(fetchRes.body.registrations).toHaveLength(1);
+        expect(fetchRes.body.metadata).toEqual(storeInitData === "always"
+            ? {_factory: ethers.utils.getAddress(factory), _factoryData: factoryCalldata.toLowerCase()}
+            : {});
     });
 
     it('should accept plain and still-wrapped signatures once the account is deployed', async ()=>{

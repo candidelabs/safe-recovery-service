@@ -2,8 +2,8 @@ import {ethers} from "ethers";
 
 // ERC-6492 signatures, for accounts that are not deployed yet (counterfactual), and their verification by
 // simulation: one eth_call to Multicall3.aggregate3 that runs the account's factory call, then reads the
-// account (isValidSignature, or getOwners) in the state that call left. Nothing is broadcast and no key of
-// the service is involved.
+// account (isValidSignature, or getOwners) in the state that call left, and any further reads asked for (the
+// guardian check of src/utils/account-init-data.ts). Nothing is broadcast and no key of the service is involved.
 //
 // Security: the deployment data (factory, factoryCalldata) is chosen by the client. CREATE / CREATE2 bind a
 // deployed address to the factory's own address, so a factory can only put code at addresses derived from
@@ -109,18 +109,28 @@ const isNodeExecutionError = (error: unknown): boolean => {
   return false;
 };
 
-// [factory.call(factoryCalldata) (must succeed), account.call(callData) (may fail)] in one eth_call;
-// returns the second call's result.
+// A call made after the factory call, in the state it left, and its result.
+export interface SimulatedCall {
+  target: string;
+  callData: string;
+}
+
+export interface SimulatedResult {
+  success: boolean;
+  returnData: string;
+}
+
+// [factory.call(factoryCalldata) (must succeed), then each of `calls` (may fail)] in one eth_call;
+// returns one result per call of `calls`, in order.
 const simulateDeployAndCall = async (
   provider: CodeAndCallProvider,
   multicall3: string,
   deployment: AccountDeployment,
-  account: string,
-  callData: string,
-): Promise<{success: boolean; returnData: string}> => {
+  calls: SimulatedCall[],
+): Promise<SimulatedResult[]> => {
   const data = MULTICALL3.encodeFunctionData("aggregate3", [[
     {target: deployment.factory, allowFailure: false, callData: deployment.factoryCalldata},
-    {target: account, allowFailure: true, callData},
+    ...calls.map(({target, callData}) => ({target, allowFailure: true, callData})),
   ]]);
   let result: unknown;
   try {
@@ -133,20 +143,42 @@ const simulateDeployAndCall = async (
     }
     throw error;
   }
-  let calls: {success: boolean; returnData: string}[];
+  let results: SimulatedResult[];
   try {
-    [calls] = MULTICALL3.decodeFunctionResult("aggregate3", result as string);
+    [results] = MULTICALL3.decodeFunctionResult("aggregate3", result as string);
   } catch (error) {
     throw new Error(`Multicall3 at ${multicall3} returned data that does not decode as an aggregate3 result`);
   }
-  if (calls.length !== 2) {
-    throw new Error(`Multicall3 at ${multicall3} returned ${calls.length} results for 2 calls`);
+  if (results.length !== 1 + calls.length) {
+    throw new Error(`Multicall3 at ${multicall3} returned ${results.length} results for ${1 + calls.length} calls`);
   }
-  return {success: calls[1].success, returnData: calls[1].returnData};
+  return results.slice(1).map(({success, returnData}) => ({success, returnData}));
 };
 
-// Deploys the account in simulation and runs EIP-1271 on it. False when the account answers anything but the
-// magic value (or reverts); an empty answer means the factory call put no code at `account` (no-result).
+// Deploys the account in simulation, runs EIP-1271 on it, then each of `reads` (may fail, never changes `valid`), all
+// in the one eth_call. `valid` is false when the account answers anything but the magic value (or reverts); an empty
+// answer means the factory call put no code at `account` (no-result). `reads` has one result per read, in order.
+export const simulateIsValidSignatureAndReads = async (
+  provider: CodeAndCallProvider,
+  multicall3: string,
+  deployment: AccountDeployment,
+  account: string,
+  hash: string,
+  signature: string,
+  reads: SimulatedCall[],
+): Promise<{valid: boolean; reads: SimulatedResult[]}> => {
+  const callData = EIP1271.encodeFunctionData("isValidSignature", [hash, signature]);
+  const [{success, returnData}, ...results] = await simulateDeployAndCall(
+    provider, multicall3, deployment, [{target: account, callData}, ...reads]
+  );
+  if (!success) return {valid: false, reads: results};
+  if (ethers.utils.hexDataLength(returnData) === 0) {
+    throw new Erc6492Error("no-result", "the account has no code after the factory call");
+  }
+  return {valid: returnData.slice(0, 10).toLowerCase() === EIP1271_MAGIC, reads: results};
+};
+
+// Deploys the account in simulation and runs EIP-1271 on it (simulateIsValidSignatureAndReads without reads).
 export const simulateIsValidSignature = async (
   provider: CodeAndCallProvider,
   multicall3: string,
@@ -154,15 +186,8 @@ export const simulateIsValidSignature = async (
   account: string,
   hash: string,
   signature: string,
-): Promise<boolean> => {
-  const callData = EIP1271.encodeFunctionData("isValidSignature", [hash, signature]);
-  const {success, returnData} = await simulateDeployAndCall(provider, multicall3, deployment, account, callData);
-  if (!success) return false;
-  if (ethers.utils.hexDataLength(returnData) === 0) {
-    throw new Erc6492Error("no-result", "the account has no code after the factory call");
-  }
-  return returnData.slice(0, 10).toLowerCase() === EIP1271_MAGIC;
-};
+): Promise<boolean> =>
+  (await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, signature, [])).valid;
 
 // Deploys the account in simulation and reads its owners, lower case.
 export const simulateGetOwners = async (
@@ -172,7 +197,7 @@ export const simulateGetOwners = async (
   account: string,
 ): Promise<string[]> => {
   const callData = SAFE_OWNERS.encodeFunctionData("getOwners");
-  const {success, returnData} = await simulateDeployAndCall(provider, multicall3, deployment, account, callData);
+  const [{success, returnData}] = await simulateDeployAndCall(provider, multicall3, deployment, [{target: account, callData}]);
   if (!success || ethers.utils.hexDataLength(returnData) === 0) {
     throw new Erc6492Error("no-result", "the account does not answer getOwners() after the factory call");
   }

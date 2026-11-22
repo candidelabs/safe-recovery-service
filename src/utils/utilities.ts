@@ -10,7 +10,9 @@ import {
   Erc6492Error,
   hasCode,
   isErc6492Signature,
-  simulateIsValidSignature,
+  simulateIsValidSignatureAndReads,
+  SimulatedCall,
+  SimulatedResult,
   UnwrappedSignature,
   unwrapErc6492Signature,
 } from "./erc6492";
@@ -372,6 +374,8 @@ const requireErc6492Accepted = () => {
 
 export interface SiweVerification {
   counterfactual: boolean; // the account was not deployed: its ERC-6492 signature was verified in simulation
+  deployment?: AccountDeployment; // set when counterfactual: the deployment data that was simulated
+  reads?: SimulatedResult[]; // set when counterfactual: one per read passed in, in order ([] when none)
 }
 
 export interface OwnerSiweVerification {
@@ -380,14 +384,19 @@ export interface OwnerSiweVerification {
 
 // Self mode (standard ERC-6492): the SIWE address is the account and the account signs. An ERC-6492-wrapped
 // signature of an account without code is checked by deploying the account in simulation and calling its
-// isValidSignature; once the account has code, the wrapper's deployment data is ignored.
-export async function validateSIWEMessage(message: string, account: string, chainId: number, statement: string, signature: string): Promise<SiweVerification> {
+// isValidSignature, then `reads` (the guardian check of a registration) in the same simulation; once the account has
+// code, the wrapper's deployment data is ignored, and so are `reads`.
+export async function validateSIWEMessage(
+  message: string, account: string, chainId: number, statement: string, signature: string, reads?: SimulatedCall[],
+): Promise<SiweVerification> {
   const network = Network.instances.get(chainId.toString())!;
   const [siweMessage, reservation] = parseSIWEMessage(message, account, chainId, statement);
-  return releaseNonceOnFailure(reservation, () => verifyAccountSIWESignature(siweMessage, account, chainId, signature, network));
+  return releaseNonceOnFailure(reservation, () => verifyAccountSIWESignature(siweMessage, account, chainId, signature, network, reads ?? []));
 }
 
-const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: string, chainId: number, signature: string, network: Network): Promise<SiweVerification> => {
+const verifyAccountSIWESignature = async (
+  siweMessage: SiweMessage, account: string, chainId: number, signature: string, network: Network, reads: SimulatedCall[],
+): Promise<SiweVerification> => {
   if (!isErc6492Signature(signature)) {
     await verifySIWESignature(siweMessage, signature, network);
     return {counterfactual: false};
@@ -400,10 +409,10 @@ const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: str
   }
   await network.requireCounterfactualSupport();
   const hash = ethers.utils.hashMessage(siweMessage.prepareMessage()); // the hash siwe passes to isValidSignature
-  let validSignature: boolean;
+  let simulation: {valid: boolean; reads: SimulatedResult[]};
   try {
-    validSignature = await simulateIsValidSignature(
-      network.jsonRPCProvider, network.multicall3, deployment, account, hash, innerSignature
+    simulation = await simulateIsValidSignatureAndReads(
+      network.jsonRPCProvider, network.multicall3, deployment, account, hash, innerSignature, reads
     );
   } catch (error) {
     if (error instanceof Erc6492Error) {
@@ -411,10 +420,10 @@ const verifyAccountSIWESignature = async (siweMessage: SiweMessage, account: str
     }
     throw error;
   }
-  if (!validSignature) {
+  if (!simulation.valid) {
     throw invalidSIWESignature();
   }
-  return {counterfactual: true};
+  return {counterfactual: true, deployment, reads: simulation.reads};
 };
 
 // Owner mode (this service's variant of ERC-6492): the SIWE address is an owner of the account, and the
