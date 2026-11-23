@@ -1881,8 +1881,8 @@ describe("init data of undeployed accounts (in-memory tables)", () => {
         expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(second));
     });
 
-    // A register with a token keeps no pending request: when the write after the registration fails, the same register
-    // sent again finds the registration (409) and is what stores the init data.
+    // A register with a token keeps no pending request: when the write after the registration fails, the register sent
+    // again (with a new SIWE message; the check is mocked here) finds the registration (409) and stores the init data.
     const CONFLICT = [409, expect.stringContaining("An active registration already exists")];
 
     test("a register with a token whose write failed is repaired by sending it again, which answers 409", async () => {

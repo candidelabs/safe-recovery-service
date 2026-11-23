@@ -488,7 +488,8 @@ describe('auth (counterfactual account)', ()=>{
         });
 
         // A register with a verifiedTargetToken keeps no pending request, so when the write of its init data fails the
-        // same register sent again is what stores it. Here the first register keeps nothing because of the policy.
+        // register sent again, with a new SIWE message, is what stores it. Here the first register keeps nothing because
+        // of the policy.
         it('should store the init data of a registered target that registers again with a verifiedTargetToken, and answer 409', async ()=>{
             const undeployed = plainAccount();
             const target = newTarget();

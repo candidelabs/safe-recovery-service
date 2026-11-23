@@ -164,7 +164,8 @@ export const createRegistration = async (
   if (existingRegistration){
     // Still a 409. With a verified target, the init data the request carries is stored first, behind the same account
     // signature and verified target as a new registration: a register with a token has no pending request to keep it
-    // when the write below fails, so the same register sent again is what stores it.
+    // when the write below fails, so the register sent again is what stores it. It needs a newly signed message: the
+    // first one's nonce stays used once its signature was verified.
     if (verification && keepsInitData) {
       await writeAccountMetadata(account, chainId, undefined, initData.entries);
       log.info(
