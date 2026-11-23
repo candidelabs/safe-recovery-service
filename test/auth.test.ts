@@ -410,19 +410,18 @@ describe('auth (counterfactual account)', ()=>{
             return submitted.body.verifiedTargetToken;
         };
 
-        // Registers the undeployed account under `policy` with a new email address, verified by the registration's
-        // code or by a verifiedTargetToken, and returns the metadata the service then answers for the account.
-        const registerUnder = async (
-            policy: StoreInitDataPolicy, {account, owners, factory, factoryCalldata}: Undeployed, verification: "otp" | "token" = "otp",
-        ) => {
+        const setPolicy = async (policy: StoreInitDataPolicy) => {
             Configuration.instance().counterfactualAccounts = {erc6492: true, storeInitData: policy};
             expect((await networkConfig()).counterfactualAccounts).toEqual({erc6492: true, storeInitData: policy});
-            expect(await provider.getCode(account)).toBe("0x");
-            const target = `init-data-${ethers.utils.hexlify(ethers.utils.randomBytes(6)).slice(2)}@example.com`;
-            const verifiedTargetToken = verification === "token" ? await verifyTarget(target) : undefined;
+        };
 
+        const newTarget = () => `init-data-${ethers.utils.hexlify(ethers.utils.randomBytes(6)).slice(2)}@example.com`;
+
+        // POST /v1/auth/register for the undeployed account: a new SIWE message signed by its owners, wrapped with its
+        // deployment call
+        const sendRegister = async ({account, owners, factory, factoryCalldata}: Undeployed, target: string, verifiedTargetToken?: string) => {
             const [siweMessage, signature] = await signAsSafe(registerStatement.replace("user@example.com", target), owners, account);
-            const registerRes = await supertest(app).post('/v1/auth/register/').send({
+            return await supertest(app).post('/v1/auth/register/').send({
                 "account": account,
                 "chainId": Number(chainId),
                 "channel": "email",
@@ -430,15 +429,11 @@ describe('auth (counterfactual account)', ()=>{
                 "message": siweMessage,
                 "signature": wrap(factory, factoryCalldata, signature),
                 ...(verifiedTargetToken === undefined ? {} : {verifiedTargetToken}),
-            }).expect(200);
-            if (verifiedTargetToken === undefined) {
-                await supertest(app).post('/v1/auth/submit/')
-                    .send({challengeId: registerRes.body.challengeId, challenge: await codeSentTo(target)}).expect(200);
-            } else {
-                // registered at once: no code, no challenge
-                expect(registerRes.body.registrationId).toBeDefined();
-            }
+            });
+        };
 
+        // the metadata GET /v1/auth/registrations answers for the account, which has one registration
+        const storedMetadata = async ({account, owners, factory, factoryCalldata}: Undeployed) => {
             const [fetchMessage, fetchSignature] = await signAsSafe(fetchStatement, owners, account);
             const fetchRes = await supertest(app).get('/v1/auth/registrations/').query({
                 account,
@@ -448,6 +443,25 @@ describe('auth (counterfactual account)', ()=>{
             }).expect(200);
             expect(fetchRes.body.registrations).toHaveLength(1);
             return fetchRes.body.metadata;
+        };
+
+        // Registers the undeployed account under `policy` with a new email address, verified by the registration's
+        // code or by a verifiedTargetToken, and returns the metadata the service then answers for the account.
+        const registerUnder = async (policy: StoreInitDataPolicy, undeployed: Undeployed, verification: "otp" | "token" = "otp") => {
+            await setPolicy(policy);
+            expect(await provider.getCode(undeployed.account)).toBe("0x");
+            const target = newTarget();
+            const verifiedTargetToken = verification === "token" ? await verifyTarget(target) : undefined;
+            const registerRes = await sendRegister(undeployed, target, verifiedTargetToken);
+            expect(registerRes.status).toBe(200);
+            if (verifiedTargetToken === undefined) {
+                await supertest(app).post('/v1/auth/submit/')
+                    .send({challengeId: registerRes.body.challengeId, challenge: await codeSentTo(target)}).expect(200);
+            } else {
+                // registered at once: no code, no challenge
+                expect(registerRes.body.registrationId).toBeDefined();
+            }
+            return storedMetadata(undeployed);
         };
 
         it('should keep nothing under "never"', async ()=>{
@@ -471,6 +485,24 @@ describe('auth (counterfactual account)', ()=>{
         it('should keep the init data under "with-guardian" when deploying installs the guardian', async ()=>{
             const undeployed = await guardianAccount();
             expect(await registerUnder("with-guardian", undeployed)).toEqual(kept(undeployed));
+        });
+
+        // A register with a verifiedTargetToken keeps no pending request, so when the write of its init data fails the
+        // same register sent again is what stores it. Here the first register keeps nothing because of the policy.
+        it('should store the init data of a registered target that registers again with a verifiedTargetToken, and answer 409', async ()=>{
+            const undeployed = plainAccount();
+            const target = newTarget();
+            const verifiedTargetToken = await verifyTarget(target);
+            await setPolicy("never");
+            expect((await sendRegister(undeployed, target, verifiedTargetToken)).status).toBe(200);
+            expect(await storedMetadata(undeployed)).toEqual({});
+
+            await setPolicy("always");
+            // without the token: 409, and nothing is written
+            expect((await sendRegister(undeployed, target)).status).toBe(409);
+            expect(await storedMetadata(undeployed)).toEqual({});
+            expect((await sendRegister(undeployed, target, verifiedTargetToken)).status).toBe(409);
+            expect(await storedMetadata(undeployed)).toEqual(kept(undeployed));
         });
     });
 

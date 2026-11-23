@@ -158,12 +158,25 @@ export const createRegistration = async (
       target: {equals: target.toLowerCase()},
     }
   });
-  if (existingRegistration){
-    throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} on the '${channel}' channel`);
-  }
   // the deployment call of an undeployed account, when the policy keeps it ({} otherwise; keeping nothing removes nothing)
   const initData = resolveInitData(storeInitData, siwe, moduleAddresses);
   const keepsInitData = Object.keys(initData.entries).length > 0;
+  if (existingRegistration){
+    // Still a 409. With a verified target, the init data the request carries is stored first, behind the same account
+    // signature and verified target as a new registration: a register with a token has no pending request to keep it
+    // when the write below fails, so the same register sent again is what stores it.
+    if (verification && keepsInitData) {
+      await writeAccountMetadata(account, chainId, undefined, initData.entries);
+      log.info(
+        {
+          registrationId: existingRegistration.id, account: existingRegistration.account, chainId, channel,
+          verificationId: verification.verificationId, accountDeployed: !counterfactual, ...initData.log,
+        },
+        "auth registration init data stored"
+      );
+    }
+    throw new ApiError(httpStatus.CONFLICT, `An active registration already exists for ${account} on chainId ${chainId} on the '${channel}' channel`);
+  }
   //
   if (verification) {
     // the target was verified: no second code
@@ -176,7 +189,8 @@ export const createRegistration = async (
       },
       "auth registration created"
     );
-    // after the line above: a failed write answers 500, and the registration it leaves is in the log
+    // after the line above: a failed write answers 500, and the registration it leaves is in the log; the register
+    // sent again then stores the init data (the 409 above), and the app sets its own keys with POST /v1/auth/metadata
     if (metadata !== undefined || keepsInitData) {
       await writeAccountMetadata(account, chainId, metadata, initData.entries);
     }

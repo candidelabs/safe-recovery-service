@@ -1030,7 +1030,7 @@ describe("account metadata (in-memory tables)", () => {
         expect(linesOf("auth registration created")[0]).not.toHaveProperty("metadataEntries");
     });
 
-    test("nothing is stored on a 409, a refused token or a failed SIWE check", async () => {
+    test("the metadata sent is not stored on a 409, a refused token or a failed SIWE check", async () => {
         const account = newAccount();
         const target = newTarget();
         const token = await verify(target);
@@ -1879,6 +1879,87 @@ describe("init data of undeployed accounts (in-memory tables)", () => {
         mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(second));
         await registerWrapped(account, CHAIN_A, other, second, await verify(other));
         expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(second));
+    });
+
+    // A register with a token keeps no pending request: when the write after the registration fails, the same register
+    // sent again finds the registration (409) and is what stores the init data.
+    const CONFLICT = [409, expect.stringContaining("An active registration already exists")];
+
+    test("a register with a token whose write failed is repaired by sending it again, which answers 409", async () => {
+        mockCounterfactualAccounts.storeInitData = "always";
+        const account = newAccount();
+        const deployment = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        const target = newTarget();
+        const token = await verify(target);
+        const lost = () => ({table: "authAccountMetadata", method: "create", error: new Error("connection lost")});
+        // the registration is created, then the write of its init data fails
+        mockHooks.push(lost());
+        expect(await statusOf(registerWrapped(account, CHAIN_A, target, deployment, token))).toEqual([undefined, "connection lost"]);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(metadataRowsOf(account)).toEqual([]);
+        // sent again while the write still fails: the error again, not a 409 that would end the app's retries
+        mockHooks.push(lost());
+        expect(await statusOf(registerWrapped(account, CHAIN_A, target, deployment, token))).toEqual([undefined, "connection lost"]);
+        expect(metadataRowsOf(account)).toEqual([]);
+        expect(mockHooks).toEqual([]);
+
+        mockLogLines.length = 0;
+        expect(await statusOf(registerWrapped(account, CHAIN_A, target, deployment, token))).toEqual(CONFLICT);
+        expect(registrationsOf(target)).toHaveLength(1);
+        expect(metadataOf(account, CHAIN_A)).toEqual(keysOf(deployment));
+        const registrationId = mockTables.authRegistration.find((row) => row.target === target).id;
+        expect(linesOf("auth registration init data stored")).toEqual([expect.objectContaining({
+            registrationId, account: account.toLowerCase(), chainId: CHAIN_A, channel: "email", accountDeployed: false,
+            guardianInstalled: true, guardianModule: MODULE_B, initData: "kept",
+        })]);
+        expect(linesOf("auth registration created")).toEqual([]);
+    });
+
+    test("a 409 stores init data only with a token, and only what the policy keeps", async () => {
+        const account = newAccount();
+        const target = newTarget();
+        const token = await verify(target);
+        mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: false});
+        await registerWith(account, CHAIN_A, target, token, "email", {label: "Savings"});
+        const deployment = newDeployment();
+        const again = (sent: AccountDeployment, verifiedTargetToken?: string, metadata?: AccountMetadata) =>
+            statusOf(registerWrapped(account, CHAIN_A, target, sent, verifiedTargetToken, metadata));
+        mockLogLines.length = 0;
+
+        // nothing under 'never', for a deployed account, without the guardian under 'with-guardian', or without a token
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment, []));
+        expect(await again(deployment, token)).toEqual(CONFLICT);
+        mockCounterfactualAccounts.storeInitData = "always";
+        mockSiwe.validateSIWEMessage.mockResolvedValue({counterfactual: false});
+        expect(await again(deployment, token)).toEqual(CONFLICT);
+        mockCounterfactualAccounts.storeInitData = "with-guardian";
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment, GUARDIAN_MISSING));
+        expect(await again(deployment, token)).toEqual(CONFLICT);
+        mockCounterfactualAccounts.storeInitData = "always";
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(deployment));
+        expect(await again(deployment)).toEqual(CONFLICT);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings"});
+        expect(linesOf("auth registration init data stored")).toEqual([]);
+
+        // with a token and the guardian: stored next to the app's keys, which the metadata sent with a 409 never replaces
+        mockCounterfactualAccounts.storeInitData = "with-guardian";
+        expect(await again(deployment, token, {label: "Other"})).toEqual(CONFLICT);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings", ...keysOf(deployment)});
+        expect(linesOf("auth registration init data stored")).toEqual([
+            expect.objectContaining({guardianInstalled: true, guardianModule: MODULE_B, initData: "kept"}),
+        ]);
+        // sent again with other data, it replaces the keys with the data it verified, as a new registration does
+        const second = newDeployment();
+        mockSiwe.validateSIWEMessage.mockResolvedValue(undeployed(second));
+        expect(await again(second, token)).toEqual(CONFLICT);
+        expect(metadataOf(account, CHAIN_A)).toEqual({label: "Savings", ...keysOf(second)});
+        expect(registrationsOf(target)).toHaveLength(1);
+
+        const text = JSON.stringify(mockLogLines).toLowerCase();
+        for (const secret of [FACTORY, deployment.factoryCalldata.slice(2, 40), second.factoryCalldata.slice(2, 40), signature(second).slice(2, 40)]) {
+            expect(text).not.toContain(secret.toLowerCase());
+        }
     });
 
     test("log lines never carry the factory, the calldata, the signature or the marker", async () => {
