@@ -512,7 +512,7 @@ describe('auth (counterfactual account)', ()=>{
         // POST /v1/auth/accounts/deploy sends a transaction, paid by the network's deployAccounts.signer: config.json must
         // enable deployAccounts on the network, and the signer must hold funds, else the case is skipped with a message.
         // The stand-in's "factory" is Multicall3, which the case adds to the network's factories itself (and takes out
-        // afterwards), as the cases above set storeInitData.
+        // afterwards), as the cases above set storeInitData. Its own timeout: it polls the deployment for up to 10 minutes.
         it('should deploy an undeployed account it sponsors, after which signature/request passes', async ()=>{
             const network = Network.instances.get(chainId.toString())!;
             const configuredDeployAccounts = network.deployAccounts;
@@ -580,7 +580,7 @@ describe('auth (counterfactual account)', ()=>{
             } finally {
                 network.deployAccounts = configuredDeployAccounts;
             }
-        });
+        }, 12 * 60 * 1000);
     });
 
     it('should accept plain and still-wrapped signatures once the account is deployed', async ()=>{
