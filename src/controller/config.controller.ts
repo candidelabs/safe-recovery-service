@@ -44,7 +44,12 @@ export const getNetworkConfig = catchAsync(async (req, res) => {
       },
       finalization: {
         enabled: false,
-      }
+      },
+      // the deployment of an undeployed account from its stored init data (POST /v1/auth/accounts/deploy): a wallet
+      // reads the factories before registering, to know whether its own will be sponsored
+      deployment: {
+        enabled: false,
+      },
     }
   };
   //
@@ -65,6 +70,16 @@ export const getNetworkConfig = catchAsync(async (req, res) => {
     result.sponsorships.finalization = {
       enabled: true,
       rateLimit: network.finalizeRecoveryRequestConfig.rateLimit,
+    }
+  }
+  // the configured switch, off once Multicall3 is known to be missing (the settled check, as erc6492 above)
+  const deployAccounts = network.deployAccounts;
+  if (deployAccounts.enabled && network.counterfactualSupported !== false){
+    result.sponsorships.deployment = {
+      enabled: true,
+      factories: deployAccounts.factories.map((factory) => ethers.utils.getAddress(factory)),
+      requireGuardian: deployAccounts.requireGuardian,
+      rateLimit: deployAccounts.rateLimit,
     }
   }
   //

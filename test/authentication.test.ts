@@ -20,10 +20,12 @@ const V0_1_0_3_MINUTES = "0x949d01d424bE050D09C16025dd007CB59b3A8c66";
 const CHAIN_ID = 11155111;
 const API_KEY = "test-api-key-0123456789abcdef";
 const BEARER_TOKEN = "test-bearer-token-0123456789abcdef";
-// the network's guardian
+// the network's guardian, and the signer that pays for sponsored deployments
 const GUARDIAN = ethers.Wallet.createRandom();
+const DEPLOYER = ethers.Wallet.createRandom();
+const SAFE_PROXY_FACTORY = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67";
 
-const config = (authentication?: unknown, counterfactualAccounts?: unknown): Record<string, any> => ({
+const config = (authentication?: unknown, counterfactualAccounts?: unknown, deployAccounts?: unknown): Record<string, any> => ({
     options: {
         env: "development",
         port: 4337,
@@ -33,7 +35,7 @@ const config = (authentication?: unknown, counterfactualAccounts?: unknown): Rec
         ...(authentication === undefined ? {} : {authentication}),
         ...(counterfactualAccounts === undefined ? {} : {counterfactualAccounts}),
     },
-    signers: [{id: "signer", privateKey: GUARDIAN.privateKey}],
+    signers: [{id: "signer", privateKey: GUARDIAN.privateKey}, {id: "deployer", privateKey: DEPLOYER.privateKey}],
     alerts: [{id: "alert", channels: {email: {webhook: {endpoint: "https://webhook.example.com/"}}}}],
     networks: {
         sepolia: {
@@ -43,6 +45,7 @@ const config = (authentication?: unknown, counterfactualAccounts?: unknown): Rec
             recoveryModules: [{address: V0_1_0_3_MINUTES, fallback: true, indexer: {enabled: false, startBlock: 0}}],
             guardian: "signer",
             alerts: "alert",
+            ...(deployAccounts === undefined ? {} : {deployAccounts}),
         },
     },
 });
@@ -54,8 +57,8 @@ type Loaded = {
     network: () => {counterfactualSupported?: boolean};
 };
 
-const load = (authentication?: unknown, counterfactualAccounts?: unknown): Loaded => {
-    mockRawConfig = config(authentication, counterfactualAccounts);
+const load = (authentication?: unknown, counterfactualAccounts?: unknown, deployAccounts?: unknown): Loaded => {
+    mockRawConfig = config(authentication, counterfactualAccounts, deployAccounts);
     let loaded: Loaded | undefined;
     jest.isolateModules(() => {
         const {Network} = require("../src/models/network");
@@ -151,6 +154,34 @@ describe("getNetworkConfig", () => {
         expect((await get()).counterfactualAccounts).toEqual({erc6492: false, storeInitData: "never"});
         loaded.network().counterfactualSupported = true;
         expect((await get()).counterfactualAccounts).toEqual({erc6492: true, storeInitData: "with-guardian"});
+    });
+
+    test("answers sponsorships.deployment disabled by default", async () => {
+        const loaded = load();
+        const {body} = await supertest(loaded.app).get(networkConfig("")).query({chainId: CHAIN_ID}).expect(200);
+        expect(body.sponsorships.deployment).toEqual({enabled: false});
+    });
+
+    test("answers sponsorships.deployment when it is on, with checksummed factories, and off once Multicall3 is known to be missing", async () => {
+        const loaded = load(undefined, {storeInitData: "with-guardian"}, {
+            enabled: "true",
+            signer: "deployer",
+            factories: [SAFE_PROXY_FACTORY.toLowerCase()],
+            maxGas: 800000,
+            rateLimit: {maxPerTarget: 2, maxTotal: 50, period: "1d"},
+        });
+        const get = async () => (await supertest(loaded.app).get(networkConfig("")).query({chainId: CHAIN_ID}).expect(200)).body;
+        const deployment = {
+            enabled: true,
+            factories: [SAFE_PROXY_FACTORY],
+            requireGuardian: true,
+            rateLimit: {maxPerTarget: 2, maxTotal: 50, period: 86400},
+        };
+        expect((await get()).sponsorships.deployment).toEqual(deployment);
+        loaded.network().counterfactualSupported = false;
+        expect((await get()).sponsorships.deployment).toEqual({enabled: false});
+        loaded.network().counterfactualSupported = true;
+        expect((await get()).sponsorships.deployment).toEqual(deployment);
     });
 });
 

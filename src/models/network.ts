@@ -5,6 +5,7 @@ import {Indexer} from "../services/indexer.service";
 import {createRecoveryModule, RecoveryModule, RecoveryModuleConfig} from "./recovery-module";
 import {ApiError} from "../utils/error";
 import {isMulticall3Deployed} from "../utils/erc6492";
+import type {DeployAccounts} from "../config/config-manager";
 
 interface ExecuteRecoveryRequestConfig {
   enabled: boolean;
@@ -40,6 +41,8 @@ export class Network {
   // The settled answer of supportsCounterfactual(): unset until the first check ends, and again after a failed one.
   // Read where no RPC call may be awaited (getNetworkConfig).
   public counterfactualSupported?: boolean;
+  // The sponsored deployment of undeployed accounts (POST /v1/auth/accounts/deploy), see parseDeployAccounts
+  public deployAccounts: DeployAccounts;
   //
   public static supportedChainIds: number[] = [];
   public static instances: StaticInstanceManager<Network> = new StaticInstanceManager(undefined);
@@ -55,6 +58,7 @@ export class Network {
     guardian: string | undefined,
     alert: string | undefined,
     multicall3: string,
+    deployAccounts: DeployAccounts = {enabled: false},
   ) {
     this.name = name;
     this.chainId = chainId;
@@ -69,6 +73,7 @@ export class Network {
     this.guardian = guardian;
     this.alert = alert;
     this.multicall3 = multicall3;
+    this.deployAccounts = deployAccounts;
     this.indexer = new Indexer(this);
     this.indexer.start();
     Network.supportedChainIds.push(chainId);

@@ -111,6 +111,18 @@
           "period": "30d"
         }
       },
+      "deployAccounts": {
+        "enabled": false,
+        "signer": "signer-3",
+        "factories": ["0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67"],
+        "requireGuardian": true,
+        "maxGas": 1000000,
+        "rateLimit": {
+          "maxPerTarget": 2,
+          "maxTotal": 50,
+          "period": "1d"
+        }
+      },
       "guardian": "signer-1",
       "alerts": "alert-2",
       "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11"

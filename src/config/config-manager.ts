@@ -88,6 +88,8 @@ type Config = {
       indexer?: IndexerConfig;
       // Multicall3 used to verify ERC-6492 signatures of undeployed accounts; defaults to the canonical address
       multicall3?: string;
+      // the sponsored deployment of undeployed accounts from their stored init data (see parseDeployAccounts)
+      deployAccounts?: unknown;
     };
   };
 };
@@ -498,6 +500,11 @@ export class Configuration {
         throw new Error(`Network '${networkName}' 'multicall3' must be a valid address.`);
       }
       //
+      const deployAccounts = parseDeployAccounts(networkName, networkConfig.deployAccounts);
+      if (deployAccounts.enabled) {
+        this.checkDeployAccounts(networkName, chainId, deployAccounts, networkConfig.guardian == "~" ? undefined : networkConfig.guardian);
+      }
+      //
       new Network(
         networkName,
         chainId,
@@ -509,11 +516,44 @@ export class Configuration {
         networkConfig.guardian == "~" ? undefined : networkConfig.guardian,
         networkConfig.alerts == "~" ? undefined : networkConfig.alerts,
         ethers.utils.getAddress(multicall3),
+        deployAccounts,
       );
     });
     if (Network.instances.instances.length === 0) {
       throw new Error("At least one enabled network configuration must be provided.");
     }
+  }
+
+  // The checks of an enabled deployAccounts block that need the rest of the configuration, and its boot lines.
+  private checkDeployAccounts(networkName: string, chainId: number, deployAccounts: EnabledDeployAccounts, guardian: string | undefined) {
+    const {signer: signerId, factories, requireGuardian, maxGas, rateLimit} = deployAccounts;
+    if (!Signers.instance().getSigner(signerId)) {
+      throw new Error(`Network '${networkName}' deployAccounts.signer is not found in declared signers.`);
+    }
+    // only a registration stores init data, and a network without a guardian takes none
+    if (!guardian) {
+      throw new Error(`Network '${networkName}' deployAccounts requires a 'guardian': without one nothing registers, so no init data is stored.`);
+    }
+    const context = { network: networkName, chainId };
+    if (signerId === guardian) {
+      log.warn(
+        { ...context, signerId, hint: "a dedicated signer keeps the guardian's key and its queue apart from paid deployments" },
+        "account deployment signer is also the guardian"
+      );
+    }
+    if (rateLimit === undefined) {
+      log.warn({ ...context, hint: "set deployAccounts.rateLimit" }, "account deployment sponsorship has no rate limit");
+    }
+    if (this.counterfactualAccounts.storeInitData === "never") {
+      log.warn(
+        { ...context, hint: "only init data stored under an earlier options.counterfactualAccounts.storeInitData can be deployed" },
+        "account deployment sponsorship enabled but no init data is stored"
+      );
+    }
+    log.info(
+      { ...context, signerId, factoryCount: factories.length, requireGuardian, maxGas, rateLimit },
+      "account deployment sponsorship configured"
+    );
   }
 }
 
@@ -619,6 +659,137 @@ export const parseCounterfactualAccounts = (value: unknown): CounterfactualAccou
     throw new Error("Options.counterfactualAccounts.storeInitData must be 'never' when erc6492 is false.");
   }
   return {erc6492, storeInitData: storeInitData as StoreInitDataPolicy};
+};
+
+// The sponsored deployment of undeployed accounts (POST /v1/auth/accounts/deploy): the signer that pays, the factories
+// whose calls it pays for, whether the deployment must install this service's guardian, the most gas one deployment
+// may use, and the limits per verified target and per network over a period (in seconds).
+export type DeployAccountsRateLimit = {maxPerTarget?: number; maxTotal?: number; period: number};
+export type EnabledDeployAccounts = {
+  enabled: true;
+  signer: string;
+  factories: string[]; // lower case
+  requireGuardian: boolean;
+  maxGas: number;
+  rateLimit?: DeployAccountsRateLimit;
+};
+export type DeployAccounts = {enabled: false} | EnabledDeployAccounts;
+
+const DEPLOY_ACCOUNTS_KEYS = ["enabled", "signer", "factories", "requireGuardian", "maxGas", "rateLimit"];
+const DEPLOY_ACCOUNTS_RATE_LIMIT_KEYS = ["maxPerTarget", "maxTotal", "period"];
+export const DEFAULT_DEPLOY_ACCOUNTS_MAX_GAS = 1_000_000;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  const prototype = typeof value === "object" && value !== null && !Array.isArray(value) ? Object.getPrototypeOf(value) : undefined;
+  return prototype === Object.prototype || prototype === null;
+};
+
+// A boolean, or "true" / "false" in any case (what ${ENV::VAR} yields); undefined when it is neither.
+const parseBooleanSetting = (value: unknown): boolean | undefined => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string" && ["true", "false"].includes(value.toLowerCase())) return value.toLowerCase() === "true";
+  return undefined;
+};
+
+// A positive integer, or a string of digits that is one; undefined when it is neither.
+const parsePositiveInteger = (value: unknown): number | undefined => {
+  const number = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 ? number : undefined;
+};
+
+// networks.<name>.deployAccounts: omitted, null, '~', or enabled false (or omitted) for no sponsorship, and then nothing
+// but the key names is read. Booleans and numbers may be given as strings (what ${ENV::VAR} yields). Pure: the checks
+// against the rest of the configuration (the signer is declared, the network has a guardian) are made by
+// Configuration.initializeNetworks.
+export const parseDeployAccounts = (networkName: string, value: unknown): DeployAccounts => {
+  if (value === undefined || value === null || value === "~") return {enabled: false};
+  const field = `Network '${networkName}' deployAccounts`;
+  if (!isPlainObject(value)) {
+    throw new Error(`Network '${networkName}' 'deployAccounts' must be an object, or '~'.`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!DEPLOY_ACCOUNTS_KEYS.includes(key)) {
+      throw new Error(`${field} has an unknown key '${key}'.`);
+    }
+  }
+  const enabled = value.enabled === undefined ? false : parseBooleanSetting(value.enabled);
+  if (enabled === undefined) {
+    throw new Error(`${field}.enabled must be true or false.`);
+  }
+  if (!enabled) return {enabled: false};
+  //
+  const signer = value.signer;
+  if (typeof signer !== "string" || signer.trim() === "") {
+    throw new Error(`${field} requires a 'signer' when enabled.`);
+  }
+  //
+  const factories = value.factories;
+  if (!Array.isArray(factories) || factories.length === 0) {
+    throw new Error(`${field}.factories must be a non-empty list of factory addresses.`);
+  }
+  const allowed: string[] = [];
+  factories.forEach((factory, index) => {
+    if (typeof factory !== "string" || !ethers.utils.isAddress(factory)) {
+      throw new Error(`${field}.factories[${index}] must be a valid address.`);
+    }
+    const address = factory.toLowerCase();
+    if (address === ethers.constants.AddressZero) {
+      throw new Error(`${field}.factories[${index}] cannot be the zero address.`);
+    }
+    if (allowed.includes(address)) {
+      throw new Error(`${field}.factories[${index}] is listed more than once.`);
+    }
+    allowed.push(address);
+  });
+  //
+  const requireGuardian = value.requireGuardian === undefined ? true : parseBooleanSetting(value.requireGuardian);
+  if (requireGuardian === undefined) {
+    throw new Error(`${field}.requireGuardian must be true or false.`);
+  }
+  //
+  const maxGas = value.maxGas === undefined ? DEFAULT_DEPLOY_ACCOUNTS_MAX_GAS : parsePositiveInteger(value.maxGas);
+  if (maxGas === undefined) {
+    throw new Error(`${field}.maxGas must be a positive integer.`);
+  }
+  //
+  let rateLimit: DeployAccountsRateLimit | undefined;
+  if (value.rateLimit !== undefined && value.rateLimit !== null && value.rateLimit !== "~") {
+    const section = value.rateLimit;
+    if (!isPlainObject(section)) {
+      throw new Error(`${field}.rateLimit must be an object with 'period' and 'maxPerTarget' and / or 'maxTotal', or '~'.`);
+    }
+    for (const key of Object.keys(section)) {
+      if (!DEPLOY_ACCOUNTS_RATE_LIMIT_KEYS.includes(key)) {
+        throw new Error(`${field}.rateLimit has an unknown key '${key}'.`);
+      }
+    }
+    if (typeof section.period !== "string") {
+      throw new Error(`${field}.rateLimit requires a 'period', e.g. '1d'.`);
+    }
+    let period: number;
+    try {
+      period = periodToSeconds(section.period);
+    } catch (error) {
+      throw new Error(`${field}.rateLimit.period must be a duration like '30m', '24h' or '1d'.`);
+    }
+    if (!(period > 0)) {
+      throw new Error(`${field}.rateLimit.period must be longer than zero.`);
+    }
+    const limits: {maxPerTarget?: number; maxTotal?: number} = {};
+    for (const key of ["maxPerTarget", "maxTotal"] as const) {
+      if (section[key] === undefined) continue;
+      const limit = parsePositiveInteger(section[key]);
+      if (limit === undefined) {
+        throw new Error(`${field}.rateLimit.${key} must be a positive integer.`);
+      }
+      limits[key] = limit;
+    }
+    if (limits.maxPerTarget === undefined && limits.maxTotal === undefined) {
+      throw new Error(`${field}.rateLimit requires 'maxPerTarget', 'maxTotal' or both.`);
+    }
+    rateLimit = {...limits, period};
+  }
+  return {enabled: true, signer, factories: allowed, requireGuardian, maxGas, ...(rateLimit ? {rateLimit} : {})};
 };
 
 // 'recoveryModules' lists every module the network serves and indexes, each with its own 'indexer'
