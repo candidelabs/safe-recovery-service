@@ -1,5 +1,6 @@
 import * as authService from "../services/auth.service";
 import * as verificationService from "../services/verification.service";
+import * as sponsoredDeploymentService from "../services/sponsored-deployment.service";
 import {catchAsync} from "../utils";
 import {selectRecoveryModule} from "../utils/module-fallback";
 import {AccountMetadata} from "../utils/account-metadata";
@@ -53,6 +54,17 @@ interface SubmitVerificationBody {
 
 interface ListAccountsBody {
   verifiedTargetToken: string;
+}
+
+interface DeployAccountBody {
+  account: string;
+  chainId: number;
+  verifiedTargetToken: string;
+}
+
+interface AccountDeploymentQuery {
+  account: string;
+  chainId: number;
 }
 
 interface RequestSignatureBody {
@@ -152,6 +164,21 @@ export const listAccounts = catchAsync(async (req, res) => {
   const accounts = await authService.listAccounts(params.verifiedTargetToken);
   res.set("Cache-Control", "no-store");
   res.send({accounts});
+});
+
+export const deployAccount = catchAsync(async (req, res) => {
+  const params = req.body as DeployAccountBody;
+  // 202 while the deployment is pending, 200 once the account is deployed
+  const {statusCode, body} = await sponsoredDeploymentService.deployAccount(params.account, params.chainId, params.verifiedTargetToken);
+  res.set("Cache-Control", "no-store");
+  res.status(statusCode).send(body);
+});
+
+export const fetchAccountDeployment = catchAsync(async (req, res) => {
+  const params = req.query as unknown as AccountDeploymentQuery;
+  const deployment = await sponsoredDeploymentService.fetchDeployment(params.account, Number(params.chainId));
+  res.set("Cache-Control", "no-store");
+  res.send(deployment);
 });
 
 export const requestSignature = catchAsync(async (req, res) => {

@@ -38,6 +38,14 @@ router
   .post(validate(authValidation.accounts), authController.listAccounts);
 
 router
+  .route("/accounts/deploy")
+  .post(validate(authValidation.deployAccount), authController.deployAccount);
+
+router
+  .route("/accounts/deployment")
+  .get(validate(authValidation.accountDeployment), authController.fetchAccountDeployment);
+
+router
   .route("/signature/request")
   .post(validate(authValidation.requestSignature), authController.requestSignature);
 

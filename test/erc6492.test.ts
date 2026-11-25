@@ -11,6 +11,7 @@ import {
   isErc6492Signature,
   isMulticall3Deployed,
   MULTICALL3_ADDRESS,
+  simulateDeploymentReads,
   simulateGetOwners,
   simulateIsValidSignature,
   simulateIsValidSignatureAndReads,
@@ -160,6 +161,48 @@ describe("erc6492 simulation", () => {
     const error = await simulateIsValidSignature(provider, multicall3, deployment, account, hash, innerSignature).catch((e) => e);
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(Erc6492Error);
+  });
+
+  describe("simulateDeploymentReads", () => {
+    const reads = [
+      {target: account, callData: "0xe75235b8"},
+      {target: factory, callData: "0x12345678"},
+    ];
+
+    it("runs the factory call (which must succeed), then each read (which may fail), in one eth_call", async () => {
+      const threshold = ethers.utils.defaultAbiCoder.encode(["uint256"], [1]);
+      answer = async () => aggregate3Result([[true, "0x"], [true, threshold], [false, "0x"]]);
+      expect(await simulateDeploymentReads(provider, multicall3, deployment, reads)).toEqual([
+        {success: true, returnData: threshold},
+        {success: false, returnData: "0x"},
+      ]);
+      expect(sent).toHaveLength(1);
+      const [tx, blockTag] = sent[0].params as [{to: string; data: string; from?: string}, string];
+      expect([sent[0].method, tx.to, tx.from, blockTag]).toEqual(["eth_call", multicall3, undefined, "latest"]);
+      const [calls] = MULTICALL3.decodeFunctionData("aggregate3", tx.data);
+      expect(calls.map(({target, allowFailure, callData}: {target: string; allowFailure: boolean; callData: string}) => [target, allowFailure, callData]))
+        .toEqual([[factory, false, factoryCalldata], [account, true, "0xe75235b8"], [factory, true, "0x12345678"]]);
+    });
+
+    it("answers no result for no read", async () => {
+      answer = async () => aggregate3Result([[true, "0x"]]);
+      expect(await simulateDeploymentReads(provider, multicall3, deployment, [])).toEqual([]);
+    });
+
+    it("reports a reverted factory call as deploy-failed, and a transport failure as it is", async () => {
+      answer = async () => { throw nodeError("execution reverted: Multicall3: call failed"); };
+      await expectErc6492Error(simulateDeploymentReads(provider, multicall3, deployment, reads), "deploy-failed");
+      const timeout = Object.assign(new Error("timeout"), {code: "TIMEOUT"});
+      answer = async () => { throw timeout; };
+      await expect(simulateDeploymentReads(provider, multicall3, deployment, reads)).rejects.toBe(timeout);
+    });
+
+    it("refuses an answer with another number of results", async () => {
+      answer = async () => aggregate3Result([[true, "0x"], [true, "0x"]]);
+      const error = await simulateDeploymentReads(provider, multicall3, deployment, reads).catch((e) => e);
+      expect(error).not.toBeInstanceOf(Erc6492Error);
+      expect(error.message).toContain("returned 2 results for 3 calls");
+    });
   });
 
   describe("simulateIsValidSignatureAndReads", () => {

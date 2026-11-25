@@ -169,7 +169,7 @@ export const submitVerification = async (challengeId: string, challenge: string)
   return {verifiedTargetToken, verifiedTargetTokenExpiresAt};
 };
 
-export type VerifiedTargetTokenUse = "lookup" | "register" | "subscribe";
+export type VerifiedTargetTokenUse = "lookup" | "register" | "subscribe" | "deploy";
 
 /**
  * The target a verifiedTargetToken proves, or a 403 when the token is unknown, expired or (when `expected` is given)

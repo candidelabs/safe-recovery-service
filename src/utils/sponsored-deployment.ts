@@ -1,0 +1,211 @@
+import {createHash} from "node:crypto";
+import {ethers} from "ethers";
+import {AccountDeployment, SimulatedCall, SimulatedResult} from "./erc6492";
+import {ACCOUNT_INIT_DATA_MAX_BYTES} from "./account-init-data";
+import type {DeployAccountsRateLimit} from "../config/config-manager";
+
+// The rules of the sponsored deployment of an undeployed account (POST /v1/auth/accounts/deploy): the service sends,
+// with a signer the operator configured (networks.<name>.deployAccounts), the deployment call kept at registration
+// under the reserved metadata keys _factory / _factoryData (src/utils/account-init-data.ts), for whoever proves a
+// target registered for the account with a verifiedTargetToken. Pure: ethers only, no database, no network, so the
+// rules are tested without either; src/services/sponsored-deployment.service.ts applies them.
+//
+// Security notes:
+// - What is paid for is the registrant's calldata. The factory allowlist (deployAccounts.factories) fixes the contract
+//   that is called; the singleton and the initializer inside the call are still the registrant's choice, and the
+//   expected way to install the guardian is a delegate call from setup(), so arbitrary code runs inside the deployment.
+//   What bounds it: the gas cap the chain executor enforces (maxGasLimit, which code that behaves differently once
+//   mined cannot game, unlike the estimate), SPONSORED_DEPLOYMENT_MAX_ATTEMPTS per account, the rate limits, and the
+//   token.
+// - The paying key's exposure is gas, and tx.origin. A listed factory must not treat its caller specially; nothing the
+//   service's keys do relies on tx.origin. A dedicated signer keeps the blast radius and the queue apart; sharing the
+//   guardian's key is allowed and warned about at boot.
+// - Sponsorship lowers no security bar. Whoever holds the token already gets the init data from the account lookup and
+//   can deploy the account themselves; the service removes only the gas cost.
+// - A listed factory must not depend on its caller. The simulation runs with Multicall3 as the caller, the transaction
+//   comes from the paying signer: senderCheck catches the factories that return the address they create, and the code
+//   check after mining catches the rest, after one paid attempt.
+// - Losing a race costs gas. If someone else deploys the account between the executor's estimate and mining, the
+//   factory call reverts on the CREATE2 collision and uses most of its gas limit. The executor estimates right before
+//   broadcasting, so the window is one block, and it is one of the account's attempts.
+// - Single instance. The claim is in the database (one row per account and chain), but the executor's queue, and the
+//   boot release that fails every PENDING row of a previous process, assume one process.
+// - Privacy. Deploying puts the owner set on chain earlier than the user would have. The request needs a verified,
+//   registered target. Never logged: _factory, _factoryData, the target, the requester hash, the token.
+
+/** Attempts per account and chain, ever: a FAILED row after this many is not tried again. */
+export const SPONSORED_DEPLOYMENT_MAX_ATTEMPTS = 3;
+/**
+ * A PENDING row older than this was orphaned (its process stopped): the chain executor's 2 h lifetime and its 30 min
+ * cancel phase, plus a margin.
+ */
+export const SPONSORED_DEPLOYMENT_PENDING_MAX_MS = 3 * 60 * 60 * 1000;
+/** What the chain executor adds to a gas estimate (populateTxGasPricesAndLimits). */
+export const SPONSORED_DEPLOYMENT_GAS_FACTOR = 1.25;
+
+export const SPONSORED_DEPLOYMENT_STATUSES = ["PENDING", "DEPLOYED", "FAILED"] as const;
+export type SponsoredDeploymentStatus = typeof SPONSORED_DEPLOYMENT_STATUSES[number];
+
+/** Why an attempt failed: the chain executor's reasons, then the service's own. */
+export const SPONSORED_DEPLOYMENT_FAILURE_REASONS = [
+  "would-revert", "retries-exhausted", "expired", "reverted", "gas-limit-exceeded",
+  // the process stopped while it was pending (found at boot, or stale)
+  "interrupted",
+  // mined without reverting, and no code at the account
+  "no-code",
+] as const;
+export type SponsoredDeploymentFailureReason = typeof SPONSORED_DEPLOYMENT_FAILURE_REASONS[number];
+
+/** The fields of a SponsoredDeployment row the rules read. */
+export interface SponsoredDeploymentRow {
+  id: string;
+  account: string;
+  chainId: number;
+  status: string;
+  attempts: number;
+  transactionHash: string | null;
+  failureReason: string | null;
+  requestedAt: Date;
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  const prototype = typeof value === "object" && value !== null && !Array.isArray(value) ? Object.getPrototypeOf(value) : undefined;
+  return prototype === Object.prototype || prototype === null;
+};
+
+/**
+ * The init data stored for an account (its AuthAccountMetadata.metadata): `{factory, factoryCalldata}` when both
+ * reserved keys are there, `_factory` is an address and `_factoryData` is hex of at most ACCOUNT_INIT_DATA_MAX_BYTES;
+ * undefined otherwise. Never throws.
+ */
+export function storedInitData(metadata: unknown): AccountDeployment | undefined {
+  if (!isPlainObject(metadata)) return undefined;
+  const factory = metadata._factory;
+  const factoryCalldata = metadata._factoryData;
+  if (typeof factory !== "string" || !ethers.utils.isAddress(factory)) return undefined;
+  if (typeof factoryCalldata !== "string" || !ethers.utils.isHexString(factoryCalldata) || factoryCalldata.length % 2 !== 0) return undefined;
+  if ((factoryCalldata.length - 2) / 2 > ACCOUNT_INIT_DATA_MAX_BYTES) return undefined;
+  return {factory: ethers.utils.getAddress(factory), factoryCalldata: factoryCalldata.toLowerCase()};
+}
+
+const SAFE_THRESHOLD = new ethers.utils.Interface(["function getThreshold() view returns (uint256)"]);
+
+/** The read that tells whether the factory call left Safe-like code at the account's address: getThreshold(). */
+export function deploymentProbe(account: string): SimulatedCall {
+  return {target: account.toLowerCase(), callData: SAFE_THRESHOLD.encodeFunctionData("getThreshold")};
+}
+
+/** The probe answered: it succeeded with 32 bytes that are not zero. */
+export function probeAnswered(result: SimulatedResult | undefined): boolean {
+  if (result === undefined || result === null || result.success !== true || typeof result.returnData !== "string") return false;
+  if (!ethers.utils.isHexString(result.returnData) || ethers.utils.hexDataLength(result.returnData) !== 32) return false;
+  return !ethers.BigNumber.from(result.returnData).isZero();
+}
+
+/**
+ * What the factory call answers when the paying signer is its caller: "match" for exactly 32 bytes that decode to the
+ * account's address, "mismatch" for 32 bytes holding another address (the factory would deploy somewhere else for this
+ * sender), "unknown" for anything else (a factory that returns nothing, or more).
+ */
+export function senderCheck(returnData: unknown, account: string): "match" | "mismatch" | "unknown" {
+  if (typeof returnData !== "string" || !ethers.utils.isHexString(returnData) || ethers.utils.hexDataLength(returnData) !== 32) {
+    return "unknown";
+  }
+  // an ABI-encoded address: twelve zero bytes, then the address
+  if (!/^0x0{24}/.test(returnData)) return "unknown";
+  const address = ethers.utils.hexDataSlice(returnData, 12).toLowerCase();
+  return address === account.toLowerCase() ? "match" : "mismatch";
+}
+
+/**
+ * The per-target limit's key: the SHA-256 (hex) of the channel and the normalized target of the token that asked. Not
+ * anonymity (an email address is guessable), only the plain target kept out of a table that is never deleted from.
+ */
+export function requesterHash(channel: string, target: string): string {
+  return createHash("sha256").update(`${channel}:${target}`).digest("hex");
+}
+
+/**
+ * The limit reached, if any: the deployments of this target's tokens, then of the network, in the window (counts
+ * leave out the account asked for). A count at its maximum has reached it.
+ */
+export function reachedLimit(
+  limits: DeployAccountsRateLimit | undefined,
+  counts: {target: number; total: number},
+): "target" | "total" | undefined {
+  if (!limits) return undefined;
+  if (limits.maxPerTarget !== undefined && counts.target >= limits.maxPerTarget) return "target";
+  if (limits.maxTotal !== undefined && counts.total >= limits.maxTotal) return "total";
+  return undefined;
+}
+
+/**
+ * What a request does with the account's row:
+ * - create: no row (the first attempt);
+ * - answer: DEPLOYED, or PENDING and not stale (nothing is sent);
+ * - stale: PENDING for SPONSORED_DEPLOYMENT_PENDING_MAX_MS or more (its process stopped), it fails as "interrupted"
+ *   and the request goes on as a retry;
+ * - retry: FAILED with attempts left;
+ * - exhausted: FAILED after SPONSORED_DEPLOYMENT_MAX_ATTEMPTS.
+ */
+export function nextStep(
+  row: Pick<SponsoredDeploymentRow, "status" | "attempts" | "requestedAt"> | null | undefined,
+  now: Date,
+): "create" | "answer" | "stale" | "retry" | "exhausted" {
+  if (!row) return "create";
+  if (row.status === "PENDING") {
+    return now.getTime() - row.requestedAt.getTime() >= SPONSORED_DEPLOYMENT_PENDING_MAX_MS ? "stale" : "answer";
+  }
+  if (row.status === "FAILED") {
+    return row.attempts < SPONSORED_DEPLOYMENT_MAX_ATTEMPTS ? "retry" : "exhausted";
+  }
+  return "answer";
+}
+
+export type DeploymentStatusView = "pending" | "deployed" | "failed";
+
+/** GET /v1/auth/accounts/deployment: a row as the client sees it. */
+export interface DeploymentView {
+  account: string;
+  chainId: number;
+  status: DeploymentStatusView;
+  // when this service's transaction deployed the account, or the mined hash of a failed attempt
+  transactionHash?: string;
+  failureReason?: string;
+  attempts: number;
+  requestedAt: string;
+}
+
+const statusView = (status: string): DeploymentStatusView =>
+  status === "DEPLOYED" ? "deployed" : status === "FAILED" ? "failed" : "pending";
+
+export function deploymentView(row: SponsoredDeploymentRow): DeploymentView {
+  return {
+    account: row.account.toLowerCase(),
+    chainId: row.chainId,
+    status: statusView(row.status),
+    ...(row.transactionHash ? {transactionHash: row.transactionHash} : {}),
+    ...(row.status === "FAILED" && row.failureReason ? {failureReason: row.failureReason} : {}),
+    attempts: row.attempts,
+    requestedAt: row.requestedAt.toISOString(),
+  };
+}
+
+/** POST /v1/auth/accounts/deploy: the account, its chain, the status and, once deployed by this service, the hash. */
+export interface DeploymentAnswer {
+  account: string;
+  chainId: number;
+  status: DeploymentStatusView;
+  transactionHash?: string;
+  failureReason?: string;
+}
+
+export function deploymentAnswer(view: Pick<DeploymentView, "account" | "chainId" | "status" | "transactionHash" | "failureReason">): DeploymentAnswer {
+  return {
+    account: view.account.toLowerCase(),
+    chainId: view.chainId,
+    status: view.status,
+    ...(view.status === "deployed" && view.transactionHash ? {transactionHash: view.transactionHash} : {}),
+    ...(view.status === "failed" && view.failureReason ? {failureReason: view.failureReason} : {}),
+  };
+}

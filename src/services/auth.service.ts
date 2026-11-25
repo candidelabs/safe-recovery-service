@@ -81,8 +81,8 @@ const readAccountMetadata = async (account: string, chainId: number): Promise<Ac
 // The log field for metadata that was sent or written: its number of entries, never the object.
 const metadataLogFields = (metadata?: AccountMetadata) => metadata === undefined ? {} : {metadataEntries: Object.keys(metadata).length};
 
-// The address of the network's guardian, which a registration is bound to.
-const registrationGuardian = (network: Network) => Signers.instance().getSigner(network.guardian!)!.signer();
+// The address of the network's guardian, which a registration is bound to (and a sponsored deployment checks for).
+export const registrationGuardian = (network: Network) => Signers.instance().getSigner(network.guardian!)!.signer();
 
 // The registration that /submit (after its code) and register (with a verifiedTargetToken) create. Both then log it and
 // write the account's metadata when some was sent (left out, the stored one is kept) or init data is kept (the reserved

@@ -40,6 +40,8 @@ export const errorHandler = (
   const response = {
     code: statusCode,
     message,
+    // only an operational error's: a masked one keeps nothing of the original
+    ...(err.isOperational && err.details !== undefined && { details: err.details }),
     ...(Configuration.instance().environment === "development" && { stack: err.stack }),
   };
 

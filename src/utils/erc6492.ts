@@ -10,9 +10,11 @@ import {ethers} from "ethers";
 // itself: the only way to put code at a victim's counterfactual address is the victim's real factory,
 // initializer and salt, which deploy the victim's real owners. A fake factory can only "deploy" a fake account
 // at an address of its own, and register or subscribe for that address, which belongs to the attacker anyway.
-// The factory call only ever runs inside eth_call, and never against an account that has code: once the
-// account is deployed, the deployment data is ignored (no ERC-6492 "prepare" call). Never log `signature`,
-// `factory` or `factoryCalldata`.
+// The factory call only ever runs inside eth_call here, and never against an account that has code: once the
+// account is deployed, the deployment data is ignored (no ERC-6492 "prepare" call). The one place it is sent on
+// chain is the sponsored deployment of stored init data (src/services/sponsored-deployment.service.ts), for a
+// factory the network's allowlist names, after simulateDeploymentReads. Never log `signature`, `factory` or
+// `factoryCalldata`.
 
 export const ERC6492_MAGIC = "0x6492649264926492649264926492649264926492649264926492649264926492";
 export const MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11";
@@ -100,7 +102,7 @@ export const isMulticall3Deployed = (provider: CodeAndCallProvider, multicall3: 
 
 // A JSON-RPC error object (numeric code) somewhere in the error chain: the node ran the call and refused it
 // (a revert, out of gas). Transport failures (timeouts, HTTP errors) carry none and are not ours to map.
-const isNodeExecutionError = (error: unknown): boolean => {
+export const isNodeExecutionError = (error: unknown): boolean => {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current !== null && typeof current === "object"; depth++) {
     if (typeof (current as {code?: unknown}).code === "number") return true;
@@ -188,6 +190,16 @@ export const simulateIsValidSignature = async (
   signature: string,
 ): Promise<boolean> =>
   (await simulateIsValidSignatureAndReads(provider, multicall3, deployment, account, hash, signature, [])).valid;
+
+// Deploys the account in simulation, then runs each of `reads` (may fail) in the state the factory call left, in the one
+// eth_call; one result per read, in order. A factory call that reverts is Erc6492Error "deploy-failed". The sponsored
+// deployment checks with it, at the time of paying, what the init data does (src/utils/sponsored-deployment.ts).
+export const simulateDeploymentReads = (
+  provider: CodeAndCallProvider,
+  multicall3: string,
+  deployment: AccountDeployment,
+  reads: SimulatedCall[],
+): Promise<SimulatedResult[]> => simulateDeployAndCall(provider, multicall3, deployment, reads);
 
 // Deploys the account in simulation and reads its owners, lower case.
 export const simulateGetOwners = async (

@@ -8,16 +8,22 @@ interface IApiError extends Error {
 export class ApiError extends Error implements IApiError {
   statusCode: number;
   isOperational: boolean;
+  // Machine-readable fields answered next to code and message (e.g. details.reason), for an operational error.
+  details?: Record<string, unknown>;
 
   constructor(
     statusCode: number,
     message: string,
     isOperational = true,
-    stack = ""
+    stack = "",
+    details?: Record<string, unknown>
   ) {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = isOperational;
+    if (details !== undefined) {
+      this.details = details;
+    }
     if (stack) {
       this.stack = stack;
     } else {

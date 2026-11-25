@@ -185,6 +185,32 @@ describe("getNetworkConfig", () => {
     });
 });
 
+describe("error details", () => {
+    let loaded: Loaded;
+    beforeAll(() => { loaded = load(); });
+
+    test("an error with details answers them next to code and message", async () => {
+        // a network that does not sponsor deployments refuses before the token is read: no database, no chain
+        const response = await supertest(loaded.app).post("/v1/auth/accounts/deploy").send({
+            account: ethers.Wallet.createRandom().address, chainId: CHAIN_ID, verifiedTargetToken: "a".repeat(43),
+        }).expect(403);
+        expect(response.body).toMatchObject({
+            code: 403,
+            message: `Deployment sponsorship is not enabled for this network (${CHAIN_ID})`,
+            details: {reason: "sponsorship-disabled"},
+        });
+        expect(response.headers["cache-control"]).toBeUndefined();
+    });
+
+    test("an error without details is answered as before", async () => {
+        const notFound = await supertest(loaded.app).get("/v1/unknown").expect(404);
+        expect(notFound.body).toMatchObject({code: 404, message: "Not found"});
+        expect(notFound.body).not.toHaveProperty("details");
+        const invalid = await supertest(loaded.app).get("/v1/auth/accounts/deployment").query({account: "0x1234", chainId: CHAIN_ID}).expect(400);
+        expect(invalid.body).not.toHaveProperty("details");
+    });
+});
+
 describe("API key", () => {
     let loaded: Loaded;
     beforeAll(() => { loaded = load({apiKey: API_KEY}); });

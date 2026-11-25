@@ -55,6 +55,22 @@ export const accounts = {
   }),
 };
 
+// the sponsored deployment of an undeployed account, from its stored init data
+export const deployAccount = {
+  body: Joi.object().keys({
+    account: Joi.custom(ethereumAddress).required(),
+    chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+    verifiedTargetToken: Joi.custom(verifiedTargetToken).required(),
+  }),
+};
+
+export const accountDeployment = {
+  query: Joi.object().keys({
+    account: Joi.custom(ethereumAddress).required(),
+    chainId: Joi.number().integer().valid(...Network.supportedChainIds).required(),
+  }),
+};
+
 export const deleteRegistration = {
   body: Joi.object().keys({
     registrationId: Joi.string().required(),

@@ -17,6 +17,7 @@ import {API_KEY_PATH, errorConverter, errorHandler, requestLogger, requireApiKey
 import {AccountEventTracker} from "./models/events/account-event-tracker";
 import {startSendNotificationsCronJob} from "./services/alerts.service";
 import {releaseOrphanedSponsorships} from "./services/recoveries.service";
+import {releaseOrphanedDeployments} from "./services/sponsored-deployment.service";
 import {assignLegacyRequestRows, verifyRecoveryModuleCode} from "./services/recovery-modules.service";
 import {Network} from "./models/network";
 import {warnIfCounterfactualUnsupported} from "./services/counterfactual.service";
@@ -89,6 +90,9 @@ const listen = () => app.listen(configuration.port, () => {
       if (count > 0) logger.warn({ count }, "released orphaned sponsorship claims left by a previous run");
     })
     .catch((error) => logger.error({ err: error }, "orphaned sponsorship release failed"));
+  // sponsored deployments left PENDING by a previous process (logs its own counts)
+  releaseOrphanedDeployments()
+    .catch((error) => logger.error({ err: error }, "orphaned sponsored deployment release failed"));
   void verifyRecoveryModuleCode();
   void warnIfCounterfactualUnsupported();
   delay(2500).then(async () => {

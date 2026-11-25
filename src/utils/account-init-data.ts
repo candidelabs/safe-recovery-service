@@ -18,7 +18,9 @@ import type {StoreInitDataPolicy} from "../config/config-manager";
 //   deployment, so nobody can replace another account's init data.
 // - The factory is the registrant's choice. CREATE2 binds an address to its factory, so the data can only deploy the
 //   registrant's own account, but _factory is an arbitrary contract: a wallet should match it against the factories it
-//   knows before calling it. The service must never broadcast it without a factory allowlist.
+//   knows before calling it. The service broadcasts it in one place only, the sponsored deployment
+//   (src/services/sponsored-deployment.service.ts), and only for a factory on the network's allowlist
+//   (deployAccounts.factories), after simulating it again; its notes are in src/utils/sponsored-deployment.ts.
 // - Written by the service, unlike the app's keys: the guidance that metadata is "a name the app stored, not a statement
 //   by the service" holds for the app's keys only.
 // - More revealing than a label. The init data shows the owner set (or a passkey's public key) before it is on chain, to
