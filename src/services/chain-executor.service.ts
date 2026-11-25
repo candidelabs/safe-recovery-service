@@ -94,6 +94,7 @@ export interface FailedTransaction {
   // True when that nonce is known to be consumed (by our cancel or by an external tx), or
   // nothing was ever broadcast. False means it may still be pending and the payload may still land.
   nonceResolved: boolean;
+  // The error that ended it, without the transaction's destination and calldata (see redactTransaction).
   lastError: unknown;
   // The transaction's context, when it was added with one.
   context?: TransactionContext;
@@ -153,6 +154,43 @@ function errorMessage(error: unknown): string {
 // Nodes answer a re-send of a signed tx they already hold with one of these.
 function isAlreadyKnown(error: unknown): boolean {
   return /already known|known transaction|already exists|already imported|AlreadyKnown/i.test(errorMessage(error));
+}
+
+// The hex of the transaction's destination and calldata (no 0x, lower case), as an error message can carry them: ethers
+// puts the transaction (to, data) in an estimate or call error, and a failed send carries the raw signed transaction,
+// where both appear as plain hex. Empty calldata has nothing to hide.
+function transactionHex(transactionData: TransactionData): [string, string][] {
+  const hex: [string, string][] = [[transactionData.to.toLowerCase().replace(/^0x/, ""), "[REDACTED:to]"]];
+  const callData = transactionData.callData.toLowerCase().replace(/^0x/, "");
+  if (callData.length > 0) hex.unshift([callData, "[REDACTED:callData]"]);
+  return hex;
+}
+
+const MAX_REDACTED_ERROR_DEPTH = 3;
+
+// A copy of an error without the transaction's destination and calldata, for the lines the executor writes and the
+// failures it reports: the error itself is kept for classifying the failure. Strings (message, stack, reason, ...) are
+// redacted, the nested error and cause too; other object properties (the transaction ethers attaches) are dropped.
+function redactTransaction(error: unknown, transactionData: TransactionData, depth = 0): unknown {
+  const redact = (text: string) => transactionHex(transactionData).reduce(
+    (redacted, [hex, label]) => redacted.replace(new RegExp(hex, "gi"), label),
+    text
+  );
+  if (typeof error === "string") return redact(error);
+  if (!(error instanceof Error)) return error;
+  const copy = new Error(redact(error.message)) as Error & Record<string, unknown>;
+  copy.name = error.name;
+  copy.stack = typeof error.stack === "string" ? redact(error.stack) : undefined;
+  for (const [key, value] of Object.entries(error)) {
+    if (typeof value === "string") copy[key] = redact(value);
+    else if (typeof value === "number" || typeof value === "boolean") copy[key] = value;
+  }
+  if (depth < MAX_REDACTED_ERROR_DEPTH) {
+    const nested = error as Error & { error?: unknown; cause?: unknown };
+    if (nested.error !== undefined) copy.error = redactTransaction(nested.error, transactionData, depth + 1);
+    if (nested.cause !== undefined) copy.cause = redactTransaction(nested.cause, transactionData, depth + 1);
+  }
+  return copy;
 }
 
 function bump(fees: Fees, factor: number): Fees {
@@ -230,7 +268,7 @@ export class ChainExecutor {
       if (decision.kind === "retry") {
         log.warn(
           {
-            err: error,
+            err: redactTransaction(error, transactionData),
             chainId,
             signerId,
             phase: transactionData.phase,
@@ -334,7 +372,7 @@ export class ChainExecutor {
     }
     log.error(
       {
-        err: error,
+        err: redactTransaction(error, transactionData),
         chainId: transactionData.chainId,
         signerId: transactionData.signerId,
         reason,
@@ -514,10 +552,12 @@ export class ChainExecutor {
     nonceResolved: boolean,
     transactionHash = ''
   ): void {
+    // what is logged and reported, without the transaction's destination and calldata
+    const reported = redactTransaction(error, transactionData);
     // nonceResolved=false with a nonce means it may still be pending and the payload may still land
     log.error(
       {
-        err: error,
+        err: reported,
         chainId: transactionData.chainId,
         signerId: transactionData.signerId,
         reason,
@@ -542,7 +582,7 @@ export class ChainExecutor {
           nonce: transactionData.nonce,
           hashes: transactionData.hashes,
           nonceResolved,
-          lastError: error,
+          lastError: reported,
           context: transactionData.context,
         });
       } catch (listenerError) {

@@ -88,6 +88,12 @@ const send = (signerId: string, extra: {maxGasLimit?: number, context?: {action:
     });
   });
 const broadcastHash = (n: number) => ethers.utils.keccak256(provider.sendTransaction.mock.calls[n][0]);
+// Everything a value holds, errors included (message, stack, their own and nested properties), lower case.
+const dump = (value: unknown): string => JSON.stringify(value, (_key, item) =>
+  item instanceof Error ? {message: item.message, stack: item.stack, ...Object.fromEntries(Object.entries(item))}
+    : typeof item === "bigint" ? item.toString() : item
+).toLowerCase();
+const linesWithMessage = (message: string) => mockLogLines.filter((line) => line.message === message);
 
 beforeEach(() => {
   mockGasLimits = [100_000];
@@ -173,8 +179,56 @@ describe("chain executor", () => {
     waits = [reverted];
     await send(newSigner());
     expect(mockLogLines.length).toBeGreaterThan(0);
-    const logged = JSON.stringify(mockLogLines, (_key, value) => value instanceof Error ? value.message : value).toLowerCase();
+    const logged = dump(mockLogLines);
     expect(logged).not.toContain(TO.slice(2));
     expect(logged).not.toContain(CALL_DATA.slice(10, 40));
   });
+
+  // ethers puts the transaction in an estimate error, and the node's answer to a failed send carries the raw signed one
+  const estimateError = () => Object.assign(
+    new Error(`cannot estimate gas (reason="execution reverted", transaction={"to":"${TO}","data":"${CALL_DATA}"}, code=UNPREDICTABLE_GAS_LIMIT)`),
+    {
+      code: ethers.errors.UNPREDICTABLE_GAS_LIMIT,
+      reason: "execution reverted",
+      transaction: {to: TO, data: CALL_DATA},
+      error: Object.assign(new Error(`processing response error (body="{\\"to\\":\\"${TO.toUpperCase()}\\",\\"data\\":\\"${CALL_DATA}\\"}")`), {
+        code: "SERVER_ERROR", body: `{"to":"${TO}","data":"${CALL_DATA}"}`,
+      }),
+    },
+  );
+
+  test("the errors it logs and reports carry neither the destination nor the call data, and are classified as before", async () => {
+    mockPopulate.mockReset().mockRejectedValue(estimateError());
+    expect(await send(newSigner(), {context: {action: "deploy", account: TO}})).toEqual([false, "", "would-revert"]);
+    expect(failures).toHaveLength(1);
+    const lastError = failures[0].lastError as Error & {code: string, error: Error};
+    expect(lastError.code).toBe(ethers.errors.UNPREDICTABLE_GAS_LIMIT);
+    expect(lastError.message).toContain("[REDACTED:to]");
+    expect(lastError.message).toContain("[REDACTED:callData]");
+    expect(lastError.error.message).toContain("[REDACTED:to]");
+    expect(lastError).not.toHaveProperty("transaction");
+    // (the listener still gets the transaction's to and callData as fields)
+    for (const reported of [dump(lastError), dump(mockLogLines)]) {
+      expect(reported).not.toContain(TO.slice(2));
+      expect(reported).not.toContain(CALL_DATA.slice(2));
+    }
+    expect(linesWithMessage("chain executor giving up")).toHaveLength(1);
+  });
+
+  test("a failed send whose error carries the raw signed transaction is retried, and logged without it", async () => {
+    sendTransaction.mockImplementationOnce(async (signed: string) => {
+      throw Object.assign(new Error(`processing response error (requestBody="{\\"method\\":\\"eth_sendRawTransaction\\",\\"params\\":[\\"${signed}\\"]}")`), {
+        code: "SERVER_ERROR",
+      });
+    });
+    const [success] = await send(newSigner());
+    expect(success).toBe(true);
+    expect(sendTransaction).toHaveBeenCalledTimes(2);
+    const retried = linesWithMessage("chain executor attempt failed, retrying");
+    expect(retried).toHaveLength(1);
+    const logged = dump(retried);
+    expect(logged).toContain("[redacted:calldata]");
+    expect(logged).not.toContain(TO.slice(2));
+    expect(logged).not.toContain(CALL_DATA.slice(2));
+  }, 20_000);
 });
