@@ -2,7 +2,7 @@ import {ethers} from "ethers";
 import {createRecoveryModule, RecoveryModule} from "../src/models/recovery-module";
 import {Network} from "../src/models/network";
 import {ApiError} from "../src/utils/error";
-import {parseModuleFallbackDates} from "../src/config/config-manager";
+import {DeployAccounts, parseModuleFallbackDates} from "../src/config/config-manager";
 import {moduleFallbackHeaders} from "../src/utils/module-fallback";
 import {newOwners as newOwnersSchema} from "../src/validations/custom.validation";
 import {checkRecoveryModule} from "../src/services/recovery-modules.service";
@@ -26,20 +26,38 @@ jest.mock('../src/config/prisma-client', () => {
             const rows = (mockTables[name] ?? []).filter(row => matches(row, where));
             return rows.slice(skip ?? 0, take === undefined ? undefined : (skip ?? 0) + take);
         },
+        findFirst: async ({where}: any) => (mockTables[name] ?? []).find(row => matches(row, where)) ?? null,
     });
     return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
 });
 
-// isModuleEnabled answers from this set (lower-case module addresses)
+// isModuleEnabled answers from this set (lower-case module addresses), and reverts on the zero address and on the
+// accounts of mockNoSafe (lower case)
 const mockEnabledModules = new Set<string>();
+const mockNoSafe = new Set<string>();
 jest.mock('../src/utils/contract-source', () => ({
     getSafeInstance: (address: string) => ({
         isModuleEnabled: async (module: string) => {
-            if (address === "0x0000000000000000000000000000000000000000") throw new Error("call revert exception");
+            if (address === "0x0000000000000000000000000000000000000000" || mockNoSafe.has(address.toLowerCase())) {
+                throw new Error("call revert exception");
+            }
             return mockEnabledModules.has(module.toLowerCase());
         },
     }),
 }));
+
+// The code of each account (lower case; none by default) and the getCode calls made; an account in mockCodeFails
+// makes the read fail.
+const mockCode = new Map<string, string>();
+const mockCodeFails = new Set<string>();
+const codeReads: string[] = [];
+const chain = {
+    getCode: async (address: string) => {
+        codeReads.push(address);
+        if (mockCodeFails.has(address.toLowerCase())) throw new Error("rpc unavailable");
+        return mockCode.get(address.toLowerCase()) ?? "0x";
+    },
+};
 
 const provider = new ethers.providers.StaticJsonRpcProvider("http://127.0.0.1:1", {chainId: 1, name: "test"});
 const indexer = {enabled: false, startBlock: 1};
@@ -47,12 +65,15 @@ const v0_1_0 = createRecoveryModule({address: "0x949d01d424bE050D09C16025dd007CB
 const v0_2_0 = createRecoveryModule({address: "0x4dF6081A82E07A7cD99aEf91C72d12a5138e468B", fallback: false, indexer}, provider);
 
 // A Network without its constructor, which starts an indexer.
-const network = (fallbackModule?: RecoveryModule) => Object.assign(Object.create(Network.prototype) as Network, {
-    chainId: 11155111,
-    name: "test",
-    modules: [v0_1_0, v0_2_0],
-    fallbackModule,
-});
+const network = (fallbackModule?: RecoveryModule, deployAccounts: DeployAccounts = {enabled: false}): Network =>
+    Object.assign(Object.create(Network.prototype) as Network, {
+        chainId: 11155111,
+        name: "test",
+        modules: [v0_1_0, v0_2_0],
+        fallbackModule,
+        jsonRPCProvider: chain,
+        deployAccounts,
+    });
 
 const address = () => ethers.utils.hexlify(ethers.utils.randomBytes(20));
 const statusOf = async (promise: Promise<unknown>) => promise.then(() => undefined, (e: ApiError) => [e.statusCode, e.message]);
@@ -146,6 +167,8 @@ describe('write checks', () => {
     });
 
     test('reject an account that is not a Safe', async () => {
+        // code that does not answer isModuleEnabled (an account without code: see "an account that is not deployed")
+        mockCode.set("0x0000000000000000000000000000000000000000", "0x6080");
         const module = withGuardians(v0_1_0, []);
         expect(await statusOf(checkRecoveryModule(network(v0_1_0), module, "0x0000000000000000000000000000000000000000", [address()])))
             .toEqual([400, "Account address is not a safe smart contract account"]);
@@ -178,6 +201,67 @@ describe('write checks', () => {
         const module = withGuardians(v0_2_0, [guardian]);
         expect((await statusOf(checkRecoveryModule(network(v0_1_0), module, account, [address(), ethers.utils.getAddress(guardian)])))![1])
             .toBe(`New owner ${guardian} is a guardian of this account; a guardian cannot be an owner`);
+    });
+});
+
+describe('an account that is not deployed', () => {
+    const FACTORY = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67";
+    const sponsoring: DeployAccounts = {enabled: true, signer: "deployer", factories: [FACTORY.toLowerCase()], requireGuardian: true, maxGas: 1_000_000};
+    const errorOf = async (promise: Promise<unknown>) =>
+        promise.then(() => undefined, (e: ApiError) => ({statusCode: e.statusCode, message: e.message, details: e.details}));
+    const module = Object.assign(Object.create(v0_1_0) as RecoveryModule, {contract: {getGuardians: async () => [address()]}});
+    // a Safe-like account, not deployed: isModuleEnabled reverts and getCode answers nothing
+    const undeployed = (initData?: {_factory: string, _factoryData: string}) => {
+        const account = address();
+        mockNoSafe.add(account);
+        if (initData) (mockTables.authAccountMetadata ??= []).push({account, chainId: 11155111, metadata: {label: "main", ...initData}});
+        return account;
+    };
+    beforeEach(() => {
+        mockEnabledModules.clear();
+        codeReads.length = 0;
+    });
+
+    test('answers 400 account-not-deployed, with sponsoredDeployment true when its init data names a sponsored factory', async () => {
+        const account = undeployed({_factory: FACTORY, _factoryData: "0x1234"});
+        expect(await errorOf(checkRecoveryModule(network(v0_1_0, sponsoring), module, account, [address()]))).toEqual({
+            statusCode: 400,
+            message: `Account ${account} is not deployed on this network (11155111)`,
+            details: {reason: "account-not-deployed", sponsoredDeployment: true},
+        });
+        expect(codeReads).toEqual([account]);
+    });
+
+    test.each([
+        ["the network does not sponsor deployments", {enabled: false} as DeployAccounts, {_factory: FACTORY, _factoryData: "0x1234"}],
+        ["no init data is stored", sponsoring, undefined],
+        ["its factory is not sponsored", sponsoring, {_factory: "0xcA11bde05977b3631167028862bE2a173976CA11", _factoryData: "0x1234"}],
+    ])('answers sponsoredDeployment false when %s', async (_name, deployAccounts, initData) => {
+        const account = undeployed(initData);
+        expect((await errorOf(checkRecoveryModule(network(v0_1_0, deployAccounts), module, account, [address()])))?.details)
+            .toEqual({reason: "account-not-deployed", sponsoredDeployment: false});
+    });
+
+    test('an account with code that is not a Safe keeps the message it had, without details', async () => {
+        const account = undeployed();
+        mockCode.set(account, "0x6080");
+        expect(await errorOf(checkRecoveryModule(network(v0_1_0, sponsoring), module, account, [address()]))).toEqual({
+            statusCode: 400, message: "Account address is not a safe smart contract account", details: undefined,
+        });
+    });
+
+    test('a code read that fails keeps the message it had', async () => {
+        const account = undeployed({_factory: FACTORY, _factoryData: "0x1234"});
+        mockCodeFails.add(account);
+        expect(await errorOf(checkRecoveryModule(network(v0_1_0, sponsoring), module, account, [address()]))).toEqual({
+            statusCode: 400, message: "Account address is not a safe smart contract account", details: undefined,
+        });
+    });
+
+    test('a deployed Safe makes no extra call', async () => {
+        mockEnabledModules.add(v0_1_0.address);
+        await expect(checkRecoveryModule(network(v0_1_0, sponsoring), module, address(), [address()])).resolves.toHaveLength(1);
+        expect(codeReads).toEqual([]);
     });
 });
 

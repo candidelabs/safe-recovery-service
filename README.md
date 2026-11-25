@@ -115,6 +115,28 @@ This configuration file is used to set up and customize the service. It consists
         * `period`: The time period for which the rate limit is applied.
 	+ `alerts`: Optionally specifies the alert to use for this network with with an alert `id`.
 	+ `multicall3`: Optional, the Multicall3 address used to verify ERC-6492 signatures of accounts that are not deployed yet (see [Counterfactual accounts](#counterfactual-accounts-erc-6492)). Defaults to the canonical `0xcA11bde05977b3631167028862bE2a173976CA11`; must be a valid address.
+	+ `deployAccounts`: Optional, lets the service pay for deploying an account that registered before it was deployed, from the init data it kept (see [Sponsored deployment](#sponsored-deployment-of-undeployed-accounts)). Omitted, `null`, `~` or `"enabled": false`: no sponsorship, and nothing else in the block is read but its key names.
+	  * `enabled`: `true` to sponsor deployments on this network.
+	  * `signer`: The `id` of the signer that pays (required when enabled). It must be declared in `signers`.
+	  * `factories`: The factories whose calls the service pays for (required when enabled): a non-empty list of distinct, non-zero addresses. An account whose stored `_factory` is not listed is not deployed.
+	  * `requireGuardian`: Whether the deployment must install this network's guardian on one of its modules, checked in simulation right before paying. Default `true`.
+	  * `maxGas`: The highest gas limit a deployment may be sent with. Default `1000000`. The service refuses a deployment whose estimate, raised by 25 %, is above it, and the chain executor never sends one with a higher limit.
+	  * `rateLimit`: Omitted or `~` for no limit; else `period` (e.g. `"1d"`, required) and at least one of `maxPerTarget` (deployments per verified email address or phone number) and `maxTotal` (deployments on the network), over the rolling period.
+
+	  Booleans and numbers may also be given as strings (what `${ENV::VAR}` yields). The boot fails on:
+
+	  | Setting | Fails when |
+	  | --- | --- |
+	  | the block | not an object, `~` or `null`; a key other than the six above |
+	  | `enabled` | neither a boolean nor `"true"` / `"false"` |
+	  | `signer` | missing or empty when enabled, or not a declared signer |
+	  | `factories` | not a non-empty list, an entry that is not an address, the zero address, or an address listed twice (any case); the message names the entry's index |
+	  | `requireGuardian` | not a boolean |
+	  | `maxGas` | not a positive integer |
+	  | `rateLimit` | not an object or `~`; no `period`, a `period` that does not parse or is zero; no `maxPerTarget` and no `maxTotal`; a limit that is not a positive integer; another key |
+	  | the network | has no `guardian`: nothing registers without one, so no init data is stored |
+
+	  And warns at boot (the service starts): `account deployment signer is also the guardian` (allowed, but a dedicated signer keeps the guardian's key and its transaction queue apart), `account deployment sponsorship has no rate limit`, and `account deployment sponsorship enabled but no init data is stored` (`options.counterfactualAccounts.storeInitData` is `"never"`: init data stored under an earlier setting can still be deployed). Each enabled network logs `account deployment sponsorship configured` once, with `signerId`, `factoryCount`, `requireGuardian`, `maxGas` and `rateLimit`.
 
 ##### Supported recovery modules
 
@@ -162,6 +184,11 @@ When `moduleAddress` is omitted, the network's fallback module is used, as befor
 
 `create` and `signature/request` check, for the module named or the fallback:
 
+* the account is a deployed Safe. An account with no code (not deployed yet) is answered with a 400 that tells it apart and says whether the service can deploy it ([Sponsored deployment](#sponsored-deployment-of-undeployed-accounts)):
+  ```json
+  {"code": 400, "message": "Account 0x… is not deployed on this network (11155111)", "details": {"reason": "account-not-deployed", "sponsoredDeployment": true}}
+  ```
+  `sponsoredDeployment` is `true` when the network sponsors deployments and the account's stored init data names a sponsored factory. An account with code that is not a Safe is answered `Account address is not a safe smart contract account`, as before, and so is an account whose code cannot be read;
 * the module is enabled on the Safe and holds guardians for it; otherwise the response says to pass the `moduleAddress` of the module that holds them. A disabled module keeps its stored guardians, so both are checked;
 * the proposed owners can be set by the module: none is the zero address, `0x0000000000000000000000000000000000000001`, the Safe itself or one of its guardians on that module, and none is listed twice. v0.1.0 used to accept such proposals but could never finalize them; they are now rejected for both versions;
 * with no `moduleAddress`, a `create` signature that is not valid for the fallback but is valid for another configured module fails with an error naming that module.
@@ -179,7 +206,7 @@ A Safe can register auth methods and subscribe to alerts before it is deployed. 
 * **Auth** (`POST /v1/auth/register`, `GET /v1/auth/registrations`, `POST /v1/auth/delete`, `POST /v1/auth/metadata`): standard ERC-6492. The SIWE `address` is the Safe, and the inner signature is the Safe signature a deployed Safe would give (the owners' signatures of the SafeMessage, up to the threshold). The service deploys the Safe in simulation and calls its `isValidSignature`, so the Safe's threshold applies.
 * **Alerts** (`POST /v1/alerts/subscribe`, `GET /v1/alerts/subscriptions`, `POST /v1/alerts/unsubscribe`): the SIWE `address` is an owner and the inner signature is that owner's SIWE signature, as for a deployed Safe, but the wrapper's deployment data describes the **account** (the request's `account`, or the subscription's for `unsubscribe`), not the signer. The service reads the owners of the simulated deployment and requires the signer to be one of them.
 
-The recovery endpoints (`/v1/recoveries/*`) do not accept wrapped signatures: the module checks guardian signatures on chain with EIP-1271, which needs a deployed contract. `POST /v1/auth/signature/request` and `/submit` carry no signature and need the Safe deployed with the module enabled and the service's guardian added, so a registration made before deployment can be used once that is done.
+The recovery endpoints (`/v1/recoveries/*`) do not accept wrapped signatures: the module checks guardian signatures on chain with EIP-1271, which needs a deployed contract. `POST /v1/auth/signature/request` and `/submit` carry no signature and need the Safe deployed with the module enabled and the service's guardian added, so a registration made before deployment can be used once that is done. A user who lost the wallet before deploying can have the service deploy the account (see [Sponsored deployment](#sponsored-deployment-of-undeployed-accounts)).
 
 Rules:
 
@@ -270,11 +297,112 @@ What is kept, the first rule that matches winning:
 * The keys are written by the service, unlike the app's keys: the guidance that metadata is a name the app stored, not a statement by the service, holds for the app's keys only.
 * The init data shows the owner set (or a passkey's public key) before it is on chain, to whoever proves a registered target and to the operator, who stores it in plaintext.
 
-**Operators.** The service only stores and returns the data; it never deploys an account (it must never broadcast `_factory` without a factory allowlist). Turning `erc6492` off locks undeployed accounts that already registered out of `registrations`, `delete` and `metadata` until they are deployed. Changing `storeInitData` purges nothing: under `"never"` no new keys are written, and the stored ones stay and are still returned. The guardian's address is part of such an account's init data, so changing a network's guardian signer leaves undeployed accounts installing the old one (they then register with `guardianInstalled: false`), and an account has the same address on two networks only if its initializer is the same on both: one that installs the network's guardian alone needs both networks to use the same guardian. Registrations made before this version have no init data; an account that is still undeployed gets it by sending `register` again with a `verifiedTargetToken` (the 409 above).
+**Operators.** The service stores and returns the data, and deploys an account from it only when the network sponsors deployments and lists the account's factory (`deployAccounts`, see [Sponsored deployment](#sponsored-deployment-of-undeployed-accounts)). Turning `erc6492` off locks undeployed accounts that already registered out of `registrations`, `delete` and `metadata` until they are deployed. Changing `storeInitData` purges nothing: under `"never"` no new keys are written, and the stored ones stay and are still returned. The guardian's address is part of such an account's init data, so changing a network's guardian signer leaves undeployed accounts installing the old one (they then register with `guardianInstalled: false`), and an account has the same address on two networks only if its initializer is the same on both: one that installs the network's guardian alone needs both networks to use the same guardian. Registrations made before this version have no init data; an account that is still undeployed gets it by sending `register` again with a `verifiedTargetToken` (the 409 above).
+
+### Sponsored deployment of undeployed accounts
+
+A user who lost the wallet before the account's first transaction gets its init data back from the account lookup, but cannot recover: `signature/request` and `recoveries/create` read the account on chain, and the user's new key has no funds to deploy it. When a network sets `deployAccounts` (see [Networks](#networks)), the service pays for that deployment: it sends the stored `_factory` call with the configured signer, for the holder of a `verifiedTargetToken` whose target is registered for the account on that chain. No wallet signature is needed, since the owner key may be lost.
+
+**Recovering an account that was never deployed:**
+
+1. Verify the email address or phone number: `POST /v1/auth/verification/request`, then `/submit` with the code, for a `verifiedTargetToken` (valid 10 minutes).
+2. Look the account up: `POST /v1/auth/accounts` answers its `account`, `chainId` and `metadata`, with `_factory` / `_factoryData` when its init data was kept.
+3. If `eth_getCode` of the account is empty, ask for the deployment: `POST /v1/auth/accounts/deploy`. `signature/request` answers the not-deployed error with `details.sponsoredDeployment` telling whether this will work (see [Recovery modules in requests](#recovery-modules-in-requests)).
+4. Wait for it: poll `GET /v1/auth/accounts/deployment` (or `eth_getCode`) until `status` is `deployed`. A `pending` answer can take minutes on a congested chain.
+5. Start the recovery as for any deployed account: `POST /v1/auth/signature/request` with the new owners, the codes to `/v1/auth/signature/submit`, then the recovery request.
+
+#### `POST /v1/auth/accounts/deploy`
+
+```json
+{"account": "0x…", "chainId": 11155111, "verifiedTargetToken": "<token>"}
+```
+
+Sent with `Cache-Control: no-store`:
+
+```json
+202 {"account": "0x…", "chainId": 11155111, "status": "pending"}
+200 {"account": "0x…", "chainId": 11155111, "status": "deployed", "transactionHash": "0x…"}
+```
+
+`account` is lower case, as in the lookup. `transactionHash` is present when this service's transaction deployed the account; an account deployed some other way answers `deployed` without it, and no deployment is recorded for it. Calling the endpoint again while a deployment is pending answers `pending` and sends nothing; calling it after a failure starts the next attempt, up to three attempts per account and chain, ever.
+
+The checks run in this order, the first that matches answering; nothing is sent on a refusal, and nothing is read on chain before the account's code:
+
+| Status | `details.reason` | Message | When |
+| --- | --- | --- | --- |
+| 403 | `sponsorship-disabled` | `Deployment sponsorship is not enabled for this network (<chainId>)` | the network does not set `deployAccounts` (checked before the token) |
+| 403 | (none) | `Invalid or expired verifiedTargetToken` | the token is unknown or expired |
+| 403 | `not-registered` | `This verifiedTargetToken's target is not registered for this account on this chain` | no registration of the token's channel and target for the account on this chain |
+| 200 | | | the service deployed the account (its hash), or the account has code (then a pending or failed deployment of it is recorded as deployed) |
+| 202 | | | a deployment is pending (a pending one older than three hours is taken as interrupted, and this request makes the next attempt) |
+| 409 | `attempts-exhausted` | `The sponsored deployment of this account failed 3 times; it will not be tried again` | three attempts failed |
+| 409 | `no-init-data` | `No init data is stored for this account on this chain` | no `_factory` / `_factoryData` in the account's metadata |
+| 403 | `factory-not-sponsored` | `The factory of this account is not sponsored on this network (<chainId>)` | `_factory` is not in `deployAccounts.factories` |
+| 429 | `limit-target` | `You are only allowed <n> sponsored deployments every <period>` | the token's target reached `maxPerTarget` |
+| 429 | `limit-total` | `Sponsored deployments are used up on this network for now, try again later` | the network reached `maxTotal` |
+| 409 | `sponsorship-unavailable` | `Sponsored deployments are temporarily unavailable on this network (<chainId>)` | Multicall3 is not deployed on the network |
+| 409 | `deployment-would-fail` | `The init data stored for this account does not deploy it on this chain` | in simulation the factory call reverts or leaves no Safe at the account; called from the paying signer it reverts or names another address; or its gas estimate reverts |
+| 403 | `no-guardian` | `Deploying this account does not install this service's guardian` | `requireGuardian` and, in simulation, no configured module has the guardian |
+| 403 | `gas-limit` | `Deploying this account needs more gas than this network sponsors` | the estimate raised by 25 % is above `maxGas` |
+| 503 | `sponsorship-unavailable` | `Sponsored deployments are temporarily unavailable on this network (<chainId>)` | the fee source fails, or the signer's balance does not cover the gas limit at the current maximum fee |
+| 202 | | | the deployment is queued |
+
+No message quotes the factory, the calldata or the target. The simulation is the one of [Counterfactual accounts](#counterfactual-accounts-erc-6492) (one `eth_call` to Multicall3: the factory call, then `getThreshold()` on the account and the guardian check of the init data), run again at the time of paying.
+
+#### `GET /v1/auth/accounts/deployment`
+
+`?account=0x…&chainId=11155111`, no credential, sent with `Cache-Control: no-store`:
+
+```json
+200 {"account": "0x…", "chainId": 11155111, "status": "failed", "failureReason": "would-revert", "attempts": 1, "requestedAt": "2026-11-25T10:00:00.000Z"}
+404 {"code": 404, "message": "No sponsored deployment was requested for this account on this chain"}
+```
+
+`status` is `pending`, `deployed` or `failed`; `transactionHash` is there once mined (for `failed`, the hash of a mined revert); `failureReason` is one of `would-revert`, `retries-exhausted`, `expired`, `reverted`, `gas-limit-exceeded`, `interrupted` (the service stopped while it was pending) and `no-code` (mined without reverting, but no code at the account). It exists because the token lives 10 minutes and a deployment can take longer, and because `eth_getCode` cannot show a failure. Anyone who knows the address can read it; it shows that a deployment was asked for through this service, its state and its hash. A client starts a new attempt with the `POST`, with a token.
+
+#### Limits
+
+Over the rolling window `rateLimit.period`, per network:
+
+* `maxPerTarget`: the deployments asked for with tokens of this channel and target;
+* `maxTotal`: the deployments on the network.
+
+Both count accounts, whatever the outcome: a failed attempt keeps its slot (failures that cost gas must not be free), and the account being asked for is left out, so retrying it never counts twice. The counts are plain reads, so two requests at the limit can both pass, by one. A reached total limit is logged as a warning (`sponsored deployment limit reached`, `limit: "total"`), a per-target one at info.
+
+#### Errors with `details`
+
+An error response is `{"code", "message"}`. Errors a client is expected to act on also carry `details`, an object with at least `reason`: the refusals of `POST /v1/auth/accounts/deploy` above, and the not-deployed error of `create` and `signature/request`. Tell them apart by `details.reason`, not by the message. Every other error is answered as before.
+
+#### `getNetworkConfig`
+
+`sponsorships.deployment` tells a wallet, before it registers, whether its factory will be sponsored:
+
+```json
+"sponsorships": {"execution": {"enabled": false}, "finalization": {"enabled": false}, "deployment": {"enabled": true, "factories": ["0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67"], "requireGuardian": true, "rateLimit": {"maxPerTarget": 2, "maxTotal": 50, "period": 86400}}}
+```
+
+`enabled` is the configured switch, and `false` once Multicall3 is known to be missing on the network (no RPC call is made). Disabled, it is `{"enabled": false}`. `factories` are checksummed; `period` is in seconds; `rateLimit` is absent without one.
+
+**Wallets.** Read `sponsorships.deployment.factories` before choosing a factory: init data with another factory is never deployed by the service. Poll the `GET` (or `eth_getCode`) after asking; a `pending` answer can take minutes. The service deploys exactly the stored call, so whatever it installs (the guardian among it) is what the account gets.
+
+**Operators.**
+
+* Fund the paying signer and watch its balance: a request it cannot pay for is refused with a 503 and an error line (`sponsored deployment signer underfunded`, with the address, the balance and the estimated cost).
+* Use a dedicated signer. It shares a transaction queue with any execution or finalization signer of the same `id` on the network, and a stuck deployment delays what is queued behind it.
+* **List only factories you know, whose result does not depend on the caller: the service's key calls every listed factory with calldata the registrant chose.** The factory fixes the contract that is called, not the singleton or the initializer inside the call, which run arbitrary code (the usual way to install the guardian is a delegate call from Safe's `setup()`). What bounds the cost is `maxGas` (enforced by the chain executor on the transaction, whatever the estimate said), three attempts per account, the limits and the token. Before paying, the service simulates the deployment again, and calls the factory from the paying signer: a factory that answers another address for that sender is refused. A factory whose address depends on its caller in a way the answer does not show is caught after mining (`no-code`), after one paid attempt.
+* Someone who deploys the account between the estimate and mining makes the transaction revert on the address collision, using most of its gas: that is one of the account's attempts.
+* The limits count accounts, failures included.
+* The service is single-instance: the claim is in the database, but the queue is in memory, and at boot every deployment still pending from the previous run is checked: deployed if the account has code, else failed as `interrupted` (log line `orphaned sponsored deployments released`, with the counts).
+* Accounts registered while no init data was kept cannot be deployed by the service; there is no backfill.
+* Deploying puts the owner set on chain earlier than the user would have; the request needs a verified, registered target.
+
+The log lines (`component: "sponsored-deployment"`) are `sponsored deployment requested`, `refused`, `limit reached`, `signer underfunded`, `confirmed`, `found deployed`, `failed`, `left no code` and `orphaned sponsored deployments released`. They carry the deployment's id, the account, the chain, the signer id, the token's `verificationId`, the attempt and the outcome; never `_factory`, `_factoryData`, the target or the token.
+
+**Migrating a deployment:** apply the database migrations (`bunx prisma migrate deploy`): they add the `SponsoredDeployment` table.
 
 ## Verifying an email address or phone number
 
-A client can prove that the user controls an email address or phone number once, with a one-time code, and get a short-lived `verifiedTargetToken`. The token then replaces the second code of three requests: listing the accounts registered with the target, registering it with the guardian, and subscribing it to alerts. No wallet signature is needed to verify a target; registering and subscribing still need theirs.
+A client can prove that the user controls an email address or phone number once, with a one-time code, and get a short-lived `verifiedTargetToken`. The token then replaces the second code of three requests: listing the accounts registered with the target, registering it with the guardian, and subscribing it to alerts. It also asks for the [sponsored deployment](#sponsored-deployment-of-undeployed-accounts) of an account registered with the target. No wallet signature is needed to verify a target; registering and subscribing still need theirs.
 
 ### `POST /v1/auth/verification/request`
 
@@ -366,7 +494,7 @@ The usual body plus `"verifiedTargetToken": "<token>"`. The subscription is crea
 
 The token is never accepted by the recovery endpoints: `POST /v1/auth/signature/request` always sends codes of its own, and a token cannot delete a registration or a subscription either.
 
-The log lines are `target verification requested` (`challengeId`, `channel`, `reused`, and `limit`: `locked` or `capped` when nothing was sent), `target verification completed` and `target verification refused` (`challengeId`, `channel`, `statusCode` for a refusal), `verified target token refused` (`use`: `lookup`, `register` or `subscribe`, `reason`: `unknown`, `expired` or `mismatch`, `verificationId` when the token was found), `account lookup completed` (`verificationId`, `channel`, `accountCount`), `auth registration created` (`registrationId`, `account`, `chainId`, `channel`, `verification`: `token` or `otp`, and for a token `verificationId` and `accountDeployed`; written by `POST /v1/auth/submit` too) and `alert subscription created` (with `active: true`, `verification: "token"` and `verificationId` for a token). The target, the code, the token, its hash and the accounts found are never logged.
+The log lines are `target verification requested` (`challengeId`, `channel`, `reused`, and `limit`: `locked` or `capped` when nothing was sent), `target verification completed` and `target verification refused` (`challengeId`, `channel`, `statusCode` for a refusal), `verified target token refused` (`use`: `lookup`, `register`, `subscribe` or `deploy`, `reason`: `unknown`, `expired` or `mismatch`, `verificationId` when the token was found), `account lookup completed` (`verificationId`, `channel`, `accountCount`), `auth registration created` (`registrationId`, `account`, `chainId`, `channel`, `verification`: `token` or `otp`, and for a token `verificationId` and `accountDeployed`; written by `POST /v1/auth/submit` too) and `alert subscription created` (with `active: true`, `verification: "token"` and `verificationId` for a token). The target, the code, the token, its hash and the accounts found are never logged.
 
 **Operators: sending a code to any target costs money.** `POST /v1/auth/verification/request` needs no signature, so one request makes the service send a message. Each target gets at most 10 codes a day, but rotating targets is only bounded by `options.rateLimit` (per IP, over all routes), as it already is for `register` and `subscribe`. For SMS this is the pattern of SMS pumping. Restrict the destination countries at the SMS provider (Twilio's geo permissions), turn on its fraud protection and usage alerts, set `options.rateLimit` with this endpoint in mind, limit requests per client at whatever fronts the service, and set `options.authentication` when only a backend should call the service. Behind a backend every request comes from the same IP, so the per-IP limit does not limit an end user there. For email, use a provider that handles bounces: codes sent to addresses that never asked for one hurt the sender's reputation.
 

@@ -13,6 +13,9 @@ import {
 } from "abstractionkit";
 import { SiweMessage } from 'siwe';
 import {Configuration, CounterfactualAccounts, StoreInitDataPolicy} from '../src/config/config-manager';
+import {Network} from '../src/models/network';
+import {Signers} from '../src/models/signer/signers';
+import {MULTICALL3_ADDRESS} from '../src/utils/erc6492';
 import {guardianDeployment, STAND_IN_CONTRACTS} from './guardian-deployment';
 
 //get values from .env
@@ -504,6 +507,79 @@ describe('auth (counterfactual account)', ()=>{
             expect(await storedMetadata(undeployed)).toEqual({});
             expect((await sendRegister(undeployed, target, verifiedTargetToken)).status).toBe(409);
             expect(await storedMetadata(undeployed)).toEqual(kept(undeployed));
+        });
+
+        // POST /v1/auth/accounts/deploy sends a transaction, paid by the network's deployAccounts.signer: config.json must
+        // enable deployAccounts on the network, and the signer must hold funds, else the case is skipped with a message.
+        // The stand-in's "factory" is Multicall3, which the case adds to the network's factories itself (and takes out
+        // afterwards), as the cases above set storeInitData.
+        it('should deploy an undeployed account it sponsors, after which signature/request passes', async ()=>{
+            const network = Network.instances.get(chainId.toString())!;
+            const configuredDeployAccounts = network.deployAccounts;
+            if (!configuredDeployAccounts.enabled) {
+                console.log("skipped: deployAccounts is not enabled on this network in config.json");
+                return;
+            }
+            const signerAddress = await Signers.instance().getSigner(configuredDeployAccounts.signer)!.signer();
+            if ((await provider.getBalance(signerAddress)).isZero()) {
+                console.log(`skipped: the deployAccounts signer ${signerAddress} holds no funds`);
+                return;
+            }
+            network.deployAccounts = {
+                ...configuredDeployAccounts,
+                factories: [...configuredDeployAccounts.factories, MULTICALL3_ADDRESS.toLowerCase()],
+                requireGuardian: true,
+                rateLimit: undefined,
+            };
+            try {
+                const undeployed = await guardianAccount();
+                const account = undeployed.account.toLowerCase();
+                await setPolicy("with-guardian");
+                const target = newTarget();
+                const verifiedTargetToken = await verifyTarget(target);
+                expect((await sendRegister(undeployed, target, verifiedTargetToken)).status).toBe(200);
+                expect(await storedMetadata(undeployed)).toEqual(kept(undeployed));
+                expect((await networkConfig()).sponsorships.deployment).toMatchObject({enabled: true, requireGuardian: true});
+
+                const {modules} = await networkConfig();
+                const requestSignature = () => supertest(app).post('/v1/auth/signature/request').send({
+                    account: undeployed.account,
+                    newOwners: [ethers.Wallet.createRandom().address],
+                    newThreshold: 1,
+                    chainId: Number(chainId),
+                    moduleAddress: modules[0].address,
+                });
+                // before: no code, so no Safe to read, and the error says a sponsored deployment is available
+                const notDeployed = await requestSignature().expect(400);
+                expect(notDeployed.body.message).toBe(`Account ${account} is not deployed on this network (${chainId})`);
+                expect(notDeployed.body.details).toEqual({reason: "account-not-deployed", sponsoredDeployment: true});
+
+                const deploy = () => supertest(app).post('/v1/auth/accounts/deploy')
+                    .send({account: undeployed.account, chainId: Number(chainId), verifiedTargetToken});
+                const requested = await deploy().expect(202);
+                expect(requested.body).toEqual({account, chainId: Number(chainId), status: "pending"});
+                expect(requested.headers["cache-control"]).toBe("no-store");
+
+                // the status read, until the executor's outcome is in
+                const deadline = Date.now() + 10 * 60 * 1000;
+                let deployment: Record<string, unknown>;
+                for (;;) {
+                    deployment = (await supertest(app).get('/v1/auth/accounts/deployment')
+                        .query({account: undeployed.account, chainId: Number(chainId)}).expect(200)).body;
+                    if (deployment.status !== "pending" || Date.now() > deadline) break;
+                    await new Promise((resolve) => setTimeout(resolve, 5000));
+                }
+                expect(deployment).toMatchObject({account, chainId: Number(chainId), status: "deployed", attempts: 1});
+                expect(deployment.transactionHash).toMatch(/^0x[0-9a-f]{64}$/);
+                expect(await provider.getCode(undeployed.account)).not.toBe("0x");
+
+                // after: a Safe with the guardian on the module
+                expect((await requestSignature().expect(200)).body.requestId).toBeDefined();
+                expect((await deploy().expect(200)).body)
+                    .toEqual({account, chainId: Number(chainId), status: "deployed", transactionHash: deployment.transactionHash});
+            } finally {
+                network.deployAccounts = configuredDeployAccounts;
+            }
         });
     });
 

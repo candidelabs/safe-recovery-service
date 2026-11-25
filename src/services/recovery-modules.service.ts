@@ -5,7 +5,9 @@ import {RecoveryModule} from "../models/recovery-module";
 import {prisma} from "../config/prisma-client";
 import {ApiError} from "../utils/error";
 import {getSafeInstance} from "../utils/contract-source";
+import {hasCode} from "../utils/erc6492";
 import logger from "../utils/logger";
+import {sponsoredDeploymentAvailable} from "./sponsored-deployment.service";
 
 const log = logger.child({ component: "recovery-modules" });
 
@@ -99,6 +101,29 @@ export const assignLegacyRequestRows = async (network: Network): Promise<void> =
   }
 };
 
+// Why an account did not answer isModuleEnabled: it has no code (not deployed yet), which the client can tell apart by
+// details.reason and fix with a sponsored deployment when details.sponsoredDeployment is true (POST
+// /v1/auth/accounts/deploy); or it has code that is not a Safe, or the code read failed, both answered as before. Read
+// only once the call failed, so the success path costs nothing more.
+const notASafeAccount = async (network: Network, account: string): Promise<ApiError> => {
+  let deployed: boolean;
+  try {
+    deployed = await hasCode(network.jsonRPCProvider, account);
+  } catch (e) {
+    deployed = true;
+  }
+  if (deployed) {
+    return new ApiError(httpStatus.BAD_REQUEST, `Account address is not a safe smart contract account`);
+  }
+  return new ApiError(
+    httpStatus.BAD_REQUEST,
+    `Account ${account} is not deployed on this network (${network.chainId})`,
+    true,
+    "",
+    {reason: "account-not-deployed", sponsoredDeployment: await sponsoredDeploymentAvailable(network, account)},
+  );
+};
+
 // Checks shared by the endpoints that start a flow (recoveries/create, auth/signature/request), whether
 // the module came from the request or the fallback: the module must be enabled on the Safe and hold its
 // guardians (a disabled module keeps its stored guardians), and the proposed owners must pass the
@@ -119,7 +144,7 @@ export const checkRecoveryModule = async (
   try {
     enabled = await getSafeInstance(account, network.jsonRPCProvider).isModuleEnabled(module.address);
   } catch (e) {
-    throw new ApiError(httpStatus.BAD_REQUEST, `Account address is not a safe smart contract account`);
+    throw await notASafeAccount(network, _account);
   }
   const moduleName = `${module.label} recovery module ${ethers.utils.getAddress(module.address)}`;
   if (!enabled){
