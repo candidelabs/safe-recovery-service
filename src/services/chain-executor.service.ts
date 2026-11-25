@@ -26,13 +26,25 @@ const log = logger.child({ component: "chain-executor" });
 
 type Fees = { maxFeePerGas: ethers.BigNumber; maxPriorityFeePerGas: ethers.BigNumber };
 
+// What a transaction is, for whoever listens to failures: the action it performs and the account it is for.
+export interface TransactionContext {
+  action: string;
+  account?: string;
+}
+
 interface TransactionData {
   to: string;
   callData: string;
   value: bigint;
   chainId: number;
   signerId: string;
-  callback?: (success: boolean, transactionHash: string) => Promise<void>;
+  // Called once with the outcome: success, the mined hash (empty when nothing was mined), and on failure the reason.
+  callback?: (success: boolean, transactionHash: string, reason?: ChainExecutorFailureReason) => Promise<void>;
+  // The highest gas limit this transaction may be sent with. Checked against the gas limit of the first broadcast of
+  // the execute phase (a replacement reuses it); above it the transaction fails as "gas-limit-exceeded", unsent.
+  maxGasLimit?: number;
+  // Copied into FailedTransaction.context.
+  context?: TransactionContext;
   // "execute" lands the payload; "cancel" tries to free its nonce after giving up on it.
   phase?: "execute" | "cancel";
   // Transient failures in the current phase (drives the backoff schedule).
@@ -64,7 +76,9 @@ export type ChainExecutorFailureReason =
   // MAX_TX_LIFETIME_MS elapsed since the first attempt.
   | "expired"
   // Mined but reverted on chain. The nonce is spent.
-  | "reverted";
+  | "reverted"
+  // Pre-broadcast: the estimated gas limit is above the transaction's maxGasLimit. Nothing is on chain.
+  | "gas-limit-exceeded";
 
 export interface FailedTransaction {
   to: string;
@@ -81,6 +95,8 @@ export interface FailedTransaction {
   // nothing was ever broadcast. False means it may still be pending and the payload may still land.
   nonceResolved: boolean;
   lastError: unknown;
+  // The transaction's context, when it was added with one.
+  context?: TransactionContext;
 }
 
 export type ChainExecutorFailureListener = (failure: FailedTransaction) => void;
@@ -111,6 +127,13 @@ class PhaseExpiredError extends Error {
       ? ` (nonce ${transactionData.nonce} may still be pending : ${transactionData.hashes.join(", ")})`
       : "";
     super(`${phase} phase exceeded its ${lifetime}ms lifetime${pending}`);
+  }
+}
+
+// Raised by an attempt whose first broadcast would need a gas limit above the transaction's maxGasLimit.
+class GasLimitExceededError extends Error {
+  constructor(gasLimit: string, maxGasLimit: number) {
+    super(`gas limit ${ethers.BigNumber.from(gasLimit).toString()} is above the transaction's maximum of ${maxGasLimit}`);
   }
 }
 
@@ -254,6 +277,11 @@ export class ChainExecutor {
       return this.giveUp(transactionData, "expired", error);
     }
 
+    // Nothing was sent, and a new estimate would only find the same: terminal.
+    if (error instanceof GasLimitExceededError) {
+      return this.giveUp(transactionData, "gas-limit-exceeded", error);
+    }
+
     if (this.phaseExpired(transactionData)) {
       // If something was broadcast, run one last settle pass so a tx that mined during
       // the backoff is still reported as success; it raises PhaseExpiredError otherwise.
@@ -393,6 +421,13 @@ export class ChainExecutor {
         transactionData.lastFees,
         transactionData.lastGasLimit
       );
+    // The cap applies to a newly estimated limit only, before anything is signed: a replacement reuses the limit of the
+    // broadcast it replaces, which passed this check.
+    const { maxGasLimit } = transactionData;
+    if (phase === "execute" && transactionData.lastGasLimit === undefined && maxGasLimit !== undefined
+      && ethers.BigNumber.from(transaction.gasLimit!).gt(maxGasLimit)) {
+      throw new GasLimitExceededError(ethers.utils.hexValue(transaction.gasLimit!), maxGasLimit);
+    }
     transactionData.lastAttemptFees = {
       maxFeePerGas: ethers.BigNumber.from(transaction.maxFeePerGas),
       maxPriorityFeePerGas: ethers.BigNumber.from(transaction.maxPriorityFeePerGas),
@@ -508,6 +543,7 @@ export class ChainExecutor {
           hashes: transactionData.hashes,
           nonceResolved,
           lastError: error,
+          context: transactionData.context,
         });
       } catch (listenerError) {
         log.error(
@@ -516,15 +552,20 @@ export class ChainExecutor {
         );
       }
     }
-    this.safeCallback(transactionData, false, transactionHash);
+    this.safeCallback(transactionData, false, transactionHash, reason);
   }
 
   // Invokes the callback, swallowing any throw/rejection so the lock isn't left dangling.
-  private safeCallback(transactionData: TransactionData, success: boolean, transactionHash: string): void {
+  private safeCallback(
+    transactionData: TransactionData,
+    success: boolean,
+    transactionHash: string,
+    reason?: ChainExecutorFailureReason
+  ): void {
     if (transactionData.callback === undefined) return;
     const context = { chainId: transactionData.chainId, signerId: transactionData.signerId, success };
     try {
-      void Promise.resolve(transactionData.callback(success, transactionHash)).catch(
+      void Promise.resolve(transactionData.callback(success, transactionHash, reason)).catch(
         (callbackError) => log.error({ err: callbackError, ...context }, "chain executor callback threw")
       );
     } catch (callbackError) {
