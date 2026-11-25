@@ -9,8 +9,13 @@ import {Erc6492Error, hasCode, isNodeExecutionError, SimulatedCall, SimulatedRes
 import {parseSeconds, scaleBigNumber} from "../utils/utilities";
 import {guardianSetupModule, guardianSetupReads} from "../utils/account-init-data";
 import {
+  attemptsExhausted,
   DeploymentAnswer,
   deploymentAnswer,
+  isMinedFailure,
+  SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS,
+  SPONSORED_DEPLOYMENT_CODE_READS,
+  SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES,
   deploymentProbe,
   DeploymentView,
   deploymentView,
@@ -102,14 +107,16 @@ const answerCurrent = async (account: string, chainId: number): Promise<Deployme
 
 /**
  * The deployments of a network requested since `since`, whatever their status: of one requester (its hash) when
- * given, leaving out one account's row when given (a retry of that account is not counted twice).
+ * given, leaving out one account's row when given (a retry of that account is not counted twice). `db` is the
+ * transaction of the claim when the count decides it.
  */
 export const countSponsoredDeployments = (
   chainId: number,
   since: Date,
   requester?: string,
   exceptAccount?: string,
-): Promise<number> => prisma.sponsoredDeployment.count({
+  db: Prisma.TransactionClient = prisma,
+): Promise<number> => db.sponsoredDeployment.count({
   where: {
     chainId,
     requestedAt: {gte: since},
@@ -117,6 +124,18 @@ export const countSponsoredDeployments = (
     ...(exceptAccount === undefined ? {} : {account: {not: exceptAccount.toLowerCase()}}),
   },
 });
+
+// The limits hold under parallel requests because the count that admits a deployment and its claim are made in one
+// transaction holding a per-chain Postgres advisory lock (this class, the chain id): requests for one chain, in any
+// number of processes on the database, are admitted one after the other, and a request refused for a limit writes
+// nothing. The lock is held for two counts and one write only; the chain checks run before it.
+const SPONSORED_DEPLOYMENT_LOCK_CLASS = 0x53444550;
+const CLAIM_TRANSACTION = {maxWait: 5_000, timeout: 10_000};
+
+// How settleDeployment waits between its code reads; tests replace it so that they do not sleep.
+export const settlementTiming = {
+  wait: (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)),
+};
 
 // A PENDING or FAILED row of an account that has code: someone deployed it (this service's transaction included, when
 // its outcome is not in yet). The hash of an earlier attempt did not deploy it, so none is kept.
@@ -183,7 +202,9 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
   if (step === "exhausted") {
     throw refuse(
       context, httpStatus.CONFLICT, "attempts-exhausted",
-      `The sponsored deployment of this account failed ${SPONSORED_DEPLOYMENT_MAX_ATTEMPTS} times; it will not be tried again`
+      attemptsExhausted(row!) === "mined"
+        ? `The sponsored deployment of this account failed on chain ${SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES} times; it will not be tried again`
+        : `The sponsored deployment of this account was attempted ${SPONSORED_DEPLOYMENT_MAX_ATTEMPTS} times; it will not be tried again`
     );
   }
   // 8. the init data kept at registration
@@ -196,28 +217,31 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
   if (!config.factories.includes(deployment.factory.toLowerCase())) {
     throw refuse(context, httpStatus.FORBIDDEN, "factory-not-sponsored", `The factory of this account is not sponsored on this network (${chainId})`);
   }
-  // 10. the limits: distinct accounts in the window, failed attempts included, the account asked for left out
+  // 10. the limits: distinct accounts in the window, failed attempts included, the account asked for left out. This
+  // early count spares the chain checks below; the count that admits is made again with the claim (14).
   const requester = requesterHash(channel, target);
   const {rateLimit} = config;
-  if (rateLimit) {
-    const since = new Date(now.getTime() - rateLimit.period * 1000);
-    const [targetCount, totalCount] = await Promise.all([
-      rateLimit.maxPerTarget === undefined ? 0 : countSponsoredDeployments(chainId, since, requester, account),
-      rateLimit.maxTotal === undefined ? 0 : countSponsoredDeployments(chainId, since, undefined, account),
-    ]);
-    const limit = reachedLimit(rateLimit, {target: targetCount, total: totalCount});
+  const limitAt = async (at: Date, db: Prisma.TransactionClient = prisma): Promise<"target" | "total" | undefined> => {
+    if (!rateLimit) return undefined;
+    const since = new Date(at.getTime() - rateLimit.period * 1000);
+    // one after the other: both may run in the claim's transaction
+    const targetCount = rateLimit.maxPerTarget === undefined ? 0 : await countSponsoredDeployments(chainId, since, requester, account, db);
+    const totalCount = rateLimit.maxTotal === undefined ? 0 : await countSponsoredDeployments(chainId, since, undefined, account, db);
+    return reachedLimit(rateLimit, {target: targetCount, total: totalCount});
+  };
+  const refuseForLimit = (limit: "target" | "total"): ApiError => {
     if (limit === "target") {
       log.info({ chainId, limit, verificationId }, "sponsored deployment limit reached");
-      throw refuse(
+      return refuse(
         context, httpStatus.TOO_MANY_REQUESTS, "limit-target",
-        `You are only allowed ${rateLimit.maxPerTarget} sponsored deployments every ${parseSeconds(rateLimit.period)}`
+        `You are only allowed ${rateLimit!.maxPerTarget} sponsored deployments every ${parseSeconds(rateLimit!.period)}`
       );
     }
-    if (limit === "total") {
-      log.warn({ chainId, limit, verificationId }, "sponsored deployment limit reached");
-      throw refuse(context, httpStatus.TOO_MANY_REQUESTS, "limit-total", `Sponsored deployments are used up on this network for now, try again later`);
-    }
-  }
+    log.warn({ chainId, limit, verificationId }, "sponsored deployment limit reached");
+    return refuse(context, httpStatus.TOO_MANY_REQUESTS, "limit-total", `Sponsored deployments are used up on this network for now, try again later`);
+  };
+  const earlyLimit = await limitAt(now);
+  if (earlyLimit) throw refuseForLimit(earlyLimit);
   // 11. what deploying does now, in one simulation: Safe-like code at the account, and the guardian when required
   if (!(await network.supportsCounterfactual())) {
     throw refuse(context, httpStatus.CONFLICT, "sponsorship-unavailable", unavailable(chainId));
@@ -290,31 +314,49 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
     );
     throw refuse(context, httpStatus.SERVICE_UNAVAILABLE, "sponsorship-unavailable", unavailable(chainId));
   }
-  // 14. the claim: one row per account and chain, no transaction
-  const claim = {status: "PENDING", requestedAt: now, requesterHash: requester, verificationId, signerId: config.signer};
-  let claimed: {id: string; attempt: number};
-  if (!row) {
-    try {
-      const created = await prisma.sponsoredDeployment.create({data: {account, chainId, attempts: 1, ...claim}});
-      claimed = {id: created.id, attempt: 1};
-    } catch (error) {
-      // created by another request in between
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return answerCurrent(account, chainId);
-      throw error;
+  // 14. the claim: one row per account and chain (a create, or a conditional update of the FAILED row). With limits, the
+  // count that admits and the claim are one transaction under the chain's lock, so parallel requests cannot all pass.
+  type Claim = {kind: "claimed"; id: string; attempt: number} | {kind: "lost"} | {kind: "limit"; limit: "target" | "total"};
+  const previous = row;
+  const claimIn = async (db: Prisma.TransactionClient, requestedAt: Date): Promise<Claim> => {
+    const claim = {status: "PENDING", requestedAt, requesterHash: requester, verificationId, signerId: config.signer};
+    if (!previous) {
+      const created = await db.sponsoredDeployment.create({data: {account, chainId, attempts: 1, ...claim}});
+      return {kind: "claimed", id: created.id, attempt: 1};
     }
-  } else {
-    const attempt = row.attempts + 1;
-    const {count} = await prisma.sponsoredDeployment.updateMany({
-      where: {id: row.id, status: "FAILED", attempts: row.attempts},
+    const attempt = previous.attempts + 1;
+    const {count} = await db.sponsoredDeployment.updateMany({
+      where: {id: previous.id, status: "FAILED", attempts: previous.attempts},
       data: {...claim, attempts: attempt, transactionHash: null, failureReason: null},
     });
-    if (count === 0) return answerCurrent(account, chainId);
-    claimed = {id: row.id, attempt};
+    return count === 0 ? {kind: "lost"} : {kind: "claimed", id: previous.id, attempt};
+  };
+  let claimed: Claim;
+  try {
+    claimed = !rateLimit
+      ? await claimIn(prisma, new Date())
+      : await prisma.$transaction(async (tx): Promise<Claim> => {
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(${SPONSORED_DEPLOYMENT_LOCK_CLASS}::integer, ${chainId}::integer)`;
+        const claimedAt = new Date();
+        const limit = await limitAt(claimedAt, tx);
+        return limit ? {kind: "limit", limit} : claimIn(tx, claimedAt);
+      }, CLAIM_TRANSACTION);
+  } catch (error) {
+    // created by another request in between
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return answerCurrent(account, chainId);
+    // the lock or a connection was not had in time
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2028") {
+      throw refuse(context, httpStatus.SERVICE_UNAVAILABLE, "sponsorship-unavailable", unavailable(chainId), {err: error});
+    }
+    throw error;
   }
+  if (claimed.kind === "limit") throw refuseForLimit(claimed.limit);
+  if (claimed.kind === "lost") return answerCurrent(account, chainId);
+  const admitted = claimed;
   // 15. the transaction, capped at maxGas by the executor whatever the estimate above said
   log.info(
     {
-      deploymentId: claimed.id, account, chainId, signerId: config.signer, verificationId, attempt: claimed.attempt,
+      deploymentId: admitted.id, account, chainId, signerId: config.signer, verificationId, attempt: admitted.attempt,
       ...(guardianModule ? {guardianModule} : {}),
     },
     "sponsored deployment requested"
@@ -328,16 +370,36 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
     maxGasLimit: config.maxGas,
     context: {action: "deploy", account},
     callback: (success, transactionHash, reason) =>
-      settleDeployment(network, {id: claimed.id, account, chainId, attempt: claimed.attempt}, success, transactionHash, reason),
+      settleDeployment(network, {id: admitted.id, account, chainId, attempt: admitted.attempt}, success, transactionHash, reason),
   });
   return {statusCode: httpStatus.ACCEPTED, body: {account, chainId, status: "pending"}};
 };
 
+// Whether the account has code after its deployment was mined, read up to SPONSORED_DEPLOYMENT_CODE_READS times,
+// SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS apart, until a read finds it (a load-balanced RPC can answer from a node
+// that has not imported the block yet): true as soon as one does; false when the last read still finds none;
+// undefined when the last read failed and none found code.
+const readCodeAfterMining = async (network: Network, account: string): Promise<{deployed?: boolean; err?: unknown}> => {
+  let last: {deployed?: boolean; err?: unknown} = {};
+  for (let read = 0; read < SPONSORED_DEPLOYMENT_CODE_READS; read++) {
+    if (read > 0) await settlementTiming.wait(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS);
+    try {
+      last = {deployed: await hasCode(network.jsonRPCProvider, account)};
+    } catch (error) {
+      last = {err: error};
+    }
+    if (last.deployed === true) return last;
+  }
+  return last;
+};
+
 /**
  * The executor's outcome of one attempt, written only if the row is still that attempt (PENDING, same attempts): a late
- * outcome never overwrites a newer attempt. Mined and code at the account: DEPLOYED. Mined and no code: FAILED
- * "no-code". Failed, but code at the account anyway: DEPLOYED (someone deployed it). Failed: FAILED with the reason,
- * and the mined hash of a revert.
+ * outcome never overwrites a newer attempt. Mined and code at the account: DEPLOYED. Mined and still no code after
+ * SPONSORED_DEPLOYMENT_CODE_READS reads: FAILED "no-code". Failed, but code at the account anyway: DEPLOYED (someone
+ * deployed it). Failed: FAILED with the reason, and the mined hash of a revert. A mined failure ("reverted", "no-code")
+ * also counts in minedAttempts, in the same conditional update. The executor does not wait for this, so the reads
+ * hold no queue.
  */
 export const settleDeployment = async (
   network: Network,
@@ -356,14 +418,20 @@ export const settleDeployment = async (
   };
   let deployed: boolean | undefined;
   let codeError: unknown;
-  try {
-    deployed = await hasCode(network.jsonRPCProvider, account);
-  } catch (error) {
-    codeError = error;
+  if (success) {
+    ({deployed, err: codeError} = await readCodeAfterMining(network, account));
+  } else {
+    try {
+      deployed = await hasCode(network.jsonRPCProvider, account);
+    } catch (error) {
+      codeError = error;
+    }
   }
   if (success) {
     if (deployed === false) {
-      const superseded = await update({status: "FAILED", failureReason: "no-code", transactionHash: txHash ?? null});
+      const superseded = await update({
+        status: "FAILED", failureReason: "no-code", transactionHash: txHash ?? null, minedAttempts: {increment: 1},
+      });
       log.error({ ...context, txHash, ...superseded }, "sponsored deployment left no code");
       return;
     }
@@ -382,7 +450,10 @@ export const settleDeployment = async (
     return;
   }
   const failureReason: SponsoredDeploymentFailureReason = reason ?? "retries-exhausted";
-  const superseded = await update({status: "FAILED", failureReason, transactionHash: txHash ?? null});
+  const superseded = await update({
+    status: "FAILED", failureReason, transactionHash: txHash ?? null,
+    ...(isMinedFailure(failureReason) ? {minedAttempts: {increment: 1}} : {}),
+  });
   log.warn(
     { ...context, reason: failureReason, txHash, attempt: attempt.attempt, ...(codeError ? {err: codeError} : {}), ...superseded },
     "sponsored deployment failed"

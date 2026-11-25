@@ -15,7 +15,8 @@ import type {DeployAccountsRateLimit} from "../config/config-manager";
 //   that is called; the singleton and the initializer inside the call are still the registrant's choice, and the
 //   expected way to install the guardian is a delegate call from setup(), so arbitrary code runs inside the deployment.
 //   What bounds it: the gas cap the chain executor enforces (maxGasLimit, which code that behaves differently once
-//   mined cannot game, unlike the estimate), SPONSORED_DEPLOYMENT_MAX_ATTEMPTS per account, the rate limits, and the
+//   mined cannot game, unlike the estimate), SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES (and, in all,
+//   SPONSORED_DEPLOYMENT_MAX_ATTEMPTS) per account, the rate limits, and the
 //   token.
 // - The paying key's exposure is gas, and tx.origin. A listed factory must not treat its caller specially; nothing the
 //   service's keys do relies on tx.origin. A dedicated signer keeps the blast radius and the queue apart; sharing the
@@ -27,14 +28,32 @@ import type {DeployAccountsRateLimit} from "../config/config-manager";
 //   check after mining catches the rest, after one paid attempt.
 // - Losing a race costs gas. If someone else deploys the account between the executor's estimate and mining, the
 //   factory call reverts on the CREATE2 collision and uses most of its gas limit. The executor estimates right before
-//   broadcasting, so the window is one block, and it is one of the account's attempts.
-// - Single instance. The claim is in the database (one row per account and chain), but the executor's queue, and the
-//   boot release that fails every PENDING row of a previous process, assume one process.
+//   broadcasting, so the window is one block, and it is one of the account's mined failures.
+// - Single instance. The claim (one row per account and chain) and the limits (counted and claimed under a per-chain
+//   database lock) hold across processes, but the executor's queue, and the boot release that fails every PENDING row
+//   of a previous process, assume one process.
 // - Privacy. Deploying puts the owner set on chain earlier than the user would have. The request needs a verified,
 //   registered target. Never logged: _factory, _factoryData, the target, the requester hash, the token.
 
-/** Attempts per account and chain, ever: a FAILED row after this many is not tried again. */
-export const SPONSORED_DEPLOYMENT_MAX_ATTEMPTS = 3;
+/**
+ * Attempts per account and chain, ever, whose transaction was mined and failed (SPONSORED_DEPLOYMENT_MINED_FAILURES):
+ * they spent the paying signer's gas. A FAILED row with this many is not tried again.
+ */
+export const SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES = 3;
+/**
+ * Attempts per account and chain, ever, whatever their outcome, so that a deployment that never gets mined (the
+ * process stops, the transaction expires, the estimate reverts) is not tried again forever.
+ */
+export const SPONSORED_DEPLOYMENT_MAX_ATTEMPTS = 10;
+/** The failures of an attempt whose transaction was mined; the others sent nothing that stayed on chain. */
+export const SPONSORED_DEPLOYMENT_MINED_FAILURES: readonly string[] = ["reverted", "no-code"];
+/**
+ * After a transaction is mined without reverting, the account's code is read up to this many times, this far apart,
+ * until a read finds it: behind a load-balanced RPC a read can reach a node that has not imported the block yet. Only a
+ * last read that still finds no code makes the attempt "no-code" (5 reads over 15 s).
+ */
+export const SPONSORED_DEPLOYMENT_CODE_READS = 5;
+export const SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS = 3_750;
 /**
  * A PENDING row older than this was orphaned (its process stopped): the chain executor's 2 h lifetime and its 30 min
  * cancel phase, plus a margin.
@@ -51,7 +70,7 @@ export const SPONSORED_DEPLOYMENT_FAILURE_REASONS = [
   "would-revert", "retries-exhausted", "expired", "reverted", "gas-limit-exceeded",
   // the process stopped while it was pending (found at boot, or stale)
   "interrupted",
-  // mined without reverting, and no code at the account
+  // mined without reverting, and still no code at the account after SPONSORED_DEPLOYMENT_CODE_READS reads
   "no-code",
 ] as const;
 export type SponsoredDeploymentFailureReason = typeof SPONSORED_DEPLOYMENT_FAILURE_REASONS[number];
@@ -62,7 +81,10 @@ export interface SponsoredDeploymentRow {
   account: string;
   chainId: number;
   status: string;
+  // the attempt number, the fence of every conditional update of the row
   attempts: number;
+  // of them, the attempts whose transaction was mined and failed
+  minedAttempts: number;
   transactionHash: string | null;
   failureReason: string | null;
   requestedAt: Date;
@@ -146,10 +168,11 @@ export function reachedLimit(
  * - stale: PENDING for SPONSORED_DEPLOYMENT_PENDING_MAX_MS or more (its process stopped), it fails as "interrupted"
  *   and the request goes on as a retry;
  * - retry: FAILED with attempts left;
- * - exhausted: FAILED after SPONSORED_DEPLOYMENT_MAX_ATTEMPTS.
+ * - exhausted: FAILED after SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES mined failures, or after
+ *   SPONSORED_DEPLOYMENT_MAX_ATTEMPTS attempts in all (attemptsExhausted says which).
  */
 export function nextStep(
-  row: Pick<SponsoredDeploymentRow, "status" | "attempts" | "requestedAt"> | null | undefined,
+  row: Pick<SponsoredDeploymentRow, "status" | "attempts" | "minedAttempts" | "requestedAt"> | null | undefined,
   now: Date,
 ): "create" | "answer" | "stale" | "retry" | "exhausted" {
   if (!row) return "create";
@@ -157,10 +180,20 @@ export function nextStep(
     return now.getTime() - row.requestedAt.getTime() >= SPONSORED_DEPLOYMENT_PENDING_MAX_MS ? "stale" : "answer";
   }
   if (row.status === "FAILED") {
-    return row.attempts < SPONSORED_DEPLOYMENT_MAX_ATTEMPTS ? "retry" : "exhausted";
+    return attemptsExhausted(row) === undefined ? "retry" : "exhausted";
   }
   return "answer";
 }
+
+/** Which cap an account reached: its mined failures first, then its attempts in all; undefined while it may retry. */
+export function attemptsExhausted(row: Pick<SponsoredDeploymentRow, "attempts" | "minedAttempts">): "mined" | "attempts" | undefined {
+  if (row.minedAttempts >= SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES) return "mined";
+  if (row.attempts >= SPONSORED_DEPLOYMENT_MAX_ATTEMPTS) return "attempts";
+  return undefined;
+}
+
+/** Whether an attempt that failed for this reason had its transaction mined (it counts toward the mined cap). */
+export const isMinedFailure = (reason: string): boolean => SPONSORED_DEPLOYMENT_MINED_FAILURES.includes(reason);
 
 export type DeploymentStatusView = "pending" | "deployed" | "failed";
 

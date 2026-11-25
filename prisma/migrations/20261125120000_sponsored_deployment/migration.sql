@@ -5,6 +5,7 @@ CREATE TABLE "SponsoredDeployment" (
     "chainId" INTEGER NOT NULL,
     "status" TEXT NOT NULL,
     "attempts" INTEGER NOT NULL,
+    "minedAttempts" INTEGER NOT NULL DEFAULT 0,
     "signerId" TEXT NOT NULL,
     "requesterHash" TEXT NOT NULL,
     "verificationId" TEXT NOT NULL,

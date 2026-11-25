@@ -15,16 +15,21 @@ import {AccountDeployment, Erc6492Error, MULTICALL3_ADDRESS, SimulatedCall, simu
 import {ACCOUNT_INIT_DATA_MAX_BYTES, guardianSetupModule, guardianSetupReads} from "../src/utils/account-init-data";
 import {hashVerifiedTargetToken, newVerifiedTargetToken} from "../src/utils/target-verification";
 import {
+  attemptsExhausted,
   deploymentAnswer,
   deploymentProbe,
   deploymentView,
+  isMinedFailure,
   nextStep,
   probeAnswered,
   reachedLimit,
   requesterHash,
   senderCheck,
   SPONSORED_DEPLOYMENT_GAS_FACTOR,
+  SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS,
+  SPONSORED_DEPLOYMENT_CODE_READS,
   SPONSORED_DEPLOYMENT_MAX_ATTEMPTS,
+  SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES,
   SPONSORED_DEPLOYMENT_PENDING_MAX_MS,
   SponsoredDeploymentRow,
   storedInitData,
@@ -36,6 +41,7 @@ import {
   deployAccount,
   fetchDeployment,
   releaseOrphanedDeployments,
+  settlementTiming,
   sponsoredDeploymentAvailable,
 } from "../src/services/sponsored-deployment.service";
 import {guardianDeployment, plainDeployment, SAFE_PROXY_FACTORY_1_4_1, STAND_IN_CONTRACTS} from "./guardian-deployment";
@@ -49,6 +55,10 @@ const mockTables: Record<string, any[]> = {};
 // Queued hooks: the next call of the table's method that matches first runs `before` (a write made by someone else in
 // between), then throws `error` when there is one (each entry once).
 const mockHooks: {table: string, method: string, before?: () => void, error?: Error}[] = [];
+// The advisory locks taken (their keys), and how many transactions ran. A lock taken in a transaction is held until the
+// transaction's function settles, as pg_advisory_xact_lock is until its transaction ends; another transaction asking
+// for the same key waits for it.
+const mockLocks: {keys: unknown[][], transactions: number} = {keys: [], transactions: 0};
 jest.mock("../src/config/prisma-client", () => {
   const {Prisma} = jest.requireActual("@prisma/client");
   const satisfies = (value: any, condition: any): boolean => {
@@ -83,13 +93,22 @@ jest.mock("../src/config/prisma-client", () => {
         if (keys && rows().some((row) => keys.every((key) => row[key] === data[key]))) {
           throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {code: "P2002", clientVersion: "test"});
         }
-        const row = {id: `${name}-${nextId++}`, transactionHash: null, failureReason: null, createdAt: new Date(), updatedAt: new Date(), ...data};
+        const row = {
+          id: `${name}-${nextId++}`, minedAttempts: 0, transactionHash: null, failureReason: null, createdAt: new Date(), updatedAt: new Date(),
+          ...data,
+        };
         rows().push(row);
         return row;
       },
       updateMany: async ({where, data}: any) => {
         const found = filter(where);
-        for (const row of found) Object.assign(row, data, {updatedAt: new Date()});
+        for (const row of found) {
+          for (const [key, value] of Object.entries(data)) {
+            const increment = value !== null && typeof value === "object" && !(value instanceof Date) && "increment" in value;
+            row[key] = increment ? row[key] + (value as {increment: number}).increment : value;
+          }
+          row.updatedAt = new Date();
+        }
         return {count: found.length};
       },
     };
@@ -103,7 +122,32 @@ jest.mock("../src/config/prisma-client", () => {
       return call(args);
     }]));
   };
-  return {prisma: new Proxy({}, {get: (_target, name: string) => table(name)})};
+  // key -> the end of the last transaction that asked for it
+  const lockQueue = new Map<string, Promise<void>>();
+  const $transaction = async (run: (tx: unknown) => Promise<unknown>) => {
+    mockLocks.transactions++;
+    const releases: (() => void)[] = [];
+    const tx = new Proxy({}, {
+      get: (_target, name: string) => name !== "$queryRaw" ? table(name) : async (sql: TemplateStringsArray, ...values: unknown[]) => {
+        if (!sql.join("?").includes("pg_advisory_xact_lock")) throw new Error(`unexpected raw query ${sql.join("?")}`);
+        mockLocks.keys.push(values);
+        const key = values.join(":");
+        const before = lockQueue.get(key) ?? Promise.resolve();
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        lockQueue.set(key, before.then(() => held));
+        releases.push(release);
+        await before;
+        return [{locked: 1}];
+      },
+    });
+    try {
+      return await run(tx);
+    } finally {
+      for (const release of releases) release();
+    }
+  };
+  return {prisma: new Proxy({}, {get: (_target, name: string) => name === "$transaction" ? $transaction : table(name)})};
 });
 
 // Every log line, as {level, bindings of the child logger, fields, message}.
@@ -411,20 +455,38 @@ describe("sponsored deployment rules", () => {
     const now = new Date("2026-11-25T12:00:00Z");
     const ago = (ms: number) => new Date(now.getTime() - ms);
     expect(SPONSORED_DEPLOYMENT_PENDING_MAX_MS).toBe(3 * 60 * 60 * 1000);
-    expect(SPONSORED_DEPLOYMENT_MAX_ATTEMPTS).toBe(3);
     expect(nextStep(null, now)).toBe("create");
-    expect(nextStep({status: "DEPLOYED", attempts: 3, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS * 10)}, now)).toBe("answer");
-    expect(nextStep({status: "PENDING", attempts: 1, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS - 1)}, now)).toBe("answer");
-    expect(nextStep({status: "PENDING", attempts: 1, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS)}, now)).toBe("stale");
-    expect(nextStep({status: "FAILED", attempts: 1, requestedAt: now}, now)).toBe("retry");
-    expect(nextStep({status: "FAILED", attempts: 2, requestedAt: now}, now)).toBe("retry");
-    expect(nextStep({status: "FAILED", attempts: 3, requestedAt: now}, now)).toBe("exhausted");
+    expect(nextStep({status: "DEPLOYED", attempts: 3, minedAttempts: 3, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS * 10)}, now)).toBe("answer");
+    expect(nextStep({status: "PENDING", attempts: 1, minedAttempts: 0, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS - 1)}, now)).toBe("answer");
+    expect(nextStep({status: "PENDING", attempts: 1, minedAttempts: 0, requestedAt: ago(SPONSORED_DEPLOYMENT_PENDING_MAX_MS)}, now)).toBe("stale");
+    expect(nextStep({status: "FAILED", attempts: 1, minedAttempts: 1, requestedAt: now}, now)).toBe("retry");
+    expect(nextStep({status: "FAILED", attempts: 2, minedAttempts: 2, requestedAt: now}, now)).toBe("retry");
+    expect(nextStep({status: "FAILED", attempts: 3, minedAttempts: 3, requestedAt: now}, now)).toBe("exhausted");
+  });
+
+  test("only mined failures count toward the cap of 3; every attempt counts toward the cap of 10", () => {
+    expect(SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES).toBe(3);
+    expect(SPONSORED_DEPLOYMENT_MAX_ATTEMPTS).toBe(10);
+    expect(["reverted", "no-code"].map(isMinedFailure)).toEqual([true, true]);
+    expect(["interrupted", "expired", "retries-exhausted", "would-revert", "gas-limit-exceeded"].map(isMinedFailure)).toEqual([false, false, false, false, false]);
+    const failed = (attempts: number, minedAttempts: number) => ({status: "FAILED", attempts, minedAttempts, requestedAt: new Date()});
+    // three attempts that were never mined (interrupted, expired, ...) leave the account retrying
+    expect(nextStep(failed(3, 0), new Date())).toBe("retry");
+    expect(nextStep(failed(9, 2), new Date())).toBe("retry");
+    expect(attemptsExhausted(failed(9, 2))).toBeUndefined();
+    expect(nextStep(failed(3, 3), new Date())).toBe("exhausted");
+    expect(attemptsExhausted(failed(5, 3))).toBe("mined");
+    expect(nextStep(failed(10, 0), new Date())).toBe("exhausted");
+    expect(attemptsExhausted(failed(10, 1))).toBe("attempts");
+    // the mined cap is named first when both are reached
+    expect(attemptsExhausted(failed(10, 3))).toBe("mined");
   });
 
   test("deploymentView and deploymentAnswer", () => {
     const requestedAt = new Date("2026-11-25T10:00:00Z");
     const row = (fields: Partial<SponsoredDeploymentRow>): SponsoredDeploymentRow => ({
-      id: "d", account: ACCOUNT, chainId: CHAIN_ID, status: "PENDING", attempts: 1, transactionHash: null, failureReason: null, requestedAt, ...fields,
+      id: "d", account: ACCOUNT, chainId: CHAIN_ID, status: "PENDING", attempts: 1, minedAttempts: 0, transactionHash: null, failureReason: null,
+      requestedAt, ...fields,
     });
     expect(deploymentView(row({}))).toEqual({
       account: ACCOUNT.toLowerCase(), chainId: CHAIN_ID, status: "pending", attempts: 1, requestedAt: "2026-11-25T10:00:00.000Z",
@@ -463,6 +525,8 @@ type SenderAnswer = "match" | "mismatch" | "revert" | "nothing";
 const mockChain = {
   code: new Set<string>(),
   codeFails: new Set<string>(),
+  // what the next getCode reads of an account answer, one per read, before code / codeFails apply again
+  codeReads: new Map<string, ("code" | "none" | "fail")[]>(),
   multicall3: true,
   factoryReverts: false,
   probe: {success: true, returnData: ONE},
@@ -480,6 +544,11 @@ const provider = {
   getCode: async (address: string) => {
     mockChain.calls.push({method: "getCode", params: address});
     const lower = address.toLowerCase();
+    const next = mockChain.codeReads.get(lower)?.shift();
+    if (next !== undefined) {
+      if (next === "fail") throw new Error("rpc unavailable");
+      return next === "code" ? "0x6080" : "0x";
+    }
     if (mockChain.codeFails.has(lower)) throw new Error("rpc unavailable");
     return mockChain.code.has(lower) ? "0x6080" : "0x";
   },
@@ -579,7 +648,7 @@ const refusal = async (promise: Promise<unknown>) =>
 const chainMethods = () => mockChain.calls.map((call) => call.method);
 const addRow = (account: string, fields: Record<string, unknown>) => {
   const row = {
-    id: `deployment-${++ids}`, account: account.toLowerCase(), chainId: CHAIN_ID, status: "PENDING", attempts: 1, signerId: "deployer",
+    id: `deployment-${++ids}`, account: account.toLowerCase(), chainId: CHAIN_ID, status: "PENDING", attempts: 1, minedAttempts: 0, signerId: "deployer",
     requesterHash: "other", verificationId: "other", transactionHash: null, failureReason: null, requestedAt: new Date(),
     createdAt: new Date(), updatedAt: new Date(), ...fields,
   };
@@ -587,10 +656,21 @@ const addRow = (account: string, fields: Record<string, unknown>) => {
   return row;
 };
 const DAY = 24 * 60 * 60 * 1000;
+const codeReadsOf = (account: string) =>
+  mockChain.calls.filter((call) => call.method === "getCode" && call.params.toLowerCase() === account.toLowerCase()).length;
+// settleDeployment's wait between its code reads: recorded, never slept
+const waits: number[] = [];
+settlementTiming.wait = async (ms: number) => {
+  waits.push(ms);
+};
 
 beforeEach(() => {
+  waits.length = 0;
+  mockLocks.keys.length = 0;
+  mockLocks.transactions = 0;
   Object.assign(mockChain, {
-    code: new Set<string>(), codeFails: new Set<string>(), multicall3: true, factoryReverts: false, probe: {success: true, returnData: ONE},
+    code: new Set<string>(), codeFails: new Set<string>(), codeReads: new Map(), multicall3: true, factoryReverts: false,
+    probe: {success: true, returnData: ONE},
     guardianModule: MODULE_B, sender: "match", gas: 200_000, balance: ethers.utils.parseEther("1"), calls: [],
   });
   network.deployAccounts = DEPLOY_ACCOUNTS;
@@ -714,13 +794,24 @@ describe("deployAccount, step by step", () => {
     ]);
   });
 
-  test("7. a row FAILED after the third attempt answers 409 attempts-exhausted", async () => {
+  test("7. a row FAILED after its third mined failure answers 409 attempts-exhausted", async () => {
     const {account, token} = setup();
-    addRow(account, {status: "FAILED", attempts: 3, failureReason: "reverted"});
+    addRow(account, {status: "FAILED", attempts: 4, minedAttempts: 3, failureReason: "reverted"});
     expect(await refusal(deploy(account, token))).toEqual({
-      statusCode: 409, message: "The sponsored deployment of this account failed 3 times; it will not be tried again", details: {reason: "attempts-exhausted"},
+      statusCode: 409, message: "The sponsored deployment of this account failed on chain 3 times; it will not be tried again",
+      details: {reason: "attempts-exhausted"},
     });
     expect(chainMethods()).toEqual(["getCode"]);
+    expect(enqueued).toEqual([]);
+  });
+
+  test("7. a row FAILED after its tenth attempt answers 409 attempts-exhausted, whatever its failures", async () => {
+    const {account, token} = setup();
+    addRow(account, {status: "FAILED", attempts: 10, minedAttempts: 0, failureReason: "interrupted"});
+    expect(await refusal(deploy(account, token))).toEqual({
+      statusCode: 409, message: "The sponsored deployment of this account was attempted 10 times; it will not be tried again",
+      details: {reason: "attempts-exhausted"},
+    });
     expect(enqueued).toEqual([]);
   });
 
@@ -931,16 +1022,50 @@ describe("the claim", () => {
     expect(row).toMatchObject({status: "PENDING", attempts: 2});
   });
 
-  test("each retry after a failure is the next attempt, and the fourth request is attempts-exhausted", async () => {
+  test("each retry after a mined failure is the next attempt, and after three reverted ones the fourth request is refused", async () => {
     const {account, token, verificationId} = setup();
-    for (let attempt = 1; attempt <= SPONSORED_DEPLOYMENT_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES; attempt++) {
       expect((await deploy(account, token)).statusCode).toBe(202);
       expect(rowOf(account)).toMatchObject({status: "PENDING", attempts: attempt, verificationId, transactionHash: null, failureReason: null});
       expect(lastOf(linesWith("sponsored deployment requested")).fields.attempt).toBe(attempt);
       await lastOf(enqueued).callback!(false, TX_HASH, "reverted");
-      expect(rowOf(account)).toMatchObject({status: "FAILED", attempts: attempt, failureReason: "reverted", transactionHash: TX_HASH});
+      expect(rowOf(account)).toMatchObject({
+        status: "FAILED", attempts: attempt, minedAttempts: attempt, failureReason: "reverted", transactionHash: TX_HASH,
+      });
     }
-    expect((await refusal(deploy(account, token)))?.details).toEqual({reason: "attempts-exhausted"});
+    expect(await refusal(deploy(account, token))).toMatchObject({
+      statusCode: 409, message: "The sponsored deployment of this account failed on chain 3 times; it will not be tried again",
+    });
+    expect(enqueued).toHaveLength(SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES);
+  });
+
+  test("three interrupted attempts still allow a fourth request: nothing of them was mined", async () => {
+    const {account, token} = setup();
+    // each attempt stays pending until a request finds it stale and fails it as interrupted
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      expect((await deploy(account, token)).statusCode).toBe(202);
+      expect(rowOf(account)).toMatchObject({status: "PENDING", attempts: attempt, minedAttempts: 0});
+      rowOf(account).requestedAt = new Date(Date.now() - SPONSORED_DEPLOYMENT_PENDING_MAX_MS);
+    }
+    // the fourth request fails the third attempt as interrupted, then is the fourth attempt
+    expect((await deploy(account, token)).statusCode).toBe(202);
+    expect(rowOf(account)).toMatchObject({status: "PENDING", attempts: 4, minedAttempts: 0});
+    expect(linesWith("sponsored deployment failed").map((line) => line.fields.reason)).toEqual(["interrupted", "interrupted", "interrupted"]);
+    expect(enqueued).toHaveLength(4);
+  });
+
+  test("failures that were never mined count toward the cap of 10 attempts only", async () => {
+    const {account, token} = setup();
+    const reasons = ["expired", "retries-exhausted", "would-revert", "gas-limit-exceeded"] as const;
+    for (let attempt = 1; attempt <= SPONSORED_DEPLOYMENT_MAX_ATTEMPTS; attempt++) {
+      expect((await deploy(account, token)).statusCode).toBe(202);
+      await lastOf(enqueued).callback!(false, "", reasons[attempt % reasons.length]);
+    }
+    expect(rowOf(account)).toMatchObject({status: "FAILED", attempts: 10, minedAttempts: 0});
+    expect(await refusal(deploy(account, token))).toMatchObject({
+      statusCode: 409, message: "The sponsored deployment of this account was attempted 10 times; it will not be tried again",
+      details: {reason: "attempts-exhausted"},
+    });
     expect(enqueued).toHaveLength(SPONSORED_DEPLOYMENT_MAX_ATTEMPTS);
   });
 
@@ -1009,11 +1134,60 @@ describe("the limits", () => {
     expect(enqueued).toEqual([]);
   });
 
-  test("without a rate limit nothing is counted", async () => {
+  test("without a rate limit nothing is counted, and no lock is taken", async () => {
     network.deployAccounts = {...DEPLOY_ACCOUNTS, rateLimit: undefined};
     for (let i = 0; i < 10; i++) addRow(newAccount(), {});
     const {account, token} = setup();
     expect((await deploy(account, token)).statusCode).toBe(202);
+    expect(mockLocks).toEqual({keys: [], transactions: 0});
+  });
+
+  test("with a rate limit, the count that admits and the claim are made under the chain's lock", async () => {
+    const {account, token} = setup();
+    expect((await deploy(account, token)).statusCode).toBe(202);
+    expect(mockLocks).toEqual({keys: [[0x53444550, CHAIN_ID]], transactions: 1});
+  });
+
+  // Requests for different accounts sent at once: the early counts all read the same rows, so the decision that admits
+  // must be the one made under the lock.
+  const atOnce = async (count: number, sameTarget: boolean) => {
+    // the fake factory answers for one account at a time: these requests run in parallel
+    mockChain.sender = "nothing";
+    const first = setup();
+    const accounts = [first, ...Array.from({length: count - 1}, () => setup(sameTarget ? {target: first.target} : {}))];
+    const outcomes = await Promise.all(accounts.map(({account, token}) =>
+      deployAccount(account, CHAIN_ID, token).then((answer) => answer.statusCode, (e: ApiError) => [e.statusCode, e.details?.reason])
+    ));
+    return {accounts, outcomes};
+  };
+
+  test("two accounts at once with maxTotal 1: one is queued, the other answers 429 limit-total and leaves no row", async () => {
+    network.deployAccounts = {...DEPLOY_ACCOUNTS, rateLimit: {maxTotal: 1, period: 86400}};
+    const {accounts, outcomes} = await atOnce(2, false);
+    expect(outcomes.filter((outcome) => outcome === 202)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => Array.isArray(outcome))).toEqual([[429, "limit-total"]]);
+    expect(enqueued).toHaveLength(1);
+    expect(table("sponsoredDeployment").map((row) => row.account)).toEqual([enqueued[0].context!.account]);
+    expect(accounts.filter(({account}) => rowOf(account) === undefined)).toHaveLength(1);
+    expect(linesWith("sponsored deployment limit reached")).toMatchObject([{level: "warn", fields: {limit: "total"}}]);
+    expect(mockLocks.transactions).toBe(2);
+  });
+
+  test("two accounts of one target at once with maxPerTarget 1: one is queued, the other answers 429 limit-target", async () => {
+    network.deployAccounts = {...DEPLOY_ACCOUNTS, rateLimit: {maxPerTarget: 1, period: 86400}};
+    const {outcomes} = await atOnce(2, true);
+    expect(outcomes.filter((outcome) => outcome === 202)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => Array.isArray(outcome))).toEqual([[429, "limit-target"]]);
+    expect(enqueued).toHaveLength(1);
+    expect(table("sponsoredDeployment")).toHaveLength(1);
+  });
+
+  test("five accounts at once with maxTotal 3: three are queued", async () => {
+    network.deployAccounts = {...DEPLOY_ACCOUNTS, rateLimit: {maxTotal: 3, period: 86400}};
+    const {outcomes} = await atOnce(5, false);
+    expect(outcomes.filter((outcome) => outcome === 202)).toHaveLength(3);
+    expect(enqueued).toHaveLength(3);
+    expect(table("sponsoredDeployment")).toHaveLength(3);
   });
 
   test("countSponsoredDeployments counts a chain's rows since a time, of a requester, leaving an account out", async () => {
@@ -1052,20 +1226,47 @@ describe("the outcome of an attempt", () => {
     expect((await deploy(account, token)).body).toEqual({account: account.toLowerCase(), chainId: CHAIN_ID, status: "deployed", transactionHash: TX_HASH});
   });
 
-  test("mined, and no code at the account: FAILED no-code, with an error line", async () => {
-    const {account, row, callback} = await started();
+  test("mined, and a lagging node answers 0x before the code shows: DEPLOYED with the hash", async () => {
+    const {account, callback} = await started();
+    const before = codeReadsOf(account);
+    mockChain.codeReads.set(account.toLowerCase(), ["none", "fail", "code"]);
     await callback(true, TX_HASH);
-    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", transactionHash: TX_HASH});
+    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH, failureReason: null, minedAttempts: 0});
+    expect(linesWith("sponsored deployment confirmed")).toMatchObject([{level: "info", fields: {txHash: TX_HASH}}]);
+    // the reads stop at the first that finds the code, SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS apart
+    expect(codeReadsOf(account) - before).toBe(3);
+    expect(waits).toEqual([SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS, SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS]);
+  });
+
+  test("mined, and 0x on every read: FAILED no-code, a mined failure, with an error line", async () => {
+    const {account, row, callback} = await started();
+    const before = codeReadsOf(account);
+    await callback(true, TX_HASH);
+    expect(SPONSORED_DEPLOYMENT_CODE_READS).toBe(5);
+    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS);
+    // 5 reads over 15 s
+    expect(waits).toEqual(Array(SPONSORED_DEPLOYMENT_CODE_READS - 1).fill(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS));
+    expect(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS * (SPONSORED_DEPLOYMENT_CODE_READS - 1)).toBe(15_000);
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", transactionHash: TX_HASH, minedAttempts: 1});
     expect(linesWith("sponsored deployment left no code")).toMatchObject([
       {level: "error", fields: {deploymentId: row.id, account: account.toLowerCase(), chainId: CHAIN_ID, txHash: TX_HASH}},
     ]);
   });
 
+  test("mined, reads that fail and then 0x: FAILED no-code (the last read decides)", async () => {
+    const {account, callback} = await started();
+    mockChain.codeReads.set(account.toLowerCase(), ["fail", "fail", "fail", "fail", "none"]);
+    await callback(true, TX_HASH);
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", minedAttempts: 1});
+  });
+
   test("mined, and the code cannot be read: DEPLOYED, with a warning line", async () => {
     const {account, callback} = await started();
+    const before = codeReadsOf(account);
     mockChain.codeFails.add(account.toLowerCase());
     await callback(true, TX_HASH);
-    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH});
+    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS);
+    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH, minedAttempts: 0});
     expect(linesWith("sponsored deployment confirmed without a code check")).toMatchObject([{level: "warn", fields: {txHash: TX_HASH}}]);
   });
 
@@ -1078,14 +1279,17 @@ describe("the outcome of an attempt", () => {
   });
 
   test.each([
-    ["would-revert", ""],
-    ["gas-limit-exceeded", ""],
-    ["expired", ""],
-    ["reverted", TX_HASH],
-  ] as const)("failed (%s): FAILED with the reason and the mined hash of a revert", async (reason, hash) => {
+    ["would-revert", "", 0],
+    ["gas-limit-exceeded", "", 0],
+    ["expired", "", 0],
+    ["retries-exhausted", "", 0],
+    ["reverted", TX_HASH, 1],
+  ] as const)("failed (%s): FAILED with the reason and the mined hash of a revert", async (reason, hash, minedAttempts) => {
     const {account, row, callback} = await started();
     await callback(false, hash, reason);
-    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: reason, transactionHash: hash || null});
+    // only a mined revert counts toward the mined cap; the failure path reads the code once
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: reason, transactionHash: hash || null, minedAttempts});
+    expect(waits).toEqual([]);
     expect(linesWith("sponsored deployment failed")).toEqual([{
       level: "warn", bindings: {component: "sponsored-deployment"},
       fields: {deploymentId: row.id, account: account.toLowerCase(), chainId: CHAIN_ID, reason, txHash: hash || undefined, attempt: 1},

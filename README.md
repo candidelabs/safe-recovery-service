@@ -324,7 +324,7 @@ Sent with `Cache-Control: no-store`:
 200 {"account": "0x…", "chainId": 11155111, "status": "deployed", "transactionHash": "0x…"}
 ```
 
-`account` is lower case, as in the lookup. `transactionHash` is present when this service's transaction deployed the account; an account deployed some other way answers `deployed` without it, and no deployment is recorded for it. Calling the endpoint again while a deployment is pending answers `pending` and sends nothing; calling it after a failure starts the next attempt, up to three attempts per account and chain, ever.
+`account` is lower case, as in the lookup. `transactionHash` is present when this service's transaction deployed the account; an account deployed some other way answers `deployed` without it, and no deployment is recorded for it. Calling the endpoint again while a deployment is pending answers `pending` and sends nothing; calling it after a failure starts the next attempt. An account is not tried again, on that chain, ever, after three attempts that were mined and failed (`reverted`, `no-code`: they spent the signer's gas), or after ten attempts in all (attempts that were never mined, `interrupted` or `expired` for instance, count toward these ten only).
 
 The checks run in this order, the first that matches answering; nothing is sent on a refusal, and nothing is read on chain before the account's code:
 
@@ -335,7 +335,8 @@ The checks run in this order, the first that matches answering; nothing is sent 
 | 403 | `not-registered` | `This verifiedTargetToken's target is not registered for this account on this chain` | no registration of the token's channel and target for the account on this chain |
 | 200 | | | the service deployed the account (its hash), or the account has code (then a pending or failed deployment of it is recorded as deployed) |
 | 202 | | | a deployment is pending (a pending one older than three hours is taken as interrupted, and this request makes the next attempt) |
-| 409 | `attempts-exhausted` | `The sponsored deployment of this account failed 3 times; it will not be tried again` | three attempts failed |
+| 409 | `attempts-exhausted` | `The sponsored deployment of this account failed on chain 3 times; it will not be tried again` | three attempts were mined and failed |
+| 409 | `attempts-exhausted` | `The sponsored deployment of this account was attempted 10 times; it will not be tried again` | ten attempts in all |
 | 409 | `no-init-data` | `No init data is stored for this account on this chain` | no `_factory` / `_factoryData` in the account's metadata |
 | 403 | `factory-not-sponsored` | `The factory of this account is not sponsored on this network (<chainId>)` | `_factory` is not in `deployAccounts.factories` |
 | 429 | `limit-target` | `You are only allowed <n> sponsored deployments every <period>` | the token's target reached `maxPerTarget` |
@@ -358,7 +359,7 @@ No message quotes the factory, the calldata or the target. The simulation is the
 404 {"code": 404, "message": "No sponsored deployment was requested for this account on this chain"}
 ```
 
-`status` is `pending`, `deployed` or `failed`; `transactionHash` is there once mined (for `failed`, the hash of a mined revert); `failureReason` is one of `would-revert`, `retries-exhausted`, `expired`, `reverted`, `gas-limit-exceeded`, `interrupted` (the service stopped while it was pending) and `no-code` (mined without reverting, but no code at the account). It exists because the token lives 10 minutes and a deployment can take longer, and because `eth_getCode` cannot show a failure. Anyone who knows the address can read it; it shows that a deployment was asked for through this service, its state and its hash. A client starts a new attempt with the `POST`, with a token.
+`status` is `pending`, `deployed` or `failed`; `transactionHash` is there once mined (for `failed`, the hash of a mined revert); `failureReason` is one of `would-revert`, `retries-exhausted`, `expired`, `reverted`, `gas-limit-exceeded`, `interrupted` (the service stopped while it was pending) and `no-code` (mined without reverting, but still no code at the account after five reads over 15 seconds, so that a node behind the others is not taken for a failure). `attempts` is the number of attempts so far. It exists because the token lives 10 minutes and a deployment can take longer, and because `eth_getCode` cannot show a failure. Anyone who knows the address can read it; it shows that a deployment was asked for through this service, its state and its hash. A client starts a new attempt with the `POST`, with a token.
 
 #### Limits
 
@@ -367,7 +368,7 @@ Over the rolling window `rateLimit.period`, per network:
 * `maxPerTarget`: the deployments asked for with tokens of this channel and target;
 * `maxTotal`: the deployments on the network.
 
-Both count accounts, whatever the outcome: a failed attempt keeps its slot (failures that cost gas must not be free), and the account being asked for is left out, so retrying it never counts twice. The counts are plain reads, so two requests at the limit can both pass, by one. A reached total limit is logged as a warning (`sponsored deployment limit reached`, `limit: "total"`), a per-target one at info.
+Both count accounts, whatever the outcome: a failed attempt keeps its slot (failures that cost gas must not be free), and the account being asked for is left out, so retrying it never counts twice. The count that admits a deployment and its claim are made in one database transaction holding a lock for the network (a Postgres advisory lock), so requests sent at once, to one process or several on the same database, never admit more deployments than the limits allow, and a request refused for a limit leaves nothing that counts. A first count before the chain checks refuses most requests over a limit early. A reached total limit is logged as a warning (`sponsored deployment limit reached`, `limit: "total"`), a per-target one at info.
 
 #### Errors with `details`
 
@@ -389,10 +390,10 @@ An error response is `{"code", "message"}`. Errors a client is expected to act o
 
 * Fund the paying signer and watch its balance: a request it cannot pay for is refused with a 503 and an error line (`sponsored deployment signer underfunded`, with the address, the balance and the estimated cost).
 * Use a dedicated signer. It shares a transaction queue with any execution or finalization signer of the same `id` on the network, and a stuck deployment delays what is queued behind it.
-* **List only factories you know, whose result does not depend on the caller: the service's key calls every listed factory with calldata the registrant chose.** The factory fixes the contract that is called, not the singleton or the initializer inside the call, which run arbitrary code (the usual way to install the guardian is a delegate call from Safe's `setup()`). What bounds the cost is `maxGas` (enforced by the chain executor on the transaction, whatever the estimate said), three attempts per account, the limits and the token. Before paying, the service simulates the deployment again, and calls the factory from the paying signer: a factory that answers another address for that sender is refused. A factory whose address depends on its caller in a way the answer does not show is caught after mining (`no-code`), after one paid attempt.
-* Someone who deploys the account between the estimate and mining makes the transaction revert on the address collision, using most of its gas: that is one of the account's attempts.
+* **List only factories you know, whose result does not depend on the caller: the service's key calls every listed factory with calldata the registrant chose.** The factory fixes the contract that is called, not the singleton or the initializer inside the call, which run arbitrary code (the usual way to install the guardian is a delegate call from Safe's `setup()`). What bounds the cost is `maxGas` (enforced by the chain executor on the transaction, whatever the estimate said), three mined failures per account, the limits and the token. Before paying, the service simulates the deployment again, and calls the factory from the paying signer: a factory that answers another address for that sender is refused. A factory whose address depends on its caller in a way the answer does not show is caught after mining (`no-code`), after one paid attempt.
+* Someone who deploys the account between the estimate and mining makes the transaction revert on the address collision, using most of its gas: that is one of the account's three mined failures.
 * The limits count accounts, failures included.
-* The service is single-instance: the claim is in the database, but the queue is in memory, and at boot every deployment still pending from the previous run is checked: deployed if the account has code, else failed as `interrupted` (log line `orphaned sponsored deployments released`, with the counts).
+* The service is single-instance: the claim and the limits hold across processes on one database, but the queue is in memory, and at boot every deployment still pending from the previous run is checked: deployed if the account has code, else failed as `interrupted` (log line `orphaned sponsored deployments released`, with the counts).
 * Accounts registered while no init data was kept cannot be deployed by the service; there is no backfill.
 * Deploying puts the owner set on chain earlier than the user would have; the request needs a verified, registered target.
 

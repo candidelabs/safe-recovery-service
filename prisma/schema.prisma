@@ -119,15 +119,18 @@ model AuthRegistrationLogs {
 // A deployment of an undeployed account that the service pays for (POST /v1/auth/accounts/deploy), sent from the
 // init data kept at registration. One row per account (lower case) and chain: the unique index is the claim that
 // keeps two requests from sending the deployment twice. status: PENDING (queued or broadcast), DEPLOYED, FAILED
-// (failureReason says why; a later request may try again, up to three attempts). requestedAt is the time of the
-// latest attempt, which the limits count. requesterHash is the SHA-256 of the channel and target whose token asked
-// last, for the per-target limit: the target itself is not stored here, and the row outlives the registration.
+// (failureReason says why; a later request may try again). attempts is the attempt number, and the fence of every
+// conditional update of the row; minedAttempts counts the attempts whose transaction was mined and failed (reverted,
+// no code left): three of those, or ten attempts in all, and the account is not tried again. requestedAt is the time
+// of the latest attempt, which the limits count. requesterHash is the SHA-256 of the channel and target whose token
+// asked last, for the per-target limit: the target itself is not stored here, and the row outlives the registration.
 model SponsoredDeployment {
   id              String   @id @default(uuid())
   account         String
   chainId         Int
   status          String
   attempts        Int
+  minedAttempts   Int      @default(0)
   signerId        String
   requesterHash   String
   verificationId  String
