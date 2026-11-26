@@ -59,6 +59,9 @@ const mockHooks: {table: string, method: string, before?: () => void, error?: Er
 // transaction's function settles, as pg_advisory_xact_lock is until its transaction ends; another transaction asking
 // for the same key waits for it.
 const mockLocks: {keys: unknown[][], transactions: number} = {keys: [], transactions: 0};
+// The options each transaction was opened with. The fake cannot model snapshots or isolation levels, so asserting them
+// only guards the option against being dropped.
+const mockTransactionOptions: unknown[] = [];
 jest.mock("../src/config/prisma-client", () => {
   const {Prisma} = jest.requireActual("@prisma/client");
   const satisfies = (value: any, condition: any): boolean => {
@@ -124,8 +127,9 @@ jest.mock("../src/config/prisma-client", () => {
   };
   // key -> the end of the last transaction that asked for it
   const lockQueue = new Map<string, Promise<void>>();
-  const $transaction = async (run: (tx: unknown) => Promise<unknown>) => {
+  const $transaction = async (run: (tx: unknown) => Promise<unknown>, options?: unknown) => {
     mockLocks.transactions++;
+    mockTransactionOptions.push(options);
     const releases: (() => void)[] = [];
     const tx = new Proxy({}, {
       get: (_target, name: string) => name !== "$queryRaw" ? table(name) : async (sql: TemplateStringsArray, ...values: unknown[]) => {
@@ -668,6 +672,7 @@ beforeEach(() => {
   waits.length = 0;
   mockLocks.keys.length = 0;
   mockLocks.transactions = 0;
+  mockTransactionOptions.length = 0;
   Object.assign(mockChain, {
     code: new Set<string>(), codeFails: new Set<string>(), codeReads: new Map(), multicall3: true, factoryReverts: false,
     probe: {success: true, returnData: ONE},
@@ -1146,6 +1151,9 @@ describe("the limits", () => {
     const {account, token} = setup();
     expect((await deploy(account, token)).statusCode).toBe(202);
     expect(mockLocks).toEqual({keys: [[0x53444550, CHAIN_ID]], transactions: 1});
+    // pinned to READ COMMITTED: a higher level would take the snapshot before the lock is granted. The fake cannot model
+    // snapshots, so this only guards the option against being dropped.
+    expect(mockTransactionOptions).toEqual([expect.objectContaining({isolationLevel: "ReadCommitted"})]);
   });
 
   // Requests for different accounts sent at once: the early counts all read the same rows, so the decision that admits

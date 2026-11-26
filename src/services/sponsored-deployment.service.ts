@@ -129,8 +129,12 @@ export const countSponsoredDeployments = (
 // transaction holding a per-chain Postgres advisory lock (this class, the chain id): requests for one chain, in any
 // number of processes on the database, are admitted one after the other, and a request refused for a limit writes
 // nothing. The lock is held for two counts and one write only; the chain checks run before it.
+// The transaction is pinned to READ COMMITTED, whatever the database's default: each statement after the lock must see
+// what the previous holder committed. Under REPEATABLE READ or SERIALIZABLE the snapshot is taken by the first
+// statement, the lock itself, before the lock is granted, so the count misses the previous holder's claim and the
+// limits fail. A "stronger" level is what breaks them.
 const SPONSORED_DEPLOYMENT_LOCK_CLASS = 0x53444550;
-const CLAIM_TRANSACTION = {maxWait: 5_000, timeout: 10_000};
+const CLAIM_TRANSACTION = {maxWait: 5_000, timeout: 10_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted};
 
 // How settleDeployment waits between its code reads; tests replace it so that they do not sleep.
 export const settlementTiming = {
