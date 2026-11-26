@@ -28,6 +28,8 @@ import {
   SPONSORED_DEPLOYMENT_GAS_FACTOR,
   SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS,
   SPONSORED_DEPLOYMENT_CODE_READS,
+  SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS,
+  SPONSORED_DEPLOYMENT_CODE_RECHECKS,
   SPONSORED_DEPLOYMENT_MAX_ATTEMPTS,
   SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES,
   SPONSORED_DEPLOYMENT_PENDING_MAX_MS,
@@ -473,6 +475,8 @@ describe("sponsored deployment rules", () => {
     expect(SPONSORED_DEPLOYMENT_MAX_ATTEMPTS).toBe(10);
     expect(["reverted", "no-code"].map(isMinedFailure)).toEqual([true, true]);
     expect(["interrupted", "expired", "retries-exhausted", "would-revert", "gas-limit-exceeded"].map(isMinedFailure)).toEqual([false, false, false, false, false]);
+    // mined without reverting, its code never read: not known to have failed
+    expect(isMinedFailure("unconfirmed")).toBe(false);
     const failed = (attempts: number, minedAttempts: number) => ({status: "FAILED", attempts, minedAttempts, requestedAt: new Date()});
     // three attempts that were never mined (interrupted, expired, ...) leave the account retrying
     expect(nextStep(failed(3, 0), new Date())).toBe("retry");
@@ -1261,21 +1265,96 @@ describe("the outcome of an attempt", () => {
     ]);
   });
 
-  test("mined, reads that fail and then 0x: FAILED no-code (the last read decides)", async () => {
+  // A definite 0x beats a failed read: no read found code and one answered 0x, in whatever order.
+  test.each([
+    ["reads that fail and then 0x", ["fail", "fail", "fail", "fail", "none"]],
+    ["0x and then a read that fails", ["none", "none", "none", "none", "fail"]],
+  ] as const)("mined, %s: FAILED no-code, a mined failure", async (_case, reads) => {
     const {account, callback} = await started();
-    mockChain.codeReads.set(account.toLowerCase(), ["fail", "fail", "fail", "fail", "none"]);
+    const before = codeReadsOf(account);
+    mockChain.codeReads.set(account.toLowerCase(), [...reads]);
     await callback(true, TX_HASH);
-    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", minedAttempts: 1});
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", transactionHash: TX_HASH, minedAttempts: 1});
+    expect(linesWith("sponsored deployment left no code")).toMatchObject([{level: "error", fields: {txHash: TX_HASH}}]);
+    // one answer is enough: no second round
+    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS);
+    expect(waits).toEqual(Array(SPONSORED_DEPLOYMENT_CODE_READS - 1).fill(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS));
   });
 
-  test("mined, and the code cannot be read: DEPLOYED, with a warning line", async () => {
+  // Every read of the first round failed: the code is read again, SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS apart,
+  // and the first read that answers decides.
+  const firstRoundFails = (): ("code" | "none" | "fail")[] => Array(SPONSORED_DEPLOYMENT_CODE_READS).fill("fail");
+  const firstRoundWaits = () => Array(SPONSORED_DEPLOYMENT_CODE_READS - 1).fill(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS);
+
+  test("mined, every read fails, then a later read finds the code: DEPLOYED with the hash", async () => {
     const {account, callback} = await started();
+    const before = codeReadsOf(account);
+    mockChain.codeReads.set(account.toLowerCase(), [...firstRoundFails(), "fail", "fail", "code"]);
+    await callback(true, TX_HASH);
+    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH, failureReason: null, minedAttempts: 0});
+    expect(linesWith("sponsored deployment confirmed")).toMatchObject([{level: "info", fields: {txHash: TX_HASH}}]);
+    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS + 3);
+    expect(waits).toEqual([...firstRoundWaits(), ...Array(3).fill(SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS)]);
+  });
+
+  test("mined, every read fails, then a later read answers 0x: FAILED no-code, a mined failure", async () => {
+    const {account, callback} = await started();
+    mockChain.codeReads.set(account.toLowerCase(), [...firstRoundFails(), "none"]);
+    await callback(true, TX_HASH);
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "no-code", transactionHash: TX_HASH, minedAttempts: 1});
+    expect(linesWith("sponsored deployment left no code")).toMatchObject([{level: "error", fields: {txHash: TX_HASH}}]);
+    expect(waits).toEqual([...firstRoundWaits(), SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS]);
+  });
+
+  // an attempt left FAILED unconfirmed; the RPC answers again afterwards
+  const unconfirmed = async () => {
+    const attempt = await started();
+    mockChain.codeFails.add(attempt.account.toLowerCase());
+    await attempt.callback(true, TX_HASH);
+    mockChain.codeFails.clear();
+    return attempt;
+  };
+
+  test("mined, and no read answers through both rounds: FAILED unconfirmed with the hash, not a mined failure", async () => {
+    const {account, row, callback} = await started();
     const before = codeReadsOf(account);
     mockChain.codeFails.add(account.toLowerCase());
     await callback(true, TX_HASH);
-    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS);
-    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH, minedAttempts: 0});
-    expect(linesWith("sponsored deployment confirmed without a code check")).toMatchObject([{level: "warn", fields: {txHash: TX_HASH}}]);
+    // 5 reads over 15 s, then 20 more over 5 minutes
+    expect([SPONSORED_DEPLOYMENT_CODE_RECHECKS, SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS]).toEqual([20, 15_000]);
+    expect(codeReadsOf(account) - before).toBe(SPONSORED_DEPLOYMENT_CODE_READS + SPONSORED_DEPLOYMENT_CODE_RECHECKS);
+    expect(waits).toEqual([...firstRoundWaits(), ...Array(SPONSORED_DEPLOYMENT_CODE_RECHECKS).fill(SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS)]);
+    expect(rowOf(account)).toMatchObject({status: "FAILED", failureReason: "unconfirmed", transactionHash: TX_HASH, minedAttempts: 0});
+    expect(linesWith("sponsored deployment mined but not confirmed")).toEqual([{
+      level: "warn", bindings: {component: "sponsored-deployment"},
+      fields: {deploymentId: row.id, account: account.toLowerCase(), chainId: CHAIN_ID, txHash: TX_HASH, err: expect.any(Error)},
+      message: "sponsored deployment mined but not confirmed",
+    }]);
+    expect(linesWith("sponsored deployment confirmed")).toEqual([]);
+    expect(linesWith("sponsored deployment confirmed without a code check")).toEqual([]);
+  });
+
+  test("after unconfirmed, a request that finds code answers 200 deployed with that hash, and the row keeps it", async () => {
+    const {account, token, row} = await unconfirmed();
+    mockLogLines.length = 0;
+    mockChain.code.add(account.toLowerCase());
+    expect(await deploy(account, token)).toEqual({
+      statusCode: 200, body: {account: account.toLowerCase(), chainId: CHAIN_ID, status: "deployed", transactionHash: TX_HASH},
+    });
+    expect(rowOf(account)).toMatchObject({status: "DEPLOYED", transactionHash: TX_HASH, failureReason: null, minedAttempts: 0});
+    expect(linesWith("sponsored deployment found deployed")).toMatchObject([{level: "info", fields: {deploymentId: row.id, txHash: TX_HASH}}]);
+    expect(enqueued).toHaveLength(1);
+    // answered from the row from now on
+    mockChain.calls.length = 0;
+    expect((await deploy(account, token)).body).toMatchObject({status: "deployed", transactionHash: TX_HASH});
+    expect(chainMethods()).toEqual([]);
+  });
+
+  test("after unconfirmed, a request that finds no code goes on as the next attempt", async () => {
+    const {account, token, row} = await unconfirmed();
+    expect(await deploy(account, token)).toEqual({statusCode: 202, body: {account: account.toLowerCase(), chainId: CHAIN_ID, status: "pending"}});
+    expect(enqueued).toHaveLength(2);
+    expect(rowOf(account)).toMatchObject({id: row.id, status: "PENDING", attempts: 2, minedAttempts: 0, transactionHash: null, failureReason: null});
   });
 
   test("failed, but the account has code (deployed by someone else): DEPLOYED, without a hash", async () => {

@@ -45,15 +45,27 @@ export const SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES = 3;
  * process stops, the transaction expires, the estimate reverts) is not tried again forever.
  */
 export const SPONSORED_DEPLOYMENT_MAX_ATTEMPTS = 10;
-/** The failures of an attempt whose transaction was mined; the others sent nothing that stayed on chain. */
+/**
+ * The failures of an attempt whose transaction was mined and failed. The others sent nothing that stayed on chain,
+ * except "unconfirmed": mined without reverting, but not known to have failed.
+ */
 export const SPONSORED_DEPLOYMENT_MINED_FAILURES: readonly string[] = ["reverted", "no-code"];
 /**
  * After a transaction is mined without reverting, the account's code is read up to this many times, this far apart,
- * until a read finds it: behind a load-balanced RPC a read can reach a node that has not imported the block yet. Only a
- * last read that still finds no code makes the attempt "no-code" (5 reads over 15 s).
+ * until a read finds it: behind a load-balanced RPC a read can reach a node that has not imported the block yet. When
+ * no read found code and at least one answered 0x, the attempt is "no-code", whatever the order of the answers and the
+ * failed reads (5 reads over 15 s).
  */
 export const SPONSORED_DEPLOYMENT_CODE_READS = 5;
 export const SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS = 3_750;
+/**
+ * When every one of those reads failed, which says nothing either way, the code is read again up to this many times,
+ * this far apart (5 minutes), and the first read that answers decides: code is deployed, 0x is "no-code" (minutes after
+ * mining, a node behind the others is no longer the likely reason). When none answers the attempt is "unconfirmed",
+ * never DEPLOYED: a DEPLOYED row is answered with no chain call, so a wrong one could never be tried again.
+ */
+export const SPONSORED_DEPLOYMENT_CODE_RECHECKS = 20;
+export const SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS = 15_000;
 /**
  * A PENDING row older than this was orphaned (its process stopped): the chain executor's 2 h lifetime and its 30 min
  * cancel phase, plus a margin.
@@ -70,8 +82,11 @@ export const SPONSORED_DEPLOYMENT_FAILURE_REASONS = [
   "would-revert", "retries-exhausted", "expired", "reverted", "gas-limit-exceeded",
   // the process stopped while it was pending (found at boot, or stale)
   "interrupted",
-  // mined without reverting, and still no code at the account after SPONSORED_DEPLOYMENT_CODE_READS reads
+  // mined without reverting, no read found code at the account and at least one answered 0x
   "no-code",
+  // mined without reverting, but no code read answered (SPONSORED_DEPLOYMENT_CODE_RECHECKS): not a mined failure; a
+  // later request reads the code first, and code found keeps this attempt's hash
+  "unconfirmed",
 ] as const;
 export type SponsoredDeploymentFailureReason = typeof SPONSORED_DEPLOYMENT_FAILURE_REASONS[number];
 

@@ -15,6 +15,8 @@ import {
   isMinedFailure,
   SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS,
   SPONSORED_DEPLOYMENT_CODE_READS,
+  SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS,
+  SPONSORED_DEPLOYMENT_CODE_RECHECKS,
   SPONSORED_DEPLOYMENT_MAX_MINED_FAILURES,
   deploymentProbe,
   DeploymentView,
@@ -142,15 +144,21 @@ export const settlementTiming = {
 };
 
 // A PENDING or FAILED row of an account that has code: someone deployed it (this service's transaction included, when
-// its outcome is not in yet). The hash of an earlier attempt did not deploy it, so none is kept.
-const markFoundDeployed = async (row: SponsoredDeploymentRow): Promise<void> => {
+// its outcome is not in yet). The hash of an earlier attempt did not deploy it, so none is kept, except after
+// "unconfirmed": that transaction was mined without reverting, only its code could not be read. Returns the hash kept.
+const markFoundDeployed = async (row: SponsoredDeploymentRow): Promise<string | undefined> => {
+  const keptHash = row.status === "FAILED" && row.failureReason === "unconfirmed" ? row.transactionHash ?? undefined : undefined;
   const {count} = await prisma.sponsoredDeployment.updateMany({
     where: {id: row.id, status: row.status, attempts: row.attempts},
-    data: {status: "DEPLOYED", transactionHash: null, failureReason: null},
+    data: {status: "DEPLOYED", transactionHash: keptHash ?? null, failureReason: null},
   });
   if (count === 1) {
-    log.info({ deploymentId: row.id, account: row.account, chainId: row.chainId }, "sponsored deployment found deployed");
+    log.info(
+      { deploymentId: row.id, account: row.account, chainId: row.chainId, ...(keptHash ? {txHash: keptHash} : {}) },
+      "sponsored deployment found deployed"
+    );
   }
+  return keptHash;
 };
 
 /**
@@ -182,8 +190,8 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
   // 5. deployed at all: the first chain call
   const provider = network.jsonRPCProvider;
   if (await hasCode(provider, account)) {
-    if (row) await markFoundDeployed(row);
-    return {statusCode: httpStatus.OK, body: {account, chainId, status: "deployed"}};
+    const transactionHash = row ? await markFoundDeployed(row) : undefined;
+    return {statusCode: httpStatus.OK, body: {account, chainId, status: "deployed", ...(transactionHash ? {transactionHash} : {})}};
   }
   // 6. pending, or stale; 7. out of attempts
   const now = new Date();
@@ -379,31 +387,48 @@ export const deployAccount = async (account: string, chainId: number, verifiedTa
   return {statusCode: httpStatus.ACCEPTED, body: {account, chainId, status: "pending"}};
 };
 
-// Whether the account has code after its deployment was mined, read up to SPONSORED_DEPLOYMENT_CODE_READS times,
-// SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS apart, until a read finds it (a load-balanced RPC can answer from a node
-// that has not imported the block yet): true as soon as one does; false when the last read still finds none;
-// undefined when the last read failed and none found code.
-const readCodeAfterMining = async (network: Network, account: string): Promise<{deployed?: boolean; err?: unknown}> => {
-  let last: {deployed?: boolean; err?: unknown} = {};
+type CodeAfterMining = {outcome: "deployed"} | {outcome: "no-code"} | {outcome: "unconfirmed"; err: unknown};
+
+// What the account's code says after its deployment was mined without reverting. It is read up to
+// SPONSORED_DEPLOYMENT_CODE_READS times, SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS apart (a load-balanced RPC can
+// answer from a node that has not imported the block yet): "deployed" as soon as a read finds code; "no-code" when none
+// did and at least one answered 0x, whatever the order of the answers and the errors. When every read failed, which
+// says nothing either way, it is read again up to SPONSORED_DEPLOYMENT_CODE_RECHECKS times,
+// SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS apart, and the first read that answers decides; "unconfirmed", with the
+// last error, when none does.
+const readCodeAfterMining = async (network: Network, account: string): Promise<CodeAfterMining> => {
+  let answeredNoCode = false;
+  let lastError: unknown;
   for (let read = 0; read < SPONSORED_DEPLOYMENT_CODE_READS; read++) {
     if (read > 0) await settlementTiming.wait(SPONSORED_DEPLOYMENT_CODE_READ_INTERVAL_MS);
     try {
-      last = {deployed: await hasCode(network.jsonRPCProvider, account)};
+      if (await hasCode(network.jsonRPCProvider, account)) return {outcome: "deployed"};
+      answeredNoCode = true;
     } catch (error) {
-      last = {err: error};
+      lastError = error;
     }
-    if (last.deployed === true) return last;
   }
-  return last;
+  if (answeredNoCode) return {outcome: "no-code"};
+  for (let read = 0; read < SPONSORED_DEPLOYMENT_CODE_RECHECKS; read++) {
+    await settlementTiming.wait(SPONSORED_DEPLOYMENT_CODE_RECHECK_INTERVAL_MS);
+    try {
+      return await hasCode(network.jsonRPCProvider, account) ? {outcome: "deployed"} : {outcome: "no-code"};
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return {outcome: "unconfirmed", err: lastError};
 };
 
 /**
  * The executor's outcome of one attempt, written only if the row is still that attempt (PENDING, same attempts): a late
- * outcome never overwrites a newer attempt. Mined and code at the account: DEPLOYED. Mined and still no code after
- * SPONSORED_DEPLOYMENT_CODE_READS reads: FAILED "no-code". Failed, but code at the account anyway: DEPLOYED (someone
- * deployed it). Failed: FAILED with the reason, and the mined hash of a revert. A mined failure ("reverted", "no-code")
- * also counts in minedAttempts, in the same conditional update. The executor does not wait for this, so the reads
- * hold no queue.
+ * outcome never overwrites a newer attempt. Mined, and what readCodeAfterMining finds: code, DEPLOYED; no code, FAILED
+ * "no-code"; no read answered, FAILED "unconfirmed" with the hash, never DEPLOYED (a DEPLOYED row is answered with no
+ * chain call, so a wrong one is permanent, while a FAILED one is checked again by the next request). Failed, but code at
+ * the account anyway: DEPLOYED (someone deployed it). Failed: FAILED with the reason, and the mined hash of a revert. A
+ * mined failure ("reverted", "no-code") also counts in minedAttempts, in the same conditional update. The executor does
+ * not wait for this, so the reads hold no queue; if the process stops during them, the row stays PENDING for the boot
+ * release.
  */
 export const settleDeployment = async (
   network: Network,
@@ -420,33 +445,31 @@ export const settleDeployment = async (
     // a newer attempt or the boot release took the row over: the outcome is logged, not written
     return count === 1 ? {} : {superseded: true};
   };
-  let deployed: boolean | undefined;
-  let codeError: unknown;
   if (success) {
-    ({deployed, err: codeError} = await readCodeAfterMining(network, account));
-  } else {
-    try {
-      deployed = await hasCode(network.jsonRPCProvider, account);
-    } catch (error) {
-      codeError = error;
+    const code = await readCodeAfterMining(network, account);
+    if (code.outcome === "deployed") {
+      const superseded = await update({status: "DEPLOYED", transactionHash: txHash ?? null, failureReason: null});
+      log.info({ ...context, txHash, ...superseded }, "sponsored deployment confirmed");
+      return;
     }
-  }
-  if (success) {
-    if (deployed === false) {
+    if (code.outcome === "no-code") {
       const superseded = await update({
         status: "FAILED", failureReason: "no-code", transactionHash: txHash ?? null, minedAttempts: {increment: 1},
       });
       log.error({ ...context, txHash, ...superseded }, "sponsored deployment left no code");
       return;
     }
-    // mined without reverting: deployed, even when the code cannot be read now
-    const superseded = await update({status: "DEPLOYED", transactionHash: txHash ?? null, failureReason: null});
-    if (deployed === undefined) {
-      log.warn({ ...context, txHash, err: codeError, ...superseded }, "sponsored deployment confirmed without a code check");
-    } else {
-      log.info({ ...context, txHash, ...superseded }, "sponsored deployment confirmed");
-    }
+    // no read answered: not a mined failure, since an error is no evidence either way
+    const superseded = await update({status: "FAILED", failureReason: "unconfirmed", transactionHash: txHash ?? null});
+    log.warn({ ...context, txHash, err: code.err, ...superseded }, "sponsored deployment mined but not confirmed");
     return;
+  }
+  let deployed: boolean | undefined;
+  let codeError: unknown;
+  try {
+    deployed = await hasCode(network.jsonRPCProvider, account);
+  } catch (error) {
+    codeError = error;
   }
   if (deployed === true) {
     const superseded = await update({status: "DEPLOYED", transactionHash: null, failureReason: null});
